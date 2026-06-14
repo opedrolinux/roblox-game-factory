@@ -1,0 +1,28 @@
+# Build artifacts
+build/
+*.rbxl
+*.rbxlx
+*.rbxl.lock
+
+# Wally packages (restored via `wally install`)
+Packages/
+ServerPackages/
+DevPackages/
+
+# Generated
+sourcemap.json
+
+# Secrets — NEVER commit Open Cloud keys / tokens
+.env
+.env.*
+*.key
+secrets/
+**/api-key*.txt
+
+# Worktrees created by parallel subagents
+.claude/worktrees/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log

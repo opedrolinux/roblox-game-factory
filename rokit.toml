@@ -1,0 +1,12 @@
+# Pinned toolchain for the whole factory (Rokit — 2026 standard).
+# Versions are known-good (already installed on this machine). `rokit install` in a
+# fresh clone reproduces this exact set. Every game scaffolded from core/ inherits it.
+[tools]
+rojo = "rojo-rbx/rojo@7.6.1"
+wally = "UpliftGames/wally@0.3.2"
+lune = "lune-org/lune@0.10.4"
+stylua = "JohnnyMorganz/StyLua@2.5.2"
+selene = "Kampfkarren/selene@0.31.0"
+luau-lsp = "JohnnyMorganz/luau-lsp@1.68.0"
+wally-package-types = "JohnnyMorganz/wally-package-types@1.6.2"
+rbxcloud = "Sleitnick/rbxcloud@0.17.0"
