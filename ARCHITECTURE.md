@@ -6,7 +6,7 @@ layout, the `core/` foundation, the build pipeline, and the verification tiers.
 ## Repo layout
 
 ```
-game-creator-pipeline/
+roblox-game-factory/
   rokit.toml                 # pinned toolchain for the whole factory
   FACTORY.md                 # operating model / autonomy / limits (policy)
   ARCHITECTURE.md            # this file (structure)

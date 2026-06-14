@@ -1,4 +1,4 @@
-# game-creator-pipeline
+# roblox-game-factory
 
 An autonomous **Roblox game factory** driven by Claude Code on a Max 20x subscription.
 
