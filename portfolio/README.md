@@ -26,6 +26,8 @@ here; the human reads this to decide what needs attention and what to kill or sc
   shared-resource contention rules (Studio/Open Cloud); Roblox correctness landmines (idempotent
   receipts, DataStore budgets, server-authoritative injectable clock); core analytics event taxonomy;
   per-game definition-of-done. Fence-verification set as **Phase-B gate-zero**.
+- 2026-06-14 — Published to GitHub (public): https://github.com/opedrolinux/game-creator-pipeline
+  (first commit `a1ad664`, branch `main`).
 
 ## Deferred / known gaps (on purpose, not forgotten)
 - **Asset pipeline** (manifest + backdoor-scan gate) — not needed for greybox v1; build when a game needs real assets.
