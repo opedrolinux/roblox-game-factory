@@ -28,6 +28,15 @@ here; the human reads this to decide what needs attention and what to kill or sc
   per-game definition-of-done. Fence-verification set as **Phase-B gate-zero**.
 - 2026-06-14 — Published to GitHub (public): https://github.com/opedrolinux/roblox-game-factory
   (first commit `a1ad664`, branch `main`). Renamed from `game-creator-pipeline` → `roblox-game-factory`.
+- 2026-06-15 — **Phase B1 (core spine) shipped & committed `f70f3aa`.** Contract-first foundation:
+  service framework (Start(context) + deterministic bootstrap), shared contracts (Result/Types+toView/
+  Net single pure dispatch/Config/Migrations), data layer (Store + MockStore w/ per-key FIFO lock queue
+  + injectable clock + DataService), spine security Gate, Tier-1 harness, deletable sample. **80/80
+  tests, full gauntlet green**, independently re-verified. Design rationale → `docs/CORE-DESIGN.md`.
+  Built via a 9-agent design→critique→build→verify→fix workflow. Corrected the selene claim
+  (stock roblox std does NOT ban wait/spawn/delay; ships a `roblox-fenced` overlay that does).
+  Remaining in Phase B: **B2** core modules (real SessionStore, security suite, analytics,
+  monetization/idempotent receipts, live-ops) · **B3** safety hooks + fence gate-zero · **B4** pipeline.
 
 ## Deferred / known gaps (on purpose, not forgotten)
 - **Asset pipeline** (manifest + backdoor-scan gate) — not needed for greybox v1; build when a game needs real assets.
