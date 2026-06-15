@@ -22,6 +22,9 @@ secrets/
 # Worktrees created by parallel subagents
 .claude/worktrees/
 
+# Scratch dirs from agent toolchain probing (safe to delete by hand)
+.verify_tmp/
+
 # OS / editor
 .DS_Store
 Thumbs.db

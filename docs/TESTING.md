@@ -27,10 +27,21 @@ The local loop every builder and the test agent must get green before anything a
 
 ```
 stylua --check src        # formatting
-selene src                # lint / banned APIs (wait()/spawn(), etc.)
+selene src                # lint / banned APIs (wait()/spawn()/delay() — see note below)
 rojo build <project> -o build.rbxl   # it actually compiles into a place
 lune run tests/run.luau   # Tier-1 unit tests → prints one JSON summary line
 ```
+
+> **Banned-API enforcement note (verified on the pinned selene 0.31.0).** Stock `std = "roblox"` does
+> **not** flag `wait()`/`spawn()`/`delay()` — it loads the roblox std (it correctly flags undefined
+> globals) but those three are defined and not deprecated, so they pass clean. The core therefore
+> ships a **custom std overlay** (`core/roblox-fenced.yml` — beside `core/selene.toml`; filename must
+> equal the std name; `base: roblox` with `wait`/`spawn`/`delay` marked `removed: true`, referenced as
+> `std = "roblox-fenced"`); under it those calls are selene
+> **errors** (nonzero exit), while `task.*` is clean. A Tier-1 self-test asserts the overlay actually
+> rejects a `wait()` sample, and the PreToolUse guard hook regex-denies bare `wait(`/`spawn(`/`delay(`
+> at edit time. See `docs/CORE-DESIGN.md` §0.1-D2 / §11.5 for the authoritative mechanism. The
+> shorthand "selene bans wait/spawn" throughout this doc means **selene with that overlay**.
 
 A PostToolUse hook runs StyLua + Selene on each edited file automatically and feeds failures back, so
 formatting/lint self-corrects in the same turn (see `ARCHITECTURE.md` → Safety hooks).
@@ -144,8 +155,12 @@ What it can't decide — *is it fun, does it look right* — stays your call (§
 - **Race conditions, simulated in Tier 1.** Luau is single-threaded with cooperative yields, so many
   "races" are really *async-ordering* bugs (a second request lands while the first is mid-`await`).
   The test agent reproduces these by driving the pure handler with **interleaved calls against a mock
-  store that yields**, asserting the final balance is correct exactly once. True *multi-client*
-  replication races escalate to Tier 3 (Studio multi-client test mode).
+  store that yields inside its per-key update lock**, asserting the final balance is correct exactly
+  once. The mock store implements a **per-key FIFO lock queue** (a second `update` on a key parks +
+  re-reads while the first is mid-yield), and the race test is written to be **falsifiable** — it
+  lands at the wrong sum if the lock queue is absent (a naive read→yield→write loses an update), so a
+  green test distinguishes a correct queue from a no-op (see `docs/CORE-DESIGN.md` §4.1 / §9.3). True
+  *multi-client* replication races escalate to Tier 3 (Studio multi-client test mode).
 - **Data migrations.** Every structural change to the player-data shape ships a migration; tests feed
   an old-version blob through it and assert a valid new-version blob (round-trip, no data loss).
 - **Idempotent purchases.** Tests replay the same receipt twice and assert the grant happens **exactly
