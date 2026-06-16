@@ -64,9 +64,12 @@ orchestrator session that fans out, not headless `claude -p` (which is metered �
 
 ## 4. The fence — what the factory may NEVER do autonomously
 
-Enforced at the permission layer (`deny` rules are checked first and override everything) and,
-once built, by a PreToolUse **guard hook** that regex-scans every shell command across both shells.
-The agent literally cannot do these without a human:
+Enforced in **two layers** (defense-in-depth): the permission layer (`deny` rules are checked
+first and override everything) **and** a PreToolUse **guard hook** that *parses* every shell command
+across both shells — catching chaining, substitution, wrapper indirection, and path-qualified
+executables that prefix-globs miss, while not tripping on forbidden words used as data. Built and
+adversarially verified in Phase B3 — see `docs/FENCE.md`. The agent literally cannot do these
+without a human:
 
 - **Publish / deploy** — any Open Cloud or Roblox API call, `rbxcloud`, any `lune` publish/upload
   script, any `curl`/`wget` to a roblox domain.
@@ -78,10 +81,11 @@ The agent literally cannot do these without a human:
 
 Safety nets behind the fence: per-feature commits + OneDrive version history on this folder.
 
-> **Gate-zero before any unattended bypass (Phase B).** *Verify the fence actually blocks* — run a
-> handful of denied commands (a fake publish, `git push`, a recursive delete) and confirm each is
-> refused — and build the PreToolUse guard hook. Until both are done, run supervised; do not flip on
-> full unattended bypass. An untested fence is not a fence.
+> **Gate-zero — ✅ satisfied (Phase B3).** The PreToolUse guard hook is built (`.claude/hooks/`),
+> and the fence is *verified to actually block*: a 247-case truth table (`run.luau`, part of the
+> gauntlet), three adversarial red-team rounds, and a **live** confirmation that Claude Code refused
+> a fenced command in-session. Details and honest limits: `docs/FENCE.md`. (An untested fence is not
+> a fence — so it was tested.)
 
 ## 5. Human gates — judgment the factory queues for you (does not auto-do)
 

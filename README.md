@@ -31,6 +31,8 @@ decides what to ship and what to kill.
 4. **`specs/`** — the input format. A game starts as one spec file.
 5. **`docs/LOOP-ENGINEERING.md`** — the discipline this factory is an instance of: what "loop
    engineering" is (signal vs. hype), how the factory already maps onto it, and the upgrade roadmap.
+6. **`docs/FENCE.md`** — how the autonomy fence (FACTORY.md §4) is enforced as *tested code*: the
+   two enforcement layers, the parsing guard hook, the rule catalog, and the gate-zero verification.
 
 ## Status
 

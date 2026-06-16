@@ -45,12 +45,26 @@ here; the human reads this to decide what needs attention and what to kill or sc
   into B4 (/goal outer loop, LLM-judge, portfolio-as-work-queue). Hype filtered: the engineering is real;
   the "settled new discipline" framing is marketing.
 
+- 2026-06-16 — **Phase B3 (safety hooks + fence gate-zero) shipped.** Built the PreToolUse **guard
+  hook** (`.claude/hooks/`): a pure Luau matcher (`Fence.luau`) that *parses* every Bash/PowerShell
+  command (chaining, `$()`/backtick/`(…)`/`{…}` substitution, `bash -c`/`cmd /c`/`eval`/`iex`/
+  `Start-Process`/`xargs`/runner-wrapper indirection, path-qualified `.exe`/`\` heads, quote-aware so
+  commit-message/awk-program data never false-triggers, host-parsed roblox detection, destination-aware
+  out-of-workspace writes, variable + line-continuation resolution) + a stdin adapter (`guard.luau`,
+  exit-2 block, fail-open). Plus the **PostToolUse format-lint** hook (§3 self-healing). **Two-layer
+  defense-in-depth** with the settings.json deny-globs. Verified by a machine-checkable truth table
+  (`tests/run.luau`, in the gauntlet), **three adversarial red-team rounds** (independent attacker
+  lenses + a separate referee; round 1 found 88 disagreements, round 2 caught a quote-awareness
+  regression, all real findings fixed & folded into the corpus), and a **live** in-session block of a
+  fenced command. Gate-zero ✅. Doc → `docs/FENCE.md`. Remaining in Phase B: **B2** core modules · **B4**
+  pipeline (+ the loop-engineering upgrades).
+
 ## Deferred / known gaps (on purpose, not forgotten)
 - **Asset pipeline** (manifest + backdoor-scan gate) — not needed for greybox v1; build when a game needs real assets.
 - **Secrets handling** for the Open Cloud API key — Phase C (when a key exists).
 - **IP / content-compliance pre-publish checklist** — supports the human publish gate.
 - **Soft-launch → measure → kill/scale process** — back half of the funnel, defined after the first ship.
-- **PreToolUse guard hook + fence verification** — Phase-B gate-zero (see FACTORY.md §4).
+- ~~**PreToolUse guard hook + fence verification** — Phase-B gate-zero~~ → **done (B3)**, see `docs/FENCE.md`.
 
 ## Kill/scale benchmarks (fill once we have analytics)
 - D1 retention vs. "similar experiences" benchmark
