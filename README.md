@@ -24,7 +24,8 @@ decides what to ship and what to kill.
 1. **`FACTORY.md`** — how the project works: the autonomy model, the limits (the fence),
    the human gates, the cost lanes, the parallelism model, and a game's lifecycle.
 2. **`ARCHITECTURE.md`** — the technical structure: repo layout, the `core/` foundation,
-   the build pipeline, the verification tiers.
+   the build pipeline, the verification tiers. *(See `docs/CORE-STRUCTURE.md` for the built `core/`
+   spine drawn as diagrams — file tree, request lifecycle, anti-double-spend lock flow, bootstrap.)*
 3. **`docs/TESTING.md`** — how Claude Code tests a game: the tiers, the test agent, the gates,
    and (honestly) what can't be auto-tested.
 4. **`specs/`** — the input format. A game starts as one spec file.
