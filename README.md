@@ -28,6 +28,8 @@ decides what to ship and what to kill.
 3. **`docs/TESTING.md`** — how Claude Code tests a game: the tiers, the test agent, the gates,
    and (honestly) what can't be auto-tested.
 4. **`specs/`** — the input format. A game starts as one spec file.
+5. **`docs/LOOP-ENGINEERING.md`** — the discipline this factory is an instance of: what "loop
+   engineering" is (signal vs. hype), how the factory already maps onto it, and the upgrade roadmap.
 
 ## Status
 

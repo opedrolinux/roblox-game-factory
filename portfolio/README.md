@@ -37,6 +37,13 @@ here; the human reads this to decide what needs attention and what to kill or sc
   (stock roblox std does NOT ban wait/spawn/delay; ships a `roblox-fenced` overlay that does).
   Remaining in Phase B: **B2** core modules (real SessionStore, security suite, analytics,
   monetization/idempotent receipts, live-ops) · **B3** safety hooks + fence gate-zero · **B4** pipeline.
+- 2026-06-15 — **Loop-engineering research** (9-agent, fact-checked workflow) → `docs/LOOP-ENGINEERING.md`.
+  Finding: the factory is already a loop-engineering system, ahead of most write-ups on the hard parts
+  (maker/checker split, independent verification, the fence/human-on-the-loop, worktree parallelism).
+  Real gaps: no cross-turn `/goal` outer loop w/ a fresh-model grader, no LLM-judge quality layer, no
+  automated work-discovery trigger. Research **validated the B3→B4 roadmap** and added 3 upgrades to fold
+  into B4 (/goal outer loop, LLM-judge, portfolio-as-work-queue). Hype filtered: the engineering is real;
+  the "settled new discipline" framing is marketing.
 
 ## Deferred / known gaps (on purpose, not forgotten)
 - **Asset pipeline** (manifest + backdoor-scan gate) — not needed for greybox v1; build when a game needs real assets.
