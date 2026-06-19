@@ -24,6 +24,7 @@ local services = {
 	context.data, -- DataService (constructed in Context.build; Start hooks PlayerAdded)
 	-- [B2] context.security, context.flags, context.analytics, context.monetization,
 	require(Server.services.sample.SampleService), -- [SAMPLE]
+	require(Server.services.collection.CollectionService), -- [collection-core] gather + sell
 }
 
 Bootstrap.start(services, context)

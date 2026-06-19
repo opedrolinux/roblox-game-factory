@@ -88,6 +88,8 @@ local Net = {}
 -- Stable action-name constants the spine + B2 features share (avoids typos across files).
 Net.Actions = {
 	Sample = "sample.ping", -- [SAMPLE]
+	Collect = "collect.gather", -- [collection-core] gather a nearby mote into the backpack
+	Sell = "collect.sell", -- [collection-core] sell the backpack at the refiner for Stardust
 	-- [B2] Shop = "shop.buy", Rebirth = "rebirth.do", Claim = "offline.claim",
 	-- [B2] Daily = "daily.claim", Purchase is server-driven (ProcessReceipt), not a client action.
 }
