@@ -58,7 +58,7 @@ core/
 |   |   |   |-- Clock.luau      # Clock.real/.fake; unix (persist) vs mono (rate)
 |   |   |   `-- DataService.luau# per-player session lifecycle: get/update/save + Start/Stop
 |   |   `-- services/
-|   |       `-- sample/         # [SAMPLE] deletable per new-game
+|   |       `-- sample/         # [SAMPLE] deletable per build-game
 |   |           |-- SampleService.luau # Start() registers the sample action
 |   |           `-- SampleAction.luau  # sample.ping action: validate + handler
 |   |

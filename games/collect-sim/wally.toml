@@ -1,0 +1,24 @@
+# core/wally.toml — package manifest for the reusable foundation.
+#
+# The spine is DELIBERATELY dependency-free: Tier-1 tests use mocks, and the service
+# framework + session-locked store are original (no ProfileService / Knit / Matter).
+# Dependencies are added PER GAME when a feature genuinely needs one; the foundation
+# itself runs with no external package (see docs/CORE-DESIGN.md §11.2).
+#
+# When a package is first added, also add the `Packages` node to default.project.json
+# using the verified optional path-object form (D3, §11.1):
+#   "Packages": { "$path": { "optional": "Packages" } }
+
+[package]
+name = "factory/collect-sim"
+version = "0.1.0"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+license = "MIT"
+
+[dependencies]
+# none — the spine is dependency-free. Add per game as features require.
+
+[server-dependencies]
+
+[dev-dependencies]

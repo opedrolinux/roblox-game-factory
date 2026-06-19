@@ -10,7 +10,7 @@ here; the human reads this to decide what needs attention and what to kill or sc
 
 | Game | Codename | Stage | Waiting on | Notes |
 |---|---|---|---|---|
-| Collect Simulator | stardust | spec | structure → build engine (Phase B) | First game. Spec: `specs/collect-sim.md`. Theme proposal pending confirm. |
+| Collect Simulator | stardust | building | feature fan-out (build-game) | First game. Spec: `specs/collect-sim.md`. **Scaffolded** from core/ (2026-06-19) — gauntlet-green; features next. Theme proposal pending confirm. |
 
 ## Decision log
 - 2026-06-14 — Factory bootstrapped (Phase A: structure). Greenfield, not based on prior templates.
@@ -58,6 +58,14 @@ here; the human reads this to decide what needs attention and what to kill or sc
   regression, all real findings fixed & folded into the corpus), and a **live** in-session block of a
   fenced command. Gate-zero ✅. Doc → `docs/FENCE.md`. Remaining in Phase B: **B2** core modules · **B4**
   pipeline (+ the loop-engineering upgrades).
+
+- 2026-06-19 — **new-game scaffolder shipped (B4, piece 1).** The deterministic `new-game` skill
+  (`.claude/skills/new-game/`) forks `core/` → `games/<slug>/` with a unique Rojo project name,
+  DataStore name, wally package, and a filled per-game `CLAUDE.md`; **41-check self-test** + a 19-agent
+  adversarial review that caught & fixed a **critical store-name collision** (`game-2`/`game2` derived
+  one DataStore → player-data cross-contamination) plus 8 other findings. First game **collect-sim**
+  scaffolded green (stylua/selene/rojo + 80/80). Also added `core/CLAUDE.md` (the per-game engineering
+  contract template). Next in B4: `build-features` + `build-game`.
 
 ## Deferred / known gaps (on purpose, not forgotten)
 - **Asset pipeline** (manifest + backdoor-scan gate) — not needed for greybox v1; build when a game needs real assets.

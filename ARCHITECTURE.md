@@ -36,7 +36,7 @@ roblox-game-factory/
   .claude/
     settings.json            # the permission fence (allow/deny) + mode
     hooks/                   # self-heal (format+lint feedback) + guard (the fence enforcer) + run log
-    skills/                  # factory skills: new-game, add-feature, ...  (Phase B4 — not yet built)
+    skills/                  # factory skills: new-game (built), add-feature/... (Phase B4 — pending)
     workflows/               # build-game.js, build-features.js — orchestration (Phase B4 — not yet built)
   docs/                      # research notes, decisions
 ```

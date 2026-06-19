@@ -1,0 +1,6 @@
+base: roblox
+name: roblox-fenced
+globals:
+  wait: { removed: true }
+  spawn: { removed: true }
+  delay: { removed: true }

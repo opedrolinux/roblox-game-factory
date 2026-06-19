@@ -42,6 +42,8 @@ decides what to ship and what to kill.
 ## Status
 
 Bootstrapping. Phase A (structure) and the first half of Phase B are in place: the `core/`
-foundation (B1) and the safety hooks + autonomy fence (B3) are built, tested, and committed. Next:
-the remaining core modules (B2) and the `build-game` pipeline (B4), then the first game (Phase C).
-See `portfolio/README.md` for live status.
+foundation (B1) and the safety hooks + autonomy fence (B3) are built, tested, and committed. The B4
+build pipeline has started — the `new-game` scaffolder is built and was used to fork the first game,
+**collect-sim** (gauntlet-green). Next: the remaining core modules (B2) and the rest of the pipeline
+(B4: `build-features`, `build-game`), then the first game's features (Phase C). See
+`portfolio/README.md` for live status.

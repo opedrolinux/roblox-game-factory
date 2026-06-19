@@ -1263,8 +1263,9 @@ TODO(verify) entirely: there is no cwd dependency to verify because there is no 
 
 A deliberately tiny, clearly-marked, **deletable** feature that exercises every spine seam: the
 service framework, a Net action with a validator + rate policy, and a data read/write — with a
-passing Tier-1 test. `new-game` deletes `services/sample/`, `controllers/sample/`, the sample line in
-each bootstrap, and `sample.spec.luau`.
+passing Tier-1 test. `build-game` removes `services/sample/`, `controllers/sample/`, the sample line
+in each bootstrap, and `sample.spec.luau` as real features replace it — `new-game` keeps it so a fresh
+fork is gauntlet-green from the first commit.
 
 **Behavior:** action `"sample.ping"`. Payload `{ amount: number }` (1..100). The handler validates,
 then `DataService:update` increments `currencies.Stardust` by `amount` (concurrency-safe), and
