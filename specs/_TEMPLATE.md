@@ -43,3 +43,20 @@ data fields + (optional) a UI component. Keep them disjoint.
 
 ## Out of scope (v1)
 <explicitly what we are NOT building yet>
+
+## Success criteria (the done-condition the `/goal` grader checks)
+> Objective, **checkable** conditions derived from THIS spec — what "done" means for this game. A
+> fresh-model grader reads these against the built game + its test suite; each must be verifiable from
+> evidence the pipeline produces (a test, a wired feature, a fired analytics event), not vibes.
+- [ ] **Core loop completable end-to-end** — <name the spawn→earn→spend→progress path>; an integration
+      test traverses it and emits `loop_completed`.
+- [ ] **Economy is concurrency-safe** — no double-spend / currency dupe under interleaved or
+      spam-duplicated requests (covered by a race test).
+- [ ] **Monetization wired + idempotent** — <the launch gamepasses / dev-products> gate their features;
+      `ProcessReceipt` is idempotent (no double-grant / loss).
+- [ ] **Re-entry hooks work** — <offline earnings / daily streak / restock>: persist and claim correctly
+      across a rejoin, on server time.
+- [ ] **Core analytics events fire** — at minimum `session_start`, `session_end`, `loop_completed`,
+      `currency_earned`, `currency_spent`, `purchase` (assert they emit).
+- [ ] **No open exploit** — the adversarial pass found nothing unresolved.
+- [ ] **Gauntlet green** — stylua · selene · rojo build · lune tests, and both test gates green.

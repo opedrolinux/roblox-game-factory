@@ -158,8 +158,9 @@ A "multi-hour run is recoverable, never all-or-nothing" needs explicit mechanics
 .claude/skills/build-game/SKILL.md         # entry: validate spec, kick off the workflow
 .claude/skills/build-features/SKILL.md      # (or a workflow() sub-step of build-game)
 .claude/skills/lib/gauntlet.luau            # run stylua+selene+rojo+lune for a game dir → structured result
-.claude/skills/lib/merge.luau               # union (A) append-lists; PARK on (B) sequenced-state / non-additive
-                                            #   — ships with a union/park CORPUS in the gauntlet (the repo bar)
+.claude/skills/lib/merge.luau               # PURE classifier: MERGE if a branch only added feature files
+                                            #   (services/controllers/tests), PARK if it touched shared/spine/config
+                                            #   — 23-case corpus (the repo bar). Built 2026-06-19.
 specs/_TEMPLATE.md                          # + "## Success criteria" (load-bearing, gradable)
 specs/collect-sim.md                        # backfill its "## Success criteria"
 (build-game itself is a saved Workflow script invoked by the skill)

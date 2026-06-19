@@ -51,3 +51,19 @@ Calm, glowy, "cosmic gardener" vibe. Original — no copyrighted characters, nam
 
 ## Out of scope (v1)
 Trading, pets/companions, PvP, custom meshes/animations, group/clan systems.
+
+## Success criteria (the done-condition the `/goal` grader checks)
+- [ ] **Core loop completable end-to-end** — walk island → motes auto-collect into backpack → sell at
+      refiner for Stardust → buy an upgrade → unlock island 2 → rebirth for Prisms; an integration test
+      traverses collect→sell→upgrade→unlock→rebirth and emits `loop_completed`.
+- [ ] **Economy is concurrency-safe** — interleaved / spam-duplicated sell + buy + rebirth never
+      double-spend Stardust or dupe Prisms (race test on the shared balance).
+- [ ] **Monetization wired + idempotent** — 2x Stardust, Auto-Collect, and VIP-island gamepasses gate
+      their effects; Stardust packs + the 30-min 2x boost dev-products grant via idempotent `ProcessReceipt`.
+- [ ] **Re-entry hooks work** — offline collectors accrue capped Stardust claimed on join; daily streak
+      claims in a 20–22h window with the HUD badge; the daily rich-vein restock resets — all on server time.
+- [ ] **Core analytics events fire** — `session_start`/`session_end`, `loop_completed`,
+      `currency_earned` (sell), `currency_spent` (upgrade), `progression` (island unlock / rebirth), `purchase`.
+- [ ] **No open exploit** — adversarial pass clean (mote-value spoof, magnet-range abuse, offline-time
+      forgery, receipt replay).
+- [ ] **Gauntlet green** — stylua · selene · rojo · lune; per-feature + integration gates green.
