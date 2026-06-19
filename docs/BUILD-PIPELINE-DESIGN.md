@@ -70,11 +70,12 @@ to `src/shared` don't collide. The fence makes this load-bearing:
 - **Resolution: put worktrees INSIDE the repo.** `.gitignore` already reserves `.claude/worktrees/`.
   An in-repo worktree is a child of the repo root, so the existing containment logic holds **and** the
   `protected-config` self-defense binds correctly per-worktree — **no fence change needed.**
-- **Step-0 spike (a B4 prerequisite, §10):** before any fan-out, drive `guard.luau` with a worktree-cwd
-  payload and assert: (a) an in-worktree `src/` edit **ALLOWS**; (b) an edit to the worktree's own
-  `settings.json`/hook **BLOCKS** (`protected-config` binds per-worktree); (c) a write escaping the
-  worktree **BLOCKS**. **Named fallback** if Claude Code reports the parent `cwd`: have the guard resolve
-  root via `git rev-parse --show-toplevel` of the edited file's dir, or `cd` the agent into the worktree.
+- **Step-0 spike — ✅ VERIFIED (2026-06-19).** A real `isolation:'worktree'` agent confirmed:
+  `isolation:'worktree'` places the worktree **in-repo** at `.claude/worktrees/agent-<id>`; the agent's
+  `cwd` **is** the worktree root; an in-worktree edit **ALLOWS**; and a write to the worktree's own
+  `.claude/settings.local.json` **BLOCKS** (`protected-config` binds per-worktree). The precondition
+  holds with **no fence change and no fallback**. (Fallback if a future setup ever runs the agent with
+  the parent `cwd`: resolve root via `git rev-parse --show-toplevel`, or `cd` the agent into the worktree.)
 
 ## 5. The shared seam — two classes, not one (collision-free parallelism)
 
@@ -192,12 +193,14 @@ specs/collect-sim.md                        # backfill its "## Success criteria"
 
 Each piece verified + adversarially reviewed like `new-game` was.
 
-## 11. Open decisions (for you)
+## 11. Decisions (locked 2026-06-19)
 
-1. **Commit & integration policy** — (a)/(b)/(c)/**(d) staging-branch (recommended)**.
-2. **v1 loop-engineering scope** — `/goal` grader + light judge **in** (judge sequenced after grader),
-   portfolio auto-trigger **deferred**. Accept or adjust.
-3. **First target** — prove `build-features` on collect-sim's **"Collection core"** feature end-to-end
-   before wiring full `build-game` (recommended), or build the orchestrator first.
-4. **Decompose human checkpoint** — pause for a one-screen human OK of the feature breakdown before
-   fan-out (safer, slight stall), or run straight through (faster, trust the validation)?
+1. **Commit & integration policy → (d) staging-branch.** Builders → feature branches → union-merge
+   onto a staging branch → integration gate on staging → `main` fast-forwards only when green; the
+   human pushes `main`.
+2. **v1 loop-engineering scope → grader + light judge** (judge sequenced after the grader is proven,
+   §10 step 5); portfolio auto-work-discovery **deferred**.
+3. **First target → prove `build-features` on collect-sim's "Collection core"** end-to-end before
+   wiring full `build-game`.
+4. **Decompose → human checkpoint ON** (at least for the first builds): show the one-screen feature
+   breakdown and wait for approval before fan-out.
