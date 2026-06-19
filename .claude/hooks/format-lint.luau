@@ -22,6 +22,8 @@ local serde = require("@lune/serde")
 local process = require("@lune/process")
 local fs = require("@lune/fs")
 
+local Log = require("./lib/Log")
+
 local function done(code: number)
 	process.exit(code)
 end
@@ -42,6 +44,7 @@ if type(toolInput) ~= "table" or type(toolInput.file_path) ~= "string" then
 	done(0)
 end
 
+local cwdHint: string? = if type(payload.cwd) == "string" then payload.cwd else nil
 local filePath: string = toolInput.file_path
 if not string.match(filePath, "%.luau$") then
 	done(0) -- only Luau files
@@ -111,8 +114,20 @@ if hasSelene then
 end
 
 if #findings == 0 then
+	Log.event(
+		{ source = "format-lint", tool = payload.tool_name, file = filePath, decision = "clean" },
+		cwdHint
+	)
 	done(0)
 end
+
+Log.event({
+	source = "format-lint",
+	tool = payload.tool_name,
+	file = filePath,
+	decision = "issues",
+	findings = #findings,
+}, cwdHint)
 
 stdio.ewrite(
 	"[fence:format-lint] "

@@ -172,3 +172,23 @@ echo '{"tool_name":"Bash","tool_input":{"command":"git push"}}' | lune run .clau
 file under a `stylua.toml` tree, it runs `stylua --check` + `selene` on that file and feeds
 any findings straight back so the model fixes them in the same turn. It never blocks (the
 edit already happened) and fails open on any tooling problem.
+
+## 9. Run/audit log — observability for unattended runs
+
+A fence that runs unattended must leave a trace, or it's undebuggable by construction. Both hooks
+append **one JSON line per decision/event** to `logs/factory.jsonl` (gitignored) via the pure
+`lib/Log.luau` helper — every block/allow the guard makes and every `clean`/`issues` outcome
+format-lint reports. It's the durable record a human-on-the-loop reads to answer *"what did the
+agent do, and why was that refused?"* after the fact, and the file the **B4** build pipeline will
+write its per-run journal into (one `source` field per producer).
+
+```sh
+grep '"decision":"block"' logs/factory.jsonl     # everything the fence refused, with category + rule
+```
+
+By contract logging is **totally non-fatal**: every write is `pcall`-guarded, so a missing or
+unwritable log silently no-ops and can never change a fence decision or brick a hook — the same
+fail-open discipline as the rest of layer 2. (Lune has no `O_APPEND`; writes are read-modify-write,
+so a rare concurrent-write line-drop under heavy fan-out is an accepted trade for an audit trail.)
+Verified by `tests/log_spec.luau` (driven by the corpus runner) and confirmed live: the active hook
+logged its own session's decisions, including a `git push` block, end-to-end.

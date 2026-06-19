@@ -22,6 +22,15 @@ local serde = require("@lune/serde")
 local process = require("@lune/process")
 
 local Fence = require("./lib/Fence")
+local Log = require("./lib/Log")
+
+-- Keep log lines bounded; a command can be arbitrarily long.
+local function truncate(s: string, n: number): string
+	if #s > n then
+		return string.sub(s, 1, n) .. "...(+" .. tostring(#s - n) .. " chars)"
+	end
+	return s
+end
 
 local function allow(note: string?)
 	if note then
@@ -76,6 +85,16 @@ if toolName == "Bash" or toolName == "PowerShell" then
 	end
 	local shell: Fence.Shell = if toolName == "PowerShell" then "powershell" else "bash"
 	local decision = Fence.evaluateCommand(command, shell, root)
+	Log.event({
+		source = "guard",
+		tool = toolName,
+		shell = shell,
+		decision = if decision.blocked then "block" else "allow",
+		category = decision.category,
+		rule = decision.ruleId,
+		cmd = truncate(command, 600),
+		cwd = root,
+	}, root)
 	if decision.blocked then
 		deny(decision)
 	end
@@ -92,6 +111,15 @@ then
 		return
 	end
 	local decision = Fence.evaluatePath(filePath, root)
+	Log.event({
+		source = "guard",
+		tool = toolName,
+		decision = if decision.blocked then "block" else "allow",
+		category = decision.category,
+		rule = decision.ruleId,
+		path = filePath,
+		cwd = root,
+	}, root)
 	if decision.blocked then
 		deny(decision)
 	end

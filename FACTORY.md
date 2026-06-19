@@ -82,7 +82,7 @@ without a human:
 Safety nets behind the fence: per-feature commits + OneDrive version history on this folder.
 
 > **Gate-zero — ✅ satisfied (Phase B3).** The PreToolUse guard hook is built (`.claude/hooks/`),
-> and the fence is *verified to actually block*: a 247-case truth table (`run.luau`, part of the
+> and the fence is *verified to actually block*: a 274-case truth table (`run.luau`, part of the
 > gauntlet), three adversarial red-team rounds, and a **live** confirmation that Claude Code refused
 > a fenced command in-session. Details and honest limits: `docs/FENCE.md`. (An untested fence is not
 > a fence — so it was tested.)

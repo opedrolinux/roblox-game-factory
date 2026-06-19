@@ -73,8 +73,8 @@ hard parts** — it just has named gaps.
 | **Maker/checker split** | ✅ Strong — the test agent *never wrote the code*, authors tests from the spec; adversarial pass (`FACTORY.md` §3, `TESTING.md` §4) | Give checker agents **durable memory** across games |
 | **Independent verification** | ✅✅ Very strong — the gauntlet + per-feature & integration test gates + loop-until-dry race hunt, machine-readable (`TESTING.md` §2–5) | Add an **LLM-judge quality layer**; add a **cross-turn grader** |
 | **Stopping conditions** | ✅ Strong — stop conditions + runaway guard (`FACTORY.md` §9) | It's *doctrine*, not enforced code; add a **budget circuit-breaker** |
-| **Self-healing retry** | ✅ Strong — gauntlet feedback, bounded fix-loop, parking (`FACTORY.md` §3) | The format-and-lint hook (**B3**) isn't built yet |
-| **Human-on-the-loop** | ✅✅ Signature — the fence + human gates + push notifications (`FACTORY.md` §4–5, §9) | The **guard hook is unbuilt** — "an untested fence is not a fence" |
+| **Self-healing retry** | ✅ Strong — gauntlet feedback, bounded fix-loop, parking (`FACTORY.md` §3) | ✅ Format-lint hook shipped (B3, `1dd78eb`) — now also writes a run log |
+| **Human-on-the-loop** | ✅✅ Signature — the fence + human gates + push notifications (`FACTORY.md` §4–5, §9) | ✅ Guard hook built & gate-zero-verified (B3) — see `docs/FENCE.md` |
 | **Worktree parallelism** | ✅ Strong — 3 nested levels + union-merge (`FACTORY.md` §7) | Designed, not yet *coded* (**B4**) |
 | **Work discovery / trigger** | ❌ **Missing** — work is human-initiated (write a spec, run the pipeline) | Add scheduled/event re-entry — **portfolio as a work queue** |
 | **Cross-turn outer loop** | ❌ **Missing** — "done" is decided in-session by the orchestrator | Wrap the build in a **`/goal`-style loop** graded by a fresh model |
@@ -86,10 +86,11 @@ hard parts** — it just has named gaps.
 
 Loop engineering **validates the existing Phase B roadmap and adds three sharpeners.** In order:
 
-1. **[B3 — planned] Build & adversarially test the PreToolUse guard hook (fence gate-zero).** The fence
-   is the entire safety story for unattended autonomy, and today it's deny-rules + doctrine. Build the
-   regex guard, then fire a fake publish, `git push`, `git reset --hard`, and `rm -rf` and confirm each
-   is refused. Nothing more autonomous ships before this. *(medium)*
+1. **[B3 — ✅ DONE] Build & adversarially test the PreToolUse guard hook (fence gate-zero).** Shipped in
+   `1dd78eb`: a pure parsing guard (`.claude/hooks/lib/Fence.luau`) behind a two-layer fence, a 274-case
+   truth table, three adversarial red-team rounds, and a **live** in-session block of a fenced `rm -rf`.
+   A follow-up added a durable run/audit log (`logs/factory.jsonl`) so every fence decision and self-heal
+   event is persisted for debugging. See `docs/FENCE.md`. *(was medium)*
 2. **[B4 — planned] Build the `build-game` / `build-features` pipeline (the loop body).** Feature
    fan-out, worktree isolation, union-merge, the two gates wired together, the adversarial pass —
    currently doctrine and diagrams, not code. Without it there is no loop to engineer. *(large)*

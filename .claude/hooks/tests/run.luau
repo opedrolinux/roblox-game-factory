@@ -12,6 +12,7 @@ local stdio = require("@lune/stdio")
 
 local Fence = require("../lib/Fence")
 local corpus = require("./corpus")
+local logSpec = require("./log_spec")
 
 type Fail = { kind: string, detail: string, note: string }
 
@@ -82,6 +83,12 @@ for _, p in corpus.paths do
 	end
 end
 
+-- ── run/audit log shape (the durable trace the hooks + B4 pipeline write) ──────
+local logChecks, logFails = logSpec()
+for _, lf in logFails do
+	table.insert(fails, { kind = "LOG SHAPE", detail = lf.detail, note = lf.note })
+end
+
 -- ── report ───────────────────────────────────────────────────────────────────
 local total = blockChecked + allowChecked + pathChecked
 print(
@@ -93,12 +100,21 @@ print(
 		pathChecked
 	)
 )
+print(string.format("run/audit log: %d shape checks", logChecks))
 
 if #fails == 0 then
-	print(green(string.format("PASS — all %d cases behaved as specified.", total)))
+	print(
+		green(
+			string.format(
+				"PASS — %d corpus cases + %d log checks all behaved as specified.",
+				total,
+				logChecks
+			)
+		)
+	)
 	process.exit(0)
 else
-	print(red(string.format("FAIL — %d/%d cases wrong:", #fails, total)))
+	print(red(string.format("FAIL — %d/%d checks wrong:", #fails, total + logChecks)))
 	for _, f in fails do
 		print(red("  ✗ " .. f.kind))
 		print("      " .. f.detail)

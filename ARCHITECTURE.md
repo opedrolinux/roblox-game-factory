@@ -35,9 +35,9 @@ roblox-game-factory/
 
   .claude/
     settings.json            # the permission fence (allow/deny) + mode
-    hooks/                   # self-heal (format+lint feedback) + guard (the fence enforcer)
-    skills/                  # factory skills: new-game, add-feature, ...
-    workflows/               # build-game.js, build-features.js — the orchestration engine
+    hooks/                   # self-heal (format+lint feedback) + guard (the fence enforcer) + run log
+    skills/                  # factory skills: new-game, add-feature, ...  (Phase B4 — not yet built)
+    workflows/               # build-game.js, build-features.js — orchestration (Phase B4 — not yet built)
   docs/                      # research notes, decisions
 ```
 
@@ -165,3 +165,6 @@ human gate. Tier-2 test scripts print **one JSON line** of results so logs parse
   findings back for same-turn self-correction.
 - **`guard`** (PreToolUse) — the authoritative fence: regex-scans every Bash/PowerShell command and
   denies the §4 list (destructive, outward-facing, out-of-workspace) regardless of permission mode.
+- **run/audit log** — both hooks append one JSON line per decision/event to `logs/factory.jsonl`
+  (gitignored), the durable trace for debugging unattended runs. B4's pipeline writes its run journal
+  into the same file. See `docs/FENCE.md` §9.

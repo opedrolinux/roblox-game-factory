@@ -21,6 +21,9 @@ decides what to ship and what to kill.
 
 ## Start here
 
+> New here, or want the plain-language version first? **`docs/VISUAL-GUIDE.md`** explains the whole
+> factory with pictures and a simple analogy — read that, then dig into the precise docs below.
+
 1. **`FACTORY.md`** — how the project works: the autonomy model, the limits (the fence),
    the human gates, the cost lanes, the parallelism model, and a game's lifecycle. *(See
    `docs/FACTORY-LOOP.md` for the whole factory drawn as one self-feeding loop — spec in,
@@ -38,6 +41,7 @@ decides what to ship and what to kill.
 
 ## Status
 
-Bootstrapping. Phase A (structure) is in place. Next: build the `core/` foundation and the
-`build-game` pipeline (Phase B), then run the first game through it (Phase C). See
-`portfolio/README.md` for live status.
+Bootstrapping. Phase A (structure) and the first half of Phase B are in place: the `core/`
+foundation (B1) and the safety hooks + autonomy fence (B3) are built, tested, and committed. Next:
+the remaining core modules (B2) and the `build-game` pipeline (B4), then the first game (Phase C).
+See `portfolio/README.md` for live status.
