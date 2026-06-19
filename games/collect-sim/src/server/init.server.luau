@@ -25,6 +25,7 @@ local services = {
 	-- [B2] context.security, context.flags, context.analytics, context.monetization,
 	require(Server.services.sample.SampleService), -- [SAMPLE]
 	require(Server.services.collection.CollectionService), -- [collection-core] gather + sell
+	require(Server.services.shop.UpgradesShopService), -- [upgrades-shop] server-validated Stardust purchases
 }
 
 Bootstrap.start(services, context)

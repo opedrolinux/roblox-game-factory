@@ -12,6 +12,7 @@ local Result = {}
 
 -- Stable error codes the spine defines (B2 extends, never renames). Documented in §3.1.
 -- type/range/payload: BadPayload, BadType, OutOfRange
+-- economy: Insufficient (player cannot afford a server-priced purchase)
 -- authority: NotOwner, RateLimited, Rejected (panic flag)
 -- routing/data: UnknownAction, NoData, Internal
 -- lock contention (reserved now for the B2 SessionStore, never returned by MockStore):
@@ -20,6 +21,7 @@ Result.Codes = {
 	BadPayload = "BadPayload",
 	BadType = "BadType",
 	OutOfRange = "OutOfRange",
+	Insufficient = "Insufficient",
 	NotOwner = "NotOwner",
 	RateLimited = "RateLimited",
 	UnknownAction = "UnknownAction",

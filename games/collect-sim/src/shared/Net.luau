@@ -90,7 +90,8 @@ Net.Actions = {
 	Sample = "sample.ping", -- [SAMPLE]
 	Collect = "collect.gather", -- [collection-core] gather a nearby mote into the backpack
 	Sell = "collect.sell", -- [collection-core] sell the backpack at the refiner for Stardust
-	-- [B2] Shop = "shop.buy", Rebirth = "rebirth.do", Claim = "offline.claim",
+	BuyUpgrade = "shop.buy", -- [upgrades-shop] spend Stardust to level a collect/backpack/magnet/speed upgrade
+	-- [B2] Rebirth = "rebirth.do", Claim = "offline.claim",
 	-- [B2] Daily = "daily.claim", Purchase is server-driven (ProcessReceipt), not a client action.
 }
 
