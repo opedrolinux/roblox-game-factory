@@ -109,8 +109,11 @@ local function makeSellAction(
 			if not updated.ok then
 				-- 4. The grant FAILED: restore the captured count so the player keeps their motes.
 				-- (Add back rather than overwrite, in case other motes auto-collected during the
-				-- yield window — those must not be lost either.)
-				backpacks[userId] = (backpacks[userId] or 0) + count
+				-- yield window — those must not be lost either.) CLAMP to CAPACITY: if the backpack
+				-- refilled to capacity during the yield, the restore must not push it OVER the cap
+				-- (that would let the player later sell more than a backpack can hold). Overflow motes
+				-- past capacity are dropped — the holding-cap invariant wins over never-lose-a-mote.
+				backpacks[userId] = math.min(CAPACITY, (backpacks[userId] or 0) + count)
 				return updated
 			end
 

@@ -19,6 +19,7 @@ local testkit = require("./lib/testkit") -- script-relative; resolves from any c
 -- Adding a feature appends one line here; keep the list sorted so the JSON summary is byte-stable.
 local SPEC_PATHS = {
 	"./unit/clock.spec",
+	"./unit/collection.spec",
 	"./unit/data.spec",
 	"./unit/economy_race.spec",
 	"./unit/framework.spec",
