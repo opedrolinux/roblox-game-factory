@@ -42,8 +42,19 @@ export const meta = {
   ],
 }
 
-const gameDir = (args && args.gameDir) || 'games/collect-sim'
-const features = (args && args.features) || []
+// args normally arrives as an object; defensively accept a JSON string too (some invocation
+// paths stringify it). Parse before use so args.features is reliably an array.
+let input = args
+if (typeof input === 'string') {
+  try {
+    input = JSON.parse(input)
+  } catch (_e) {
+    input = {}
+  }
+}
+const gameDir = (input && input.gameDir) || 'games/collect-sim'
+const features = (input && input.features) || []
+log(`build-features: args type=${typeof args}; parsed ${features.length} feature(s) for ${gameDir}.`)
 
 // ---- structured-output schemas (validated at the tool-call layer; agents retry on mismatch) ----
 
