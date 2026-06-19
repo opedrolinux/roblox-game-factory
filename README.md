@@ -22,7 +22,9 @@ decides what to ship and what to kill.
 ## Start here
 
 1. **`FACTORY.md`** — how the project works: the autonomy model, the limits (the fence),
-   the human gates, the cost lanes, the parallelism model, and a game's lifecycle.
+   the human gates, the cost lanes, the parallelism model, and a game's lifecycle. *(See
+   `docs/FACTORY-LOOP.md` for the whole factory drawn as one self-feeding loop — spec in,
+   verified game out, funnel back to the next build.)*
 2. **`ARCHITECTURE.md`** — the technical structure: repo layout, the `core/` foundation,
    the build pipeline, the verification tiers. *(See `docs/CORE-STRUCTURE.md` for the built `core/`
    spine drawn as diagrams — file tree, request lifecycle, anti-double-spend lock flow, bootstrap.)*
