@@ -26,6 +26,7 @@ local SPEC_PATHS = {
 	"./unit/migration.spec",
 	"./unit/net.spec",
 	"./unit/sample.spec",
+	"./unit/shop.spec",
 	"./unit/validation.spec",
 	"./unit/selene_guard.spec",
 }
