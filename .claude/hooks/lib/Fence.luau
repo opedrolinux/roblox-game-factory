@@ -1845,19 +1845,57 @@ function Fence.evaluateCommand(command: string, shell: Shell, workspaceRoot: str
 	return ALLOWED
 end
 
+-- ── self-protection: the fence's own config + enforcement code is not agent-editable ────────
+-- Editing any of these in-workspace would let the agent (e.g. via prompt injection) disable its
+-- own safety fence and then act unfenced, so an Edit/Write to one is blocked and queued for a
+-- human. Paths are workspace-relative; the comparison is case-insensitive (Windows).
+local PROTECTED_FENCE_FILES = {
+	".claude/settings.json",
+	".claude/settings.local.json",
+	".claude/hooks/guard.luau",
+	".claude/hooks/format-lint.luau",
+	".claude/hooks/lib/fence.luau",
+	".claude/hooks/lib/log.luau",
+}
+
+local function isProtectedFenceFile(path: string, workspaceRoot: string): boolean
+	local isAbs = string.match(path, "^/") ~= nil or string.match(path, "^%a:[/\\]") ~= nil
+	local resolved = if isAbs then path else workspaceRoot .. "/" .. path
+	local canonical = lower(normalizePath(resolved))
+	local rootNorm = lower(normalizePath(workspaceRoot))
+	for _, rel in PROTECTED_FENCE_FILES do
+		local target = if rootNorm == "" then rel else rootNorm .. "/" .. rel
+		if canonical == target then
+			return true
+		end
+	end
+	return false
+end
+
 function Fence.evaluatePath(path: string, workspaceRoot: string): Decision
 	if type(path) ~= "string" or path == "" then
 		return ALLOWED
 	end
 	-- The agent's own Claude Code memory directory (.claude/projects/<proj>/memory/) is a
 	-- legitimate write target — it lives outside the repo but IS the designated place for the
-	-- agent to persist facts. Narrowly allowed; general .claude/ writes are NOT (that would
-	-- expose settings.json — the fence's own config).
+	-- agent to persist facts, so it is allowed. The fence's OWN config + enforcement code
+	-- (settings.json, the hook scripts) are blocked just below; everything else under .claude/
+	-- (skills, workflows) follows the normal workspace-containment rules.
 	local norm = lower(normalizePath(path))
 	if
 		string.find(norm, "/.claude/projects/", 1, true) and string.find(norm, "/memory/", 1, true)
 	then
 		return ALLOWED
+	end
+	-- The fence's own config + enforcement code is not agent-editable (it could disable itself).
+	if isProtectedFenceFile(path, workspaceRoot) then
+		return block(
+			"protected-config",
+			"edit-fence-file",
+			"editing the fence's own config/code is blocked — it would let the agent disable its own "
+				.. "safety fence (FACTORY.md §4). A human makes these edits.",
+			path
+		)
 	end
 	if string.sub(path, 1, 1) == "~" then
 		return block(
@@ -1907,6 +1945,7 @@ Fence._internal = {
 	normalizeHead = normalizeHead,
 	normalizePath = normalizePath,
 	isInside = isInside,
+	isProtectedFenceFile = isProtectedFenceFile,
 }
 
 return Fence

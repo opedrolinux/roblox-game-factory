@@ -55,7 +55,7 @@ the whole policy unit-testable like the rest of the project.
 
 ## 3. The rule catalog
 
-Four categories, mirroring `FACTORY.md` §4:
+Five categories — the four from `FACTORY.md` §4, plus the fence's own self-protection:
 
 **`destructive-git`** — `push` (any form, incl. `--force`/`--force-with-lease`), `reset
 --hard`, `clean`, `rebase`, `filter-branch`/`filter-repo`, `reflog expire`, `gc --prune`,
@@ -89,6 +89,14 @@ dir (`~`), UNC paths (`\\server\share`), and system paths (`C:\Windows`, `/etc`,
 For `Edit`/`Write`, the file target is checked directly (airtight path containment).
 **Allows** reading *from* a system path into the workspace (`cp /usr/share/x ./vendor/x`) —
 only writes are fenced.
+
+**`protected-config`** — the fence's **own** configuration and enforcement code: `.claude/
+settings.json` (+ `settings.local.json`), the hook adapters (`guard.luau`, `format-lint.luau`),
+and the libraries they use (`lib/Fence.luau`, `lib/Log.luau`). An `Edit`/`Write` to any of these
+is blocked, so a prompt-injected or runaway agent can't rewrite the fence to disable it and then
+act unfenced — these are operator-only edits, queued for a human like any other fenced action.
+**Allows** every *other* `.claude/` path — `skills/`, `workflows/`, and the hook *tests* — so the
+factory can still build and self-heal. (Match is workspace-relative and case-insensitive.)
 
 ## 4. How it resists obfuscation (without breaking real work)
 
@@ -124,7 +132,7 @@ together.
 
 The fence is proven three ways, not by assertion.
 
-- **A machine-checkable truth table** — `.claude/hooks/tests/corpus.luau` holds **274 cases**:
+- **A machine-checkable truth table** — `.claude/hooks/tests/corpus.luau` holds **281 cases**:
   every command/path that MUST block or MUST allow, across both shells, with obfuscations and
   false-positive guards. A `block` row that *allows* is a bypass; an `allow` row that *blocks*
   is a false positive; category is asserted too. `lune run .claude/hooks/tests/run.luau` exits
@@ -154,8 +162,10 @@ echo '{"tool_name":"Bash","tool_input":{"command":"git push"}}' | lune run .clau
   countless ways. The guard covers the common and obvious ones; Claude Code's own workspace
   model and the layer-1 denies are the primary control there. One deliberate carve-out: the
   agent's own Claude Code memory directory (`.claude/projects/*/memory/`) is *allowed* — it
-  lives outside the repo but is where the agent persists facts. General `.claude/` writes stay
-  blocked, so the fence's own `settings.json` can't be edited out from under it.
+  lives outside the repo but is where the agent persists facts. The fence's own config and
+  enforcement code (`settings.json` + the hook scripts) are specifically **blocked**
+  (`protected-config`, §3), so the agent can't edit the fence to disable it; *other* `.claude/`
+  paths (`skills/`, `workflows/`) stay editable like any in-workspace file.
 - The matcher defends against an LLM that *naively or via injection* attempts a fenced action,
   plus a wide class of obfuscations — **not** an unrestricted human adversary with shell access.
   Known, accepted residuals (caught by the red-team, judged out-of-scope for a naive/injected

@@ -87,7 +87,7 @@ hard parts** — it just has named gaps.
 Loop engineering **validates the existing Phase B roadmap and adds three sharpeners.** In order:
 
 1. **[B3 — ✅ DONE] Build & adversarially test the PreToolUse guard hook (fence gate-zero).** Shipped in
-   `1dd78eb`: a pure parsing guard (`.claude/hooks/lib/Fence.luau`) behind a two-layer fence, a 274-case
+   `1dd78eb`: a pure parsing guard (`.claude/hooks/lib/Fence.luau`) behind a two-layer fence, a 281-case
    truth table, three adversarial red-team rounds, and a **live** in-session block of a fenced `rm -rf`.
    A follow-up added a durable run/audit log (`logs/factory.jsonl`) so every fence decision and self-heal
    event is persisted for debugging. See `docs/FENCE.md`. *(was medium)*

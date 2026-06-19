@@ -1532,8 +1532,8 @@ local paths: { PathCase } = {
 	{
 		path = "/work/repo/.claude/hooks/guard.luau",
 		root = "/work/repo",
-		block = false,
-		note = "editing the hook itself (in-workspace)",
+		block = true,
+		note = "the fence's own hook — self-protection (protected-config)",
 	},
 	{ path = "/etc/passwd", root = "/work/repo", block = true, note = "absolute escape to /etc" },
 	{
@@ -1579,7 +1579,52 @@ local paths: { PathCase } = {
 		path = "C:/Users/x/.claude/settings.json",
 		root = "/work/repo",
 		block = true,
-		note = "general .claude/ write blocked (protects fence config)",
+		note = "settings.json under a DIFFERENT root → out-of-workspace block",
+	},
+	-- the fence's OWN config + enforcement code is self-protected even in-workspace, so a
+	-- prompt-injected agent can't edit the fence to disable it and then act unfenced
+	{
+		path = "/work/repo/.claude/settings.json",
+		root = "/work/repo",
+		block = true,
+		note = "in-workspace settings.json — self-protection (protected-config)",
+	},
+	{
+		path = ".claude/settings.json",
+		root = "/work/repo",
+		block = true,
+		note = "relative settings.json — self-protection",
+	},
+	{
+		path = "/work/repo/.claude/hooks/lib/Fence.luau",
+		root = "/work/repo",
+		block = true,
+		note = "the fence's own matcher — self-protection",
+	},
+	{
+		path = "/work/repo/.claude/hooks/format-lint.luau",
+		root = "/work/repo",
+		block = true,
+		note = "the format-lint hook — self-protection",
+	},
+	-- NON-REGRESSION: everything ELSE under .claude/ stays editable, or the factory can't build
+	{
+		path = "/work/repo/.claude/skills/new-game/lib/scaffold.luau",
+		root = "/work/repo",
+		block = false,
+		note = "a skill script is editable (not fence config)",
+	},
+	{
+		path = "/work/repo/.claude/workflows/build-game.js",
+		root = "/work/repo",
+		block = false,
+		note = "a workflow script is editable (not fence config)",
+	},
+	{
+		path = "/work/repo/.claude/hooks/tests/corpus.luau",
+		root = "/work/repo",
+		block = false,
+		note = "hook TESTS are editable (not enforcement code)",
 	},
 }
 
