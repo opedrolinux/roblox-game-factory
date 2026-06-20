@@ -157,14 +157,46 @@ unlocks, Rebirth/prestige, Offline earnings, Leaderboard, Monetization) — exer
 contention, more class-B migrations (rebirth count, offline timestamps), and the integration gate, on a
 game whose spine is already trusted.
 
-## 12. Open decisions (for you)
+## 12. Decisions (RESOLVED 2026-06-20)
 
-1. **Contract pass:** guarded agent + mandatory human diff-review (§4b, recommended) **vs** keep it
-   main-session-manual for the first build-game runs?
-2. **`bug-found` adjudication:** bounded auto-fix loop (§6b, N=2, recommended) **vs** always park for a
-   human?
-3. **Shape:** build-game as a supervised **SKILL** driving workflows (recommended, §1) **vs** still attempt
-   a single monolithic workflow (loses the human checkpoint + judgment barriers)?
-4. **First target:** build-game builds collect-sim's **remaining 5 features** (recommended — trusted spine)
-   **vs** a fresh game end-to-end (`new-game` → full `build-game`, exercises scaffold→handoff but on
-   unproven ground)?
+1. **Contract pass → guarded agent + mandatory human diff-review (§4b).** An agent writes the
+   `src/shared` deltas + registered stub, MUST add a self-verifying migration round-trip test on any
+   schema bump, MUST end gauntlet-green; the human reviews the schema diff **before fan-out**.
+2. **`bug-found` adjudication → bounded auto-fix loop, N=2 (§6b).** A fixer agent applies the red-team
+   finding + a falsify-first regression test, then re-gates; up to 2 rounds, then **park + surface**.
+3. **Shape → monolithic workflow** (overrides the §1 supervised-skill recommendation). See §13 — the
+   contract-pass decision (#1) and the locked decompose checkpoint locate exactly **one** human gate, so
+   the realized shape is **"monolithic build, gated once at the contract/schema diff."**
+4. **First target → collect-sim's remaining 5 features** (Islands & unlocks, Rebirth/prestige, Offline
+   earnings, Leaderboard, Monetization) — trusted spine, exercises cross-feature contention + more
+   class-B migrations + the integration gate.
+
+## 13. Realized shape under decision #3 (monolithic, gated once)
+
+A pure run-to-completion workflow **cannot** pause for a human, yet decision #1 explicitly wants the
+human to review the contract/schema diff *before* fan-out, and the locked decompose checkpoint (§3) wants
+plan approval before any build. Those two wants land at the **same boundary**, so build-game is realized
+as **two workflow runs split at that single gate** — maximally monolithic, with exactly one human pause
+where decision #1 put it:
+
+- **Workflow A — plan + contract** (`decompose.js`, then the guarded contract-pass agent):
+  decompose → mechanical validate (code) → adversarial validate (skeptic agent) → guarded contract-pass
+  agent writes `src/shared` deltas + stubs gauntlet-green. Returns `{plan, contractDiff}`.
+- **HUMAN GATE (the only one):** main session surfaces the plan + the contract/schema diff via
+  `AskUserQuestion` — this is simultaneously the **decompose approval** (§3) and the **contract
+  diff-review** (§4b). Approve → run B; revise → re-run A.
+- **Workflow B — the monolithic build:** fan-out (`build-features`) → adjudicate with the bounded
+  auto-fix loop (§6b, N=2) → union-merge onto `staging` → integration gate (§7) → adversarial review
+  (§8, loop-until-dry) → handoff note. Run-to-completion; **no further pauses**.
+- **Human at the end:** reviews the handoff note, FFs `main`, `git push` (fenced throughout).
+
+So per-feature gate adjudication (§6) becomes **code-driven inside Workflow B** (the gate's suggested
+verdict is disposed by the script: green→merge-candidate, bug-found→auto-fix loop, else→park+surface),
+with human judgment relocated from per-feature to the **final review** before FF — backed by the
+integration gate + adversarial review running on the integrated whole. This is the faithful reading of
+"monolithic workflow" that still honors decisions #1 and #2.
+
+**Build order (revised for the monolithic shape):** (0) `decompose.js` workflow + the code validator +
+the skeptic validator — *prove it produces a covered, disjoint, dependency-ordered plan for the remaining
+5*; (1) guarded contract-pass agent (§4b); (2) Workflow B shell wrapping `build-features` + the auto-fix
+loop; (3) integration-gate stage (§7); (4) adversarial-review stage (§8). Each proven before the next.
