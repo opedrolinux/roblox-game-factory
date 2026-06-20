@@ -4,7 +4,7 @@
 -- requires nothing (pure types + the pure toView function). See docs/CORE-DESIGN.md §3.2.
 
 export type SchemaVersion = number
-local CURRENT_SCHEMA_VERSION: SchemaVersion = 4
+local CURRENT_SCHEMA_VERSION: SchemaVersion = 5
 
 -- The single persisted player shape (v1). One table, versioned. Every field a deferred
 -- (B2) module touches is reserved now so migrations stay additive and a union-merge of
@@ -47,6 +47,13 @@ export type PlayerData = {
 	-- reserved seam; its addition is what bumped the schema to v2 + needed a Migrations step).
 	-- Server-clock gated: lastClaimUnix is SERVER unix time (§5), never client time. ---
 	daily: { streak: number, lastClaimUnix: number },
+
+	-- --- monetization (v5 — the 30-min 2x boost is now PERSISTED, so it survives a crash/rejoin
+	-- instead of dying with the session). boostExpiresUnix is the SERVER-unix time the active boost
+	-- EXPIRES; 0 means no active boost. The Sell stardust multiplier reads it from the lock-held
+	-- snapshot (now < boostExpiresUnix => 2x). Client-facing (the HUD shows remaining boost time) ->
+	-- mirrored in PlayerView with a toView line below. Its addition is what bumped the schema to v5. ---
+	boostExpiresUnix: number,
 }
 
 export type AnyTable = { [string]: any }
@@ -63,6 +70,7 @@ export type PlayerView = {
 	upgrades: { [string]: number },
 	flags: { [string]: boolean },
 	daily: { streak: number, lastClaimUnix: number }, -- the HUD badge shows the streak
+	boostExpiresUnix: number, -- v5: server-unix expiry of the active 2x boost (0 = none); HUD shows remaining
 }
 
 local Types = {}
@@ -80,6 +88,7 @@ function Types.toView(data: PlayerData): PlayerView
 		upgrades = data.upgrades,
 		flags = data.flags,
 		daily = data.daily,
+		boostExpiresUnix = data.boostExpiresUnix, -- v5: top-level field -> needs its own allowlist line
 	}
 end
 

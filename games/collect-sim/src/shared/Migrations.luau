@@ -48,6 +48,18 @@ local steps: { MigrationStep } = {
 		old.schemaVersion = 4
 		return old
 	end,
+
+	-- [4] v4 -> v5: the boost-persistence change made the 30-min 2x boost a PERSISTED field
+	-- (boostExpiresUnix) instead of in-memory session state. Seed it to 0 IDEMPOTENTLY (0 = no active
+	-- boost; an existing player simply starts the new schema with no boost armed — they never had a
+	-- persisted one). STAMP schemaVersion = 5 so migrate()'s loop advances past this step.
+	[4] = function(old: { [string]: any }): { [string]: any }
+		if old.boostExpiresUnix == nil then
+			old.boostExpiresUnix = 0
+		end
+		old.schemaVersion = 5
+		return old
+	end,
 }
 
 local Migrations = {}
@@ -77,6 +89,9 @@ function Migrations.default(nowUnix: number): { [string]: any }
 		flags = {},
 		receipts = {},
 		daily = { streak = 0, lastClaimUnix = 0 },
+		-- boostExpiresUnix=0 (no active boost) is seeded here too — SEPARATE from the v4->v5 migrate()
+		-- step (which only backfills EXISTING players). v5: the 2x boost is now persisted.
+		boostExpiresUnix = 0,
 	}
 end
 

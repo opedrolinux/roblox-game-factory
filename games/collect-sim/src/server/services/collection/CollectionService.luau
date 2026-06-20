@@ -154,26 +154,18 @@ local function makeSellAction(
 			local baseSellValue = count * MOTE_VALUE
 			local now = ctx.clock:unix()
 
-			-- stardustMult depends only on the userId (gamepass flag / in-memory boost), so it is read
-			-- once here. The island + restock multipliers depend on the player's PERSISTED state and so
-			-- MUST be read from the lock-held snapshot `d` INSIDE the transform (below) — passing a nil
-			-- snapshot out here would leave per-island mote value + the restock bonus permanently dormant.
-			local stardustMult = 1
-			if ctx.monetization ~= nil then
-				stardustMult = seamMultiplier((ctx.monetization :: any):stardustMultiplier(userId))
-			end
-
-			-- `earned` is captured OUT of the transform (it depends on `rebirths` + the island/restock
-			-- multipliers, ALL read from the lock-held `d` INSIDE the transform); the transform writes
-			-- both Stardust and lifetimeStardust.
+			-- `earned` is captured OUT of the transform but COMPUTED inside it (it depends on `rebirths`
+			-- + the island / restock / stardust multipliers, ALL read from the lock-held `d` INSIDE the
+			-- transform); the transform writes both Stardust and lifetimeStardust.
 			local earned = 0
 
 			-- 3. add the captured earnings INSIDE the lock-held synchronous transform (no yield), and
 			--    accrue the SAME amount into the lifetime counter.
 			local updated = ctx.data:update(ctx.player, function(d)
-				-- island + restock multipliers are PURE seam reads over the lock-held snapshot `d` (no
-				-- yield), so per-island mote value + today's rich-vein bonus actually reach the sale.
-				-- Nil-safe: an unwired seam (the existing tests' world) leaves the factor at 1.
+				-- ALL THREE feature multipliers are PURE seam reads over the lock-held snapshot `d` (no
+				-- yield), so per-island mote value, today's rich-vein bonus, AND the 2x boost/gamepass
+				-- reach the sale, read off the SAME snapshot the sale commits on (atomic, no read-check-
+				-- write across a yield). Nil-safe: an unwired seam leaves its factor at 1.
 				local islandMult = 1
 				if ctx.islands ~= nil then
 					islandMult = seamMultiplier((ctx.islands :: any):multiplierFor(d))
@@ -181,6 +173,13 @@ local function makeSellAction(
 				local restockMult = 1
 				if ctx.restock ~= nil then
 					restockMult = seamMultiplier((ctx.restock :: any):multiplierFor(d, now))
+				end
+				-- stardustMult (2x boost OR 2x gamepass) is read from the lock-held `d` too (v5: the boost
+				-- is persisted), so a boost arming/expiring concurrently is seen atomically with the sale.
+				local stardustMult = 1
+				if ctx.monetization ~= nil then
+					stardustMult =
+						seamMultiplier((ctx.monetization :: any):stardustMultiplierFor(d, now))
 				end
 				local rebirths = (d.rebirths or 0)
 				local rebirthMult = 1 + rebirths * REBIRTH_STEP

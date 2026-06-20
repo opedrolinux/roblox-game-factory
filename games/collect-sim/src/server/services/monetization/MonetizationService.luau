@@ -11,14 +11,16 @@
 --   * stats.lifetimeStardust .......... incremented by the SAME amount on every earn (monotonic)
 --   * receipts[receiptId] : boolean ... the idempotency LEDGER (a processed receipt id is recorded
 --                                       here; a replay re-reads it INSIDE the lock and grants nothing)
+--   * boostExpiresUnix : number ....... the 30-min 2x boost's server-unix expiry (0 = none). v5: the
+--                                       boost is now PERSISTED (survives crash/rejoin) — STAMPED inside
+--                                       the receipt transform, read vs ctx.clock:unix() for the 2x seam.
 --   * flags['gamepass.2xStardust' | 'gamepass.autoCollect' | 'gamepass.vipIsland'] : boolean
---                                       gamepass OWNERSHIP (granted out-of-band by the gamepass-grant
---                                       path / live-ops; this service only READS them for the seam)
--- IN-MEMORY SESSION STATE (closed over in Start; NOT persisted — the spec: "SESSION-ONLY"):
---   * _boostExpiry : { [userId] : number } .. the 30-min 2x boost's server-unix expiry per player.
---                                       Checked vs ctx.clock:unix(). Lost on server restart by design.
--- The service also captures `context.data` + `context.clock` in Start so the stardustMultiplier seam
--- (which is handed only a userId) can read the player's persisted flags + consult the server clock.
+--                                       gamepass OWNERSHIP. SET by this service's gamepass-grant path
+--                                       (syncGamepassesFor on join via UserOwnsGamePassAsync +
+--                                       onGamePassPurchased via PromptGamePassPurchaseFinished); READ by
+--                                       the 2x / auto-collect / VIP seams. NEVER set from a client action.
+-- The service captures `context.data` + `context.clock` in Start so the stardustMultiplier seam (handed
+-- only a userId) can read the player's persisted boost + flags + consult the server clock.
 --
 -- ============================== CONCURRENCY-SAFETY (real money) ===================================
 -- ProcessReceipt is the economy red-team target. The idempotency check AND the grant are performed
@@ -34,10 +36,10 @@
 -- the body), so a receipt is NEVER double-granted and NEVER recorded-without-grant. There is NO
 -- read-then-write across the yield: the decision reads only the snapshot it is handed.
 --
--- The 30-min boost is session-only, but its idempotency is STILL persistent: the receipt id is
--- recorded in the SAME lock-held transform; the in-memory expiry is set ONLY when that transform
--- confirms the id was NEWLY recorded (commit-first), so a replay that re-reads the ledger sets no
--- second boost.
+-- The 30-min boost's expiry is now PERSISTED and STAMPED in the SAME lock-held transform as the ledger
+-- write: on a NEWLY-recorded receipt the boost2x branch sets d.boostExpiresUnix atomically with the
+-- ledger entry, so the grant and its idempotency commit together. A replay re-reads the ledger and
+-- short-circuits BEFORE the boost stamp, so it can never arm a second window.
 --
 -- ============================== SERVER-DRIVEN (not a client action) ===============================
 -- ProcessReceipt is the MarketplaceService receipt callback, NOT a Net.Action: it registers NO client
@@ -71,7 +73,18 @@ local PRODUCTS: { Product } = {
 -- holding an active 30-min boost makes the Sell multiplier 2.
 local GAMEPASS_2X_FLAG = "gamepass.2xStardust"
 
--- The session-only 30-min 2x boost duration, in seconds (30 * 60). Server-clock measured.
+-- ----- GAMEPASS OWNERSHIP CATALOG (gamePassId -> the persisted ownership flag it grants) -----
+-- The runtime GRANT path: on join, UserOwnsGamePassAsync is checked for each pass and the owned ones'
+-- flags are SET (server-authoritative — never from a client action); PromptGamePassPurchaseFinished
+-- sets the flag on a fresh purchase. The flag GATES the effect (2x Sell / auto-collect / VIP island).
+-- Placeholder gamePass ids (replaced with the real ids at publish; the LOGIC is keyed by these).
+local GAMEPASSES: { { gamePassId: number, flag: string } } = {
+	{ gamePassId = 1001, flag = "gamepass.2xStardust" },
+	{ gamePassId = 1002, flag = "gamepass.autoCollect" },
+	{ gamePassId = 1003, flag = "gamepass.vipIsland" },
+}
+
+-- The 30-min 2x boost duration, in seconds (30 * 60). Server-clock measured; persisted as an expiry.
 local BOOST_DURATION_SECONDS = 30 * 60
 
 -- The multiplier a 2x source applies to a Sell (gamepass OR active boost). 1 otherwise.
@@ -99,8 +112,6 @@ function MonetizationService.new(data: any, clock: any): any
 	self.name = "MonetizationService"
 	self._data = data
 	self._clock = clock
-	-- session-only 2x boost: userId -> server-unix expiry. Absent / past-expiry => no boost.
-	self._boostExpiry = {} :: { [number]: number }
 	return self
 end
 
@@ -111,37 +122,103 @@ local function playerRef(userId: number): any
 	return { UserId = userId, Name = "User_" .. tostring(userId) }
 end
 
--- Whether `userId` currently holds an active (non-expired) 30-min 2x boost. Pure read of the in-memory
--- map vs the SERVER clock (never client time): expiry strictly in the FUTURE counts as active; an
--- expiry exactly at or before now is lapsed. No I/O.
+-- Whether `userId` currently holds an active (non-expired) 30-min 2x boost. Reads the PERSISTED expiry
+-- (v5) from the loaded session snapshot vs the SERVER clock (never client time): expiry strictly in the
+-- FUTURE counts as active; an expiry exactly at or before now is lapsed. data:get is a pure snapshot read
+-- (the already-loaded session), so a player whose session is not loaded reports no boost (graceful false).
 function MonetizationService.hasActiveBoost(self: any, userId: number): boolean
-	local expiry = self._boostExpiry[userId]
-	if expiry == nil then
-		return false
+	local got = self._data:get(playerRef(userId))
+	if got.ok and got.value ~= nil then
+		local expiry = got.value.boostExpiresUnix
+		if type(expiry) == "number" then
+			return self._clock:unix() < expiry
+		end
 	end
-	return self._clock:unix() < expiry
+	return false
 end
 
 -- ================================ THE SELL SEAM (consumed by collection Sell) =====================
--- ctx.monetization:stardustMultiplier(userId) -> 2 when the player OWNS the 2x gamepass
--- (flags['gamepass.2xStardust']) OR has an active 30-min boost (in-memory expiry vs ctx.clock), else 1.
--- Pure-ish read: a data:get (no yield — returns the already-loaded session snapshot) + an in-memory
--- map lookup. Defaults to the identity 1 whenever the player's data is unavailable, so a player whose
--- session is not loaded never errors the Sell formula — it just gets the un-multiplied base.
-function MonetizationService.stardustMultiplier(self: any, userId: number): number
-	-- Active in-memory boost is sufficient on its own (it grants 2x even without the gamepass).
-	if self:hasActiveBoost(userId) then
-		return STARDUST_MULTIPLIER_2X
-	end
-	-- Otherwise consult the PERSISTED gamepass ownership flag. data:get is a pure snapshot read.
-	local got = self._data:get(playerRef(userId))
-	if got.ok and got.value ~= nil then
-		local flags = got.value.flags
+-- TWO shapes of the SAME rule (2x when the player has an active boost OR owns the 2x gamepass, else 1):
+--   * stardustMultiplierFor(d, now): a PURE read over a snapshot `d` + a server `now`. This is the form
+--     the consolidated Sell formula calls FROM INSIDE its lock-held transform (like ctx.islands /
+--     ctx.restock), so the boost/gamepass are read off the SAME lock-held snapshot the sale commits on
+--     — fully atomic, no read-check-write across a yield.
+--   * stardustMultiplier(userId): the userId-only convenience form (a data:get snapshot read -> the pure
+--     form). Defaults to the identity 1 whenever the player's data is unavailable, so an unloaded player
+--     never errors the Sell formula — it just gets the un-multiplied base.
+-- PURE form: reads only the snapshot + clock value handed in; no I/O, no self state beyond constants.
+function MonetizationService.stardustMultiplierFor(_self: any, d: any, now: number): number
+	if d ~= nil then
+		-- Active PERSISTED boost is sufficient on its own (it grants 2x even without the gamepass).
+		local expiry = d.boostExpiresUnix
+		if type(expiry) == "number" and now < expiry then
+			return STARDUST_MULTIPLIER_2X
+		end
+		-- Otherwise consult the PERSISTED gamepass ownership flag (exactly-true; a stray truthy is not it).
+		local flags = d.flags
 		if flags ~= nil and flags[GAMEPASS_2X_FLAG] == true then
 			return STARDUST_MULTIPLIER_2X
 		end
 	end
 	return 1
+end
+
+function MonetizationService.stardustMultiplier(self: any, userId: number): number
+	local got = self._data:get(playerRef(userId))
+	if got.ok and got.value ~= nil then
+		return self:stardustMultiplierFor(got.value, self._clock:unix())
+	end
+	return 1
+end
+
+-- ================================ GAMEPASS GRANT PATH (server-authoritative) ======================
+-- Owning a gamepass is recorded as a PERSISTED flags[...] boolean. These flags are SET here ONLY — from
+-- a server-verified ownership check (UserOwnsGamePassAsync) on join, or the PromptGamePassPurchaseFinished
+-- signal on a fresh purchase — and NEVER from a client Net action (no registered action writes flags).
+
+-- Grant a gamepass OWNERSHIP flag through the single-writer lock-held data path. Idempotent: re-setting an
+-- already-true flag is a no-op write. Returns the data:update Result (Err if the session is unloaded).
+function MonetizationService.grantGamepassFlag(self: any, userId: number, flag: string): Result<any>
+	return self._data:update(playerRef(userId), function(d)
+		if d.flags == nil then
+			d.flags = {}
+		end
+		d.flags[flag] = true
+		return d
+	end)
+end
+
+-- Sync ALL gamepass ownership flags for a player from the authoritative ownership source. `ownsGamePass`
+-- is an INJECTED predicate (userId, gamePassId) -> boolean wrapping MarketplaceService:UserOwnsGamePassAsync
+-- at runtime (so this is Tier-1 testable with a fake). Each owned pass sets its flag (idempotent); a pcall
+-- guards the ownership lookup so one failure (network/throw) never aborts the rest or errors the join.
+function MonetizationService.syncGamepassesFor(
+	self: any,
+	userId: number,
+	ownsGamePass: (number, number) -> boolean
+): ()
+	for _, gp in GAMEPASSES do
+		local ok, owns = pcall(ownsGamePass, userId, gp.gamePassId)
+		if ok and owns == true then
+			self:grantGamepassFlag(userId, gp.flag)
+		end
+	end
+end
+
+-- Map a freshly-purchased gamePassId to its flag and grant it (the PromptGamePassPurchaseFinished path).
+-- Unknown / unsold ids are ignored. Returns true iff a known pass was granted.
+function MonetizationService.onGamePassPurchased(
+	self: any,
+	userId: number,
+	gamePassId: number
+): boolean
+	for _, gp in GAMEPASSES do
+		if gp.gamePassId == gamePassId then
+			self:grantGamepassFlag(userId, gp.flag)
+			return true
+		end
+	end
+	return false
 end
 
 -- ================================ PROCESS RECEIPT (idempotent, server-driven) =====================
@@ -186,6 +263,9 @@ function MonetizationService.ProcessReceipt(self: any, receiptInfo: any): Result
 	local alreadyProcessed = false
 	local grantedAmount = 0
 	local outBalance = 0
+	-- Server time captured ONCE for the boost expiry stamp (an input scalar, like the Sell `now`); the
+	-- transform closes over it so the persisted expiry is set on the SERVER clock, never client time.
+	local now = self._clock:unix()
 
 	local updated = self._data:update(player, function(d)
 		-- 1. re-read the ledger from the lock-held snapshot (post any earlier write).
@@ -223,8 +303,11 @@ function MonetizationService.ProcessReceipt(self: any, receiptInfo: any): Result
 			end
 			outBalance = d.currencies.Stardust
 		else
-			-- boost2x: no persisted currency grant in the transform; the ledger entry IS the money-grant
-			-- record. outBalance reflects the (unchanged) balance for the return shape.
+			-- boost2x: no currency is minted, but the boost EXPIRY is now PERSISTED (v5) — STAMP it in
+			-- THIS same lock-held transform, atomically with the ledger entry. math.max never shortens an
+			-- already-active boost. The ledger entry + this stamp commit together; a replay short-circuits
+			-- at the guard above and never reaches here, so no second window is ever armed.
+			d.boostExpiresUnix = math.max(d.boostExpiresUnix or 0, now + BOOST_DURATION_SECONDS)
 			outBalance = (d.currencies ~= nil and d.currencies.Stardust or 0)
 		end
 
@@ -251,13 +334,8 @@ function MonetizationService.ProcessReceipt(self: any, receiptInfo: any): Result
 		})
 	end
 
-	-- ----- post-commit effects (only on a CONFIRMED-NEW, committed receipt) -----
-	-- The boost's in-memory expiry is set ONLY now, after the ledger commit confirmed the id was newly
-	-- recorded, so a replay (which short-circuits at the replay guard above) can never set a 2nd boost.
-	if product.kind == "boost2x" then
-		local now = self._clock:unix()
-		self._boostExpiry[userId] = now + BOOST_DURATION_SECONDS
-	end
+	-- (The boost's persisted expiry was STAMPED inside the committed transform above — no post-commit
+	-- side effect is needed now; a replay short-circuited at the ledger guard and armed no second window.)
 
 	-- Every successful purchase emits `purchase` THROUGH ctx.analytics (nil-safe; a no-op in focused
 	-- tests / the spine). A Stardust pack ALSO emits currency_earned (it is an earn path) — emitted
@@ -321,18 +399,45 @@ function MonetizationService:Start(context: any): ()
 	service._analytics = context.analytics -- nil-safe at the emit sites
 
 	-- Publish the seam: ctx.monetization:stardustMultiplier(userId). Same object identity every
-	-- ActionContext projects, so the in-memory boost map is shared across all requests.
+	-- ActionContext projects, so every request reads the player's persisted boost/flags through it.
 	context.monetization = service
 	self._runtime = service
 
-	-- ROBLOX-ONLY runtime wiring: the receipt callback. Guarded so this Start stays import-safe under
-	-- Lune (MarketplaceService is a Roblox-only service). The callback returns an Enum at runtime.
+	-- ROBLOX-ONLY runtime wiring. Guarded so this Start stays import-safe under Lune (MarketplaceService
+	-- / Players are Roblox-only). UNTESTABLE in Tier-1 (no real MarketplaceService, no real gamepass ids)
+	-- — the GRANT/SYNC LOGIC lives in the Tier-1-tested methods above; only the wiring is here.
 	local realGame: any = game
 	if realGame ~= nil and type(realGame.GetService) == "function" then
 		local marketplace = realGame:GetService("MarketplaceService")
+		-- (a) the receipt callback (dev products): maps a ProcessReceipt Result to the purchase Enum.
 		marketplace.ProcessReceipt = function(receiptInfo: any): any
 			return service:receiptDecision(receiptInfo)
 		end
+
+		-- (b) the GAMEPASS GRANT path. On join, check ownership of each catalogued pass and SET its flag;
+		-- on a fresh purchase, set the bought pass's flag. The ownership lookup yields + may throw, so it
+		-- runs off the join thread (task.spawn) and syncGamepassesFor pcall-guards each lookup — a network
+		-- failure never blocks the join. NEVER sets a flag from client input (server-verified ownership only).
+		local Players = realGame:GetService("Players")
+		local function ownsGamePass(userId: number, gamePassId: number): boolean
+			return marketplace:UserOwnsGamePassAsync(userId, gamePassId)
+		end
+		local function syncFor(player: any): ()
+			service:syncGamepassesFor(player.UserId, ownsGamePass)
+		end
+		for _, player in Players:GetPlayers() do
+			task.spawn(syncFor, player) -- service may start after players are already present
+		end
+		Players.PlayerAdded:Connect(function(player: any)
+			task.spawn(syncFor, player)
+		end)
+		marketplace.PromptGamePassPurchaseFinished:Connect(
+			function(player: any, gamePassId: number, wasPurchased: boolean)
+				if wasPurchased then
+					service:onGamePassPurchased(player.UserId, gamePassId)
+				end
+			end
+		)
 	end
 end
 

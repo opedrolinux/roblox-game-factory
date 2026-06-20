@@ -141,6 +141,8 @@ describe("Migrations.migrate (round-trip, no data loss)", function()
 			expect((migrated :: any).rebirths):toBe(0)
 			-- step[3]: lifetimeStardust seeded FLOORED at the current Stardust balance (500)
 			expect((migrated :: any).stats.lifetimeStardust):toBe(500)
+			-- step[4]: boostExpiresUnix seeded to 0 (a legacy player has no persisted boost)
+			expect((migrated :: any).boostExpiresUnix):toBe(0)
 			-- nothing pre-existing was lost in the round-trip
 			expect(migrated.currencies.Stardust):toBe(500)
 			expect(migrated.currencies.Prisms):toBe(2)
@@ -188,8 +190,8 @@ describe("Migrations.migrate (round-trip, no data loss)", function()
 	it(
 		"v3 -> v4: seeds stats.lifetimeStardust FLOORED at the current Stardust, stamps CURRENT, preserves all",
 		function()
-			-- A record persisted at v3 (has rebirths, but NO lifetimeStardust). migrate() must run step[3]
-			-- ONLY, seeding lifetimeStardust = math.floor(currencies.Stardust) as the best-available
+			-- A record persisted at v3 (has rebirths, NO lifetimeStardust, NO boostExpiresUnix). migrate()
+			-- runs step[3] then step[4]; step[3] seeds lifetimeStardust = floor(Stardust), the best-available
 			-- baseline. FALSIFIABLE: the floor matters — a fractional Stardust (777.9) must seed 777, not
 			-- 777.9 and not 0; a missing seed leaves it nil; a forgotten stamp infinite-loops.
 			local v3Blob: { [string]: any } = {
@@ -207,6 +209,8 @@ describe("Migrations.migrate (round-trip, no data loss)", function()
 			expect(migrated.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
 			-- lifetimeStardust seeded FLOORED (777.9 -> 777), not raw, not 0
 			expect((migrated :: any).stats.lifetimeStardust):toBe(777)
+			-- step[4] also ran on the way to CURRENT: boostExpiresUnix seeded to 0
+			expect((migrated :: any).boostExpiresUnix):toBe(0)
 			-- the advanced rebirths value is preserved (step[3] does not seed it; it was already set)
 			expect((migrated :: any).rebirths):toBe(3)
 			-- all other fields preserved
@@ -215,6 +219,54 @@ describe("Migrations.migrate (round-trip, no data loss)", function()
 			expect((migrated :: any).daily.streak):toBe(7)
 			expect(migrated.upgrades.backpack):toBe(2)
 			expect(migrated.stats.joinCount):toBe(6)
+		end
+	)
+
+	it("v4 -> v5: seeds boostExpiresUnix=0, stamps CURRENT, preserves all prior fields", function()
+		-- A record persisted at v4 (has daily/rebirths/lifetimeStardust, but NO boostExpiresUnix: the
+		-- 2x boost was session-only before v5). migrate() must run step[4] ONLY: seed boostExpiresUnix=0
+		-- (a legacy player carries no persisted boost) and reach CURRENT. FALSIFIABLE: a missing seed
+		-- leaves boostExpiresUnix nil; a forgotten v4->v5 stamp infinite-loops; a clobbered prior field
+		-- fails the preservation asserts below.
+		local v4Blob: { [string]: any } = {
+			schemaVersion = 4,
+			currencies = { Stardust = 333, Prisms = 5 },
+			stats = { playtimeSeconds = 9, joinCount = 4, lifetimeStardust = 1200 },
+			timestamps = { firstJoinUnix = 7, lastSeenUnix = 8 },
+			upgrades = { ["collect-speed"] = 6 },
+			flags = { ["gamepass.2xStardust"] = true },
+			receipts = { r4 = true },
+			daily = { streak = 9, lastClaimUnix = 54321 },
+			rebirths = 2,
+		}
+		local migrated = Migrations.migrate(v4Blob)
+		expect(migrated.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
+		-- the v5 field is present + seeded to 0 (no active boost)
+		expect((migrated :: any).boostExpiresUnix):toBe(0)
+		-- every pre-existing field (incl. the v4 lifetimeStardust) is preserved untouched
+		expect((migrated :: any).stats.lifetimeStardust):toBe(1200)
+		expect((migrated :: any).rebirths):toBe(2)
+		expect((migrated :: any).daily.streak):toBe(9)
+		expect((migrated :: any).daily.lastClaimUnix):toBe(54321)
+		expect(migrated.currencies.Stardust):toBe(333)
+		expect(migrated.currencies.Prisms):toBe(5)
+		expect(migrated.upgrades["collect-speed"]):toBe(6)
+		expect(migrated.flags["gamepass.2xStardust"]):toBe(true)
+		expect(migrated.receipts.r4):toBe(true)
+		expect(migrated.stats.joinCount):toBe(4)
+	end)
+
+	it(
+		"does NOT reset an already-armed boostExpiresUnix on re-migrate (idempotent v5 seed)",
+		function()
+			-- Re-migrating a CURRENT blob whose boost is ACTIVE (a future expiry) must preserve it: step[4]
+			-- only seeds when boostExpiresUnix is ABSENT, and a current-version blob skips the steps loop
+			-- entirely. FALSIFIABLE: a non-idempotent step would reset the armed expiry to 0 and fail here.
+			local data = Migrations.default(1)
+			data.boostExpiresUnix = 99999
+			local migrated = Migrations.migrate(data)
+			expect(migrated.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
+			expect((migrated :: any).boostExpiresUnix):toBe(99999) -- NOT reset to 0
 		end
 	)
 
@@ -249,15 +301,16 @@ describe("Migrations.migrate (round-trip, no data loss)", function()
 	)
 
 	it(
-		"default() seeds the v4 fresh-player fields: Prisms=0, rebirths=0, lifetimeStardust=0",
+		"default() seeds the fresh-player fields: Prisms=0, rebirths=0, lifetimeStardust=0, boostExpiresUnix=0",
 		function()
-			-- The fresh-player blob is a SEPARATE code site from the migrate() steps; it must seed all three
-			-- new fields directly. FALSIFIABLE: a forgotten default seed leaves the field nil here.
+			-- The fresh-player blob is a SEPARATE code site from the migrate() steps; it must seed all the
+			-- post-v1 fields directly. FALSIFIABLE: a forgotten default seed leaves the field nil here.
 			local data = Migrations.default(1)
 			expect(data.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
 			expect(data.currencies.Prisms):toBe(0)
 			expect((data :: any).rebirths):toBe(0)
 			expect((data :: any).stats.lifetimeStardust):toBe(0)
+			expect((data :: any).boostExpiresUnix):toBe(0)
 		end
 	)
 end)

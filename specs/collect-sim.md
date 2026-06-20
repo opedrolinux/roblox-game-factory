@@ -30,7 +30,11 @@ Collect/grind simulator (Bee Swarm / Pet Sim *loop*, not their content). Familia
 
 ## Monetization (launch set)
 - Gamepasses: **2x Stardust**, **Auto-Collect** (no walking needed), **VIP island** (exclusive zone).
-- Dev products: Stardust packs (S/M/L), a 30-min **2x boost**.
+  Ownership is **granted server-side** — checked on join via `UserOwnsGamePassAsync` and on a fresh
+  purchase via `PromptGamePassPurchaseFinished` — and recorded as persisted `flags['gamepass.*']`
+  booleans that gate each effect (never set from a client action).
+- Dev products: Stardust packs (S/M/L), a 30-min **2x boost** — **persisted** (the boost expiry survives
+  a crash/rejoin, not session-only), stamped atomically with the idempotent receipt ledger.
 
 ## Features (fan-out list — each = one parallel subagent, built against the shared contracts)
 - [ ] **Collection core** — mote spawning per island, magnet/auto-collect, backpack capacity, sell-at-refiner → Stardust. *(contract-defining; built in the serial contract pass + first.)*
@@ -59,7 +63,9 @@ Trading, pets/companions, PvP, custom meshes/animations, group/clan systems.
 - [ ] **Economy is concurrency-safe** — interleaved / spam-duplicated sell + buy + rebirth never
       double-spend Stardust or dupe Prisms (race test on the shared balance).
 - [ ] **Monetization wired + idempotent** — 2x Stardust, Auto-Collect, and VIP-island gamepasses gate
-      their effects; Stardust packs + the 30-min 2x boost dev-products grant via idempotent `ProcessReceipt`.
+      their effects, with ownership GRANTED server-side (`UserOwnsGamePassAsync` on join +
+      `PromptGamePassPurchaseFinished` on purchase) into persisted `flags['gamepass.*']`; Stardust packs +
+      the 30-min 2x boost (persisted expiry, survives rejoin) grant via idempotent `ProcessReceipt`.
 - [ ] **Re-entry hooks work** — offline collectors accrue capped Stardust claimed on join; daily streak
       claims in a 20–22h window with the HUD badge; the daily rich-vein restock resets — all on server time.
 - [ ] **Core analytics events fire** — `session_start`/`session_end`, `loop_completed`,
