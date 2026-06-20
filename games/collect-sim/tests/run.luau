@@ -20,6 +20,7 @@ local testkit = require("./lib/testkit") -- script-relative; resolves from any c
 local SPEC_PATHS = {
 	"./unit/clock.spec",
 	"./unit/collection.spec",
+	"./unit/daily.spec",
 	"./unit/data.spec",
 	"./unit/economy_race.spec",
 	"./unit/framework.spec",
