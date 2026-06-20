@@ -19,6 +19,51 @@ local Result = require("../../../shared/Result")
 local CAPACITY = 50
 local MOTE_VALUE = 3
 
+-- Server-owned rebirth step: each rebirth adds REBIRTH_STEP to the Sell multiplier
+-- (rebirth multiplier = 1 + rebirths*REBIRTH_STEP). Defined HERE because this is where the
+-- consolidated Sell formula reads it. With rebirths = 0 the multiplier is exactly 1.
+local REBIRTH_STEP = 0.1
+
+-- ----- AUTO-COLLECT (gamepass-gated, clock-driven, deterministic) -----
+-- A pass-holder's backpack fills automatically: one mote per AUTO_COLLECT_INTERVAL seconds of
+-- elapsed SERVER MONOTONIC time (ctx.clock:mono(), never wall/real time). The grant is a pure
+-- function of (elapsed time, current count, capacity) so it is fully deterministic and Tier-1
+-- testable through the injected fake clock — no task.wait, no scheduler, no real-time dependency.
+local AUTO_COLLECT_INTERVAL = 1 -- seconds of elapsed mono time per auto-granted mote (pass-holders)
+
+-- The gamepass flag key checked on PlayerData.flags. Only players whose flags[AUTO_COLLECT_FLAG]
+-- is truthy receive auto-collected motes; everyone else is a strict no-op.
+local AUTO_COLLECT_FLAG = "gamepass.autoCollect"
+
+-- Pure auto-collect math: given the mono seconds elapsed since the last tick and the current
+-- backpack count, returns how many motes to grant (clamped so the backpack never exceeds CAPACITY)
+-- and the leftover sub-interval time to carry forward (so fractional progress is never lost and the
+-- grant can never run ahead of real elapsed time). Deterministic; no side effects.
+local function autoCollectGrant(elapsed: number, count: number): (number, number)
+	if elapsed < AUTO_COLLECT_INTERVAL then
+		return 0, elapsed -- not a full interval yet: grant nothing, carry the whole remainder
+	end
+	local earnedMotes = math.floor(elapsed / AUTO_COLLECT_INTERVAL)
+	local carry = elapsed - earnedMotes * AUTO_COLLECT_INTERVAL -- sub-interval remainder, never lost
+	local room = CAPACITY - count
+	if room < 0 then
+		room = 0
+	end
+	local granted = math.min(earnedMotes, room) -- clamp to capacity (never overfill)
+	return granted, carry
+end
+
+-- Nil-safe seam reader: a feature/stub service may populate ctx.islands / ctx.restock /
+-- ctx.monetization later; in the spine they are nil. Every multiplier DEFAULTS TO 1 when its seam
+-- (or its method, or the value) is absent, so the consolidated Sell is behavior-identical to the
+-- pre-retrofit `count * MOTE_VALUE` whenever no feature seam is wired (the existing tests' world).
+local function seamMultiplier(value: number?): number
+	if type(value) ~= "number" then
+		return 1
+	end
+	return value
+end
+
 local CollectionService = { name = "CollectionService" }
 
 -- Build the Collect action as a closure over `backpacks` (UserId -> mote count).
@@ -98,11 +143,49 @@ local function makeSellAction(
 			--   2. EMPTY the backpack to 0 BEFORE the (possibly yielding) update,
 			-- so any second sell that interleaves now sees an empty backpack and grants nothing.
 			backpacks[userId] = 0
-			local earned = count * MOTE_VALUE
 
-			-- 3. add the captured earnings INSIDE the lock-held synchronous transform (no yield).
+			-- ----- CONSOLIDATED, SERVER-DERIVED EARN FORMULA -----
+			-- earned = baseSellValue * islandMult * restockMult * stardustMult * (1 + rebirths*STEP).
+			-- baseSellValue is the pre-retrofit count*MOTE_VALUE. Every feature multiplier is read
+			-- NIL-SAFELY (default 1) from its seam, and `rebirths` from the LOCK-HELD snapshot (default
+			-- 0), so when no seam is wired AND rebirths == 0 every factor is 1 and earned == the
+			-- original count*MOTE_VALUE EXACTLY (the existing tests' invariant). math.floor keeps earned
+			-- a whole number once fractional multipliers land (a no-op on the all-1 path).
+			local baseSellValue = count * MOTE_VALUE
+			local now = ctx.clock:unix()
+
+			local islandMult = 1
+			if ctx.islands ~= nil then
+				islandMult = seamMultiplier((ctx.islands :: any):multiplierFor(nil))
+			end
+			local restockMult = 1
+			if ctx.restock ~= nil then
+				restockMult = seamMultiplier((ctx.restock :: any):multiplierFor(nil, now))
+			end
+			local stardustMult = 1
+			if ctx.monetization ~= nil then
+				stardustMult = seamMultiplier((ctx.monetization :: any):stardustMultiplier(userId))
+			end
+
+			-- `earned` is captured OUT of the transform (it also depends on `rebirths`, read from the
+			-- lock-held `d` INSIDE the transform); the transform writes both Stardust and lifetimeStardust.
+			local earned = 0
+
+			-- 3. add the captured earnings INSIDE the lock-held synchronous transform (no yield), and
+			--    accrue the SAME amount into the lifetime counter.
 			local updated = ctx.data:update(ctx.player, function(d)
+				local rebirths = (d.rebirths or 0)
+				local rebirthMult = 1 + rebirths * REBIRTH_STEP
+				earned = math.floor(
+					baseSellValue * islandMult * restockMult * stardustMult * rebirthMult
+				)
 				d.currencies.Stardust = (d.currencies.Stardust or 0) + earned
+				-- Accrue the SAME amount into the lifetime counter. NIL-SAFE on `d.stats`: a real
+				-- PlayerData always has stats (default()/migrate seed it), but a minimal test fake may
+				-- hand a snapshot without one — guard so the lifetime accrual never crashes the grant.
+				if d.stats ~= nil then
+					d.stats.lifetimeStardust = (d.stats.lifetimeStardust or 0) + earned
+				end
 				return d
 			end)
 
@@ -118,17 +201,81 @@ local function makeSellAction(
 			end
 
 			local balance = updated.value.currencies.Stardust
+
+			-- Emit currency_earned AFTER a successful grant. NIL-SAFE: ctx.analytics is nil in the spine
+			-- (and in the existing tests), so this is a no-op there; a wired AnalyticsService records it.
+			if ctx.analytics ~= nil then
+				(ctx.analytics :: any):emit("currency_earned", {
+					userId = userId,
+					currency = "Stardust",
+					amount = earned,
+					source = "sell",
+				})
+			end
+
 			return Result.ok({ sold = count, earned = earned, balance = balance })
 		end,
 	}
 end
 
+-- Build the auto-collect ticker as a closure over the SAME backpack table the Collect/Sell actions
+-- share. `tick(ctx, player)` is the deterministic, clock-driven, gamepass-gated grant: it reads the
+-- player's PERSISTED flags through ctx.data:get, and only if flags[AUTO_COLLECT_FLAG] is truthy does
+-- it grant accrued motes (one per AUTO_COLLECT_INTERVAL of elapsed mono time, clamped to capacity).
+-- It is concurrency-safe with Collect/Sell: it only ever ADDS to the in-memory backpack and clamps
+-- to CAPACITY (same invariant the Collect action enforces), and it carries the sub-interval remainder
+-- so it can never grant ahead of real elapsed time. Returns the number of motes granted (0 for
+-- non-holders / no-elapsed), so a test can assert the grant deterministically via the fake clock.
+local function makeAutoCollectTicker(backpacks: { [number]: number })
+	local lastMono: { [number]: number } = {} -- per-player last tick time (mono seconds)
+	return function(ctx: any, player: any): number
+		local userId = player.UserId
+		local now = ctx.clock:mono()
+		local previous = lastMono[userId]
+		if previous == nil then
+			-- First observation for this player: anchor the clock, grant nothing (no elapsed window).
+			lastMono[userId] = now
+			return 0
+		end
+
+		-- Gamepass gate: only pass-holders auto-collect. Read the PERSISTED flag nil-safely; a player
+		-- with no loaded data or no flag is a strict no-op (but we still advance the anchor so a later
+		-- grant after the pass is bought measures only post-purchase elapsed time).
+		local hasPass = false
+		local got = ctx.data:get(player)
+		if got.ok and got.value.flags ~= nil and got.value.flags[AUTO_COLLECT_FLAG] then
+			hasPass = true
+		end
+
+		local elapsed = now - previous
+		if not hasPass then
+			lastMono[userId] = now
+			return 0
+		end
+
+		local count = backpacks[userId] or 0
+		local granted, carry = autoCollectGrant(elapsed, count)
+		-- Advance the anchor by the CONSUMED time only (now - carry), so the unspent sub-interval
+		-- remainder is preserved for the next tick — fractional progress is never silently dropped.
+		lastMono[userId] = now - carry
+		if granted > 0 then
+			backpacks[userId] = count + granted
+		end
+		return granted
+	end
+end
+
 -- Start: construct the actions as closures over a single backpack table, then register each on
--- the gateway. One table instance shared by both actions => Collect fills what Sell empties.
+-- the gateway. One table instance shared by all three (Collect/Sell/auto-collect) => Collect fills
+-- what Sell empties, and the auto-collect ticker grants into the same backpack for pass-holders.
 function CollectionService:Start(context: any): ()
 	local backpacks: { [number]: number } = {}
 	context.net:register(makeCollectAction(backpacks))
 	context.net:register(makeSellAction(backpacks))
+	-- Expose the deterministic, clock-driven auto-collect ticker. The runtime driver (a task loop that
+	-- calls this per live pass-holder) is wired by the collection feature later; the spine keeps it
+	-- side-effect-free + injected-clock-driven so it is Tier-1 testable now (no task.wait here).
+	self.tickAutoCollect = makeAutoCollectTicker(backpacks)
 end
 
 return CollectionService

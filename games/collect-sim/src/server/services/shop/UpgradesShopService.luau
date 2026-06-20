@@ -143,6 +143,18 @@ local function makeBuyUpgradeAction(): Net.Action<
 				return Result.err(rejectCode :: string)
 			end
 
+			-- Emit currency_spent AFTER a successful purchase. A spend is NOT an earn, so we do NOT
+			-- touch lifetimeStardust here. NIL-SAFE: ctx.analytics is nil in the spine (and the existing
+			-- tests), so this is a no-op there; a wired AnalyticsService records the sink event.
+			if ctx.analytics ~= nil then
+				(ctx.analytics :: any):emit("currency_spent", {
+					userId = ctx.player.UserId,
+					currency = "Stardust",
+					amount = outCost,
+					upgradeId = upgradeId,
+				})
+			end
+
 			return Result.ok({
 				upgradeId = upgradeId,
 				level = outLevel,

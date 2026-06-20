@@ -17,6 +17,7 @@ local MockStore = require(Server.data.MockStore)
 local DataService = require(Server.data.DataService)
 local Gate = require(Server.security.Gate)
 local NetServer = require(Server.net.NetServer)
+local AnalyticsService = require(Server.services.analytics.AnalyticsService)
 
 local Context = {}
 
@@ -37,6 +38,10 @@ function Context.build(): any
 	local data = DataService.new(store, clock, config)
 	local gate = Gate.new(clock)
 	local net = NetServer.new(gate)
+	-- The single analytics emitter (contract pass). Constructed here so ctx.analytics is non-nil
+	-- from t0 and EVERY handler's ActionContext projects the SAME object; its Start fires the
+	-- session_start/session_end lifecycle. It is also placed in `services` to receive Start.
+	local analytics = AnalyticsService.new(clock)
 
 	local context = {
 		isServer = true,
@@ -48,8 +53,12 @@ function Context.build(): any
 		-- deferred seams (nil in the spine; populated in B2):
 		security = nil,
 		flags = nil,
-		analytics = nil,
+		-- the single analytics emitter (contract pass): non-nil from t0; ctx.analytics:emit(...).
+		analytics = analytics,
 		monetization = nil,
+		-- contract pass (v4) feature seams (nil in the spine; populated by stub/feature services):
+		islands = nil,
+		restock = nil,
 	}
 
 	-- Let NetServer close over the full context so it can build each handler's ActionContext.

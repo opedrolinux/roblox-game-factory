@@ -59,8 +59,11 @@ export type ActionContext = {
 	-- deferred seams: nil in the spine, same identity as ServerContext's fields once B2 lands.
 	security: any?, -- [B2]
 	flags: any?, -- [B2]
-	analytics: any?, -- [B2]
-	monetization: any?, -- [B2]
+	analytics: any?, -- [B2] ctx.analytics:emit(event, payload) — nil-safe (no-op when absent)
+	monetization: any?, -- [B2] ctx.monetization:stardustMultiplier(userId) -> 1 (identity default)
+	-- --- contract pass (v4) feature seams: nil in the spine, populated by stub/feature services ---
+	islands: any?, -- ctx.islands:multiplierFor(d) -> 1 (identity default)
+	restock: any?, -- ctx.restock:multiplierFor(d, now) -> 1 (identity default)
 }
 
 export type Handler<TIn, TOut> = (ctx: ActionContext, payload: TIn) -> Result<TOut>
@@ -92,7 +95,13 @@ Net.Actions = {
 	Sell = "collect.sell", -- [collection-core] sell the backpack at the refiner for Stardust
 	BuyUpgrade = "shop.buy", -- [upgrades-shop] spend Stardust to level a collect/backpack/magnet/speed upgrade
 	Daily = "daily.claim", -- [daily-streak] claim the once-per-day reward; server-clock gated, streak persisted
-	-- [B2] Rebirth = "rebirth.do", Claim = "offline.claim",
+	-- --- contract pass (v4) feature actions ---
+	UnlockIsland = "islands.unlock", -- [islands] spend currency to unlock an island; server-derived cost
+	FetchIslands = "islands.fetch", -- [islands] read the player's island unlock state for the UI
+	FetchLeaderboard = "leaderboard.fetch", -- [leaderboard] read the current leaderboard snapshot for the UI
+	ClaimOffline = "offline.claim", -- [offline] claim server-time-derived offline earnings since lastSeenUnix
+	FetchRestock = "restock.fetch", -- [restock] read the current restock window/multiplier for the UI
+	Rebirth = "rebirth.do", -- [rebirth] reset progression for a permanent rebirth multiplier; bumps `rebirths`
 	-- [B2] Purchase is server-driven (ProcessReceipt), not a client action.
 }
 

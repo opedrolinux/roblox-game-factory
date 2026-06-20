@@ -114,11 +114,14 @@ describe("Migrations.migrate (round-trip, no data loss)", function()
 	end)
 
 	it(
-		"migrates a v1 blob UP to v2: adds the daily field, preserves everything, terminates",
+		"migrates a v1 blob ALL THE WAY UP to CURRENT: chains every step, preserves everything, terminates",
 		function()
-			-- A record persisted under schemaVersion 1 (before the daily-streak feature) has NO `daily`
-			-- field. migrate() must run step[1] to add it, stamp v2, and lose nothing — and TERMINATE
-			-- (step[1] stamps the version so the loop cannot re-run it forever).
+			-- A record persisted under schemaVersion 1 (before daily-streak / rebirth / lifetimeStardust)
+			-- has NONE of the later fields. migrate() must CHAIN step[1] (daily) -> step[2] (rebirths) ->
+			-- step[3] (lifetimeStardust), stamp CURRENT, and lose nothing — and TERMINATE (each step stamps
+			-- its version so the loop cannot re-run a step forever). A FORGOTTEN stamp would infinite-loop
+			-- (the drain guard / hang would fail), a MISSING seed would leave a field nil (asserted below),
+			-- a CLOBBERED field would fail the preservation asserts.
 			local v1Blob: { [string]: any } = {
 				schemaVersion = 1,
 				currencies = { Stardust = 500, Prisms = 2 },
@@ -129,12 +132,15 @@ describe("Migrations.migrate (round-trip, no data loss)", function()
 				receipts = { r1 = true },
 			}
 			local migrated = Migrations.migrate(v1Blob)
-			expect(migrated.schemaVersion):toBe(2)
 			expect(migrated.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
-			-- the new v2 field is present and defaulted
+			-- step[1]: the daily field is present and defaulted
 			expect(type((migrated :: any).daily)):toBe("table")
 			expect((migrated :: any).daily.streak):toBe(0)
 			expect((migrated :: any).daily.lastClaimUnix):toBe(0)
+			-- step[2]: rebirths seeded to 0
+			expect((migrated :: any).rebirths):toBe(0)
+			-- step[3]: lifetimeStardust seeded FLOORED at the current Stardust balance (500)
+			expect((migrated :: any).stats.lifetimeStardust):toBe(500)
 			-- nothing pre-existing was lost in the round-trip
 			expect(migrated.currencies.Stardust):toBe(500)
 			expect(migrated.currencies.Prisms):toBe(2)
@@ -145,9 +151,76 @@ describe("Migrations.migrate (round-trip, no data loss)", function()
 		end
 	)
 
+	it(
+		"v2 -> v3: seeds rebirths=0, stamps v3 en route to CURRENT, preserves all prior fields",
+		function()
+			-- A record persisted at v2 (has daily, but NO rebirths and NO lifetimeStardust). migrate()
+			-- must run step[2] (seed rebirths) then step[3] (seed lifetimeStardust) and reach CURRENT.
+			-- FALSIFIABLE: a forgotten v2->v3 stamp would infinite-loop; a missing rebirths seed leaves it
+			-- nil; a clobbered daily/currency would fail the preservation asserts.
+			local v2Blob: { [string]: any } = {
+				schemaVersion = 2,
+				currencies = { Stardust = 250, Prisms = 1 },
+				stats = { playtimeSeconds = 5, joinCount = 2 },
+				timestamps = { firstJoinUnix = 1, lastSeenUnix = 2 },
+				upgrades = { magnet = 3 },
+				flags = { tutorialDone = true },
+				receipts = { r2 = true },
+				daily = { streak = 4, lastClaimUnix = 12345 },
+			}
+			local migrated = Migrations.migrate(v2Blob)
+			expect(migrated.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
+			-- the v3 field is present + seeded
+			expect((migrated :: any).rebirths):toBe(0)
+			-- and the chained v4 field too (lifetimeStardust floored at Stardust 250)
+			expect((migrated :: any).stats.lifetimeStardust):toBe(250)
+			-- everything pre-existing (incl. the v2 daily field) is preserved
+			expect((migrated :: any).daily.streak):toBe(4)
+			expect((migrated :: any).daily.lastClaimUnix):toBe(12345)
+			expect(migrated.currencies.Stardust):toBe(250)
+			expect(migrated.currencies.Prisms):toBe(1)
+			expect(migrated.upgrades.magnet):toBe(3)
+			expect(migrated.stats.joinCount):toBe(2)
+			expect(migrated.receipts.r2):toBe(true)
+		end
+	)
+
+	it(
+		"v3 -> v4: seeds stats.lifetimeStardust FLOORED at the current Stardust, stamps CURRENT, preserves all",
+		function()
+			-- A record persisted at v3 (has rebirths, but NO lifetimeStardust). migrate() must run step[3]
+			-- ONLY, seeding lifetimeStardust = math.floor(currencies.Stardust) as the best-available
+			-- baseline. FALSIFIABLE: the floor matters — a fractional Stardust (777.9) must seed 777, not
+			-- 777.9 and not 0; a missing seed leaves it nil; a forgotten stamp infinite-loops.
+			local v3Blob: { [string]: any } = {
+				schemaVersion = 3,
+				currencies = { Stardust = 777.9, Prisms = 9 },
+				stats = { playtimeSeconds = 8, joinCount = 6 },
+				timestamps = { firstJoinUnix = 3, lastSeenUnix = 4 },
+				upgrades = { backpack = 2 },
+				flags = {},
+				receipts = {},
+				daily = { streak = 7, lastClaimUnix = 999 },
+				rebirths = 3, -- an ADVANCED rebirths value: step[3] must not touch it
+			}
+			local migrated = Migrations.migrate(v3Blob)
+			expect(migrated.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
+			-- lifetimeStardust seeded FLOORED (777.9 -> 777), not raw, not 0
+			expect((migrated :: any).stats.lifetimeStardust):toBe(777)
+			-- the advanced rebirths value is preserved (step[3] does not seed it; it was already set)
+			expect((migrated :: any).rebirths):toBe(3)
+			-- all other fields preserved
+			expect(migrated.currencies.Stardust):toBe(777.9)
+			expect(migrated.currencies.Prisms):toBe(9)
+			expect((migrated :: any).daily.streak):toBe(7)
+			expect(migrated.upgrades.backpack):toBe(2)
+			expect(migrated.stats.joinCount):toBe(6)
+		end
+	)
+
 	it("does NOT reset an already-advanced daily value on re-migrate (idempotent)", function()
-		-- Re-migrating a current (v2) blob whose streak has progressed must preserve it — step[1] is
-		-- guarded (only fills daily when absent), and a v2 blob skips the steps loop entirely.
+		-- Re-migrating a CURRENT blob whose streak has progressed must preserve it — step[1] is guarded
+		-- (only fills daily when absent), and a current blob skips the steps loop entirely.
 		local data = Migrations.default(1)
 		data.daily.streak = 5
 		data.daily.lastClaimUnix = 999
@@ -155,6 +228,38 @@ describe("Migrations.migrate (round-trip, no data loss)", function()
 		expect((migrated :: any).daily.streak):toBe(5)
 		expect((migrated :: any).daily.lastClaimUnix):toBe(999)
 	end)
+
+	it(
+		"does NOT reset advanced rebirths / lifetimeStardust on re-migrate (idempotent seeds)",
+		function()
+			-- Re-migrating a CURRENT blob whose rebirths + lifetimeStardust have ADVANCED past their seed
+			-- defaults must preserve them. step[2]/step[3] only seed when the field is ABSENT, and a
+			-- current-version blob skips the steps loop entirely. FALSIFIABLE: a non-idempotent step that
+			-- re-seeded would reset rebirths to 0 / lifetimeStardust to floor(Stardust) and fail here.
+			local data = Migrations.default(1)
+			data.currencies.Stardust = 40
+			data.rebirths = 12
+			data.stats.lifetimeStardust = 9999
+			local migrated = Migrations.migrate(data)
+			expect(migrated.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
+			expect((migrated :: any).rebirths):toBe(12) -- NOT reset to 0
+			expect((migrated :: any).stats.lifetimeStardust):toBe(9999) -- NOT reset to floor(40)
+			expect(migrated.currencies.Stardust):toBe(40)
+		end
+	)
+
+	it(
+		"default() seeds the v4 fresh-player fields: Prisms=0, rebirths=0, lifetimeStardust=0",
+		function()
+			-- The fresh-player blob is a SEPARATE code site from the migrate() steps; it must seed all three
+			-- new fields directly. FALSIFIABLE: a forgotten default seed leaves the field nil here.
+			local data = Migrations.default(1)
+			expect(data.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
+			expect(data.currencies.Prisms):toBe(0)
+			expect((data :: any).rebirths):toBe(0)
+			expect((data :: any).stats.lifetimeStardust):toBe(0)
+		end
+	)
 end)
 
 describe("Types.toView (allowlist projection — the client-safe contract)", function()

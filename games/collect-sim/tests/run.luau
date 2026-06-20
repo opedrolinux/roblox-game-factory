@@ -18,6 +18,7 @@ local testkit = require("./lib/testkit") -- script-relative; resolves from any c
 -- EXPLICIT, LEXICALLY-ORDERED spec list (no fs.readDir). Each entry is a script-relative path.
 -- Adding a feature appends one line here; keep the list sorted so the JSON summary is byte-stable.
 local SPEC_PATHS = {
+	"./unit/analytics.spec",
 	"./unit/clock.spec",
 	"./unit/collection.spec",
 	"./unit/daily.spec",

@@ -120,6 +120,12 @@ local function makeDailyClaimAction(): Net.Action<
 				d.daily.lastClaimUnix = now
 				d.daily.streak = newStreak
 				d.currencies.Stardust = newBalance
+				-- Lifetime accrual: the daily reward is an EARN, so add the SAME amount to the monotonic
+				-- lifetimeStardust counter inside this one lock-held transform. NIL-SAFE on d.stats so a
+				-- minimal test snapshot without stats cannot crash the grant.
+				if d.stats ~= nil then
+					d.stats.lifetimeStardust = (d.stats.lifetimeStardust or 0) + reward
+				end
 
 				outStreak = newStreak
 				outReward = reward
@@ -137,6 +143,17 @@ local function makeDailyClaimAction(): Net.Action<
 			-- so streak / lastClaimUnix / Stardust are unchanged and persisted as-is.
 			if rejectCode ~= nil then
 				return Result.err(rejectCode :: string)
+			end
+
+			-- Emit currency_earned AFTER a successful claim. NIL-SAFE: ctx.analytics is nil in the spine
+			-- (and the existing tests), so this is a no-op there; a wired AnalyticsService records it.
+			if ctx.analytics ~= nil then
+				(ctx.analytics :: any):emit("currency_earned", {
+					userId = ctx.player.UserId,
+					currency = "Stardust",
+					amount = outReward,
+					source = "daily",
+				})
 			end
 
 			return Result.ok({

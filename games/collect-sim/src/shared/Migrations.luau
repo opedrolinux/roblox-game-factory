@@ -19,6 +19,35 @@ local steps: { MigrationStep } = {
 		old.schemaVersion = 2
 		return old
 	end,
+
+	-- [2] v2 -> v3: the rebirth feature added a TOP-LEVEL `rebirths` count. Seed it to 0 IDEMPOTENTLY
+	-- (preserve any existing value so a re-migrate cannot reset an advanced count) and STAMP
+	-- schemaVersion = 3 so migrate()'s loop advances past this step.
+	[2] = function(old: { [string]: any }): { [string]: any }
+		if old.rebirths == nil then
+			old.rebirths = 0
+		end
+		old.schemaVersion = 3
+		return old
+	end,
+
+	-- [3] v3 -> v4: the contract pass added `stats.lifetimeStardust` (total Stardust earned over the
+	-- player's lifetime). For EXISTING players we have no historical earn ledger, so the best-available
+	-- baseline is their CURRENT Stardust balance, FLOORED (math.floor — Stardust may be fractional in
+	-- principle; lifetimeStardust is a whole-number accrual counter). Idempotent: only seed when absent
+	-- so a re-migrate never clobbers an already-accrued value. STAMP schemaVersion = 4.
+	[3] = function(old: { [string]: any }): { [string]: any }
+		if old.stats == nil then
+			-- Defensive: a malformed blob missing stats entirely still migrates without crashing.
+			old.stats = { playtimeSeconds = 0, joinCount = 0 }
+		end
+		if old.stats.lifetimeStardust == nil then
+			local currencies = old.currencies or {}
+			old.stats.lifetimeStardust = math.floor(currencies.Stardust or 0)
+		end
+		old.schemaVersion = 4
+		return old
+	end,
 }
 
 local Migrations = {}
@@ -28,10 +57,17 @@ local Migrations = {}
 function Migrations.default(nowUnix: number): { [string]: any }
 	return {
 		schemaVersion = Types.CURRENT_SCHEMA_VERSION,
-		currencies = { Stardust = 0 },
+		-- currencies.Prisms=0 is seeded here (the fresh-player blob) — a SEPARATE code site from the
+		-- migrate() steps. Prisms is the rebirth currency; it gets no migrate() step (the currencies map
+		-- is open, so an absent key reads as 0 for existing players — no structural migration needed).
+		currencies = { Stardust = 0, Prisms = 0 },
+		-- rebirths=0 (top-level) + stats.lifetimeStardust=0 are seeded here too — again SEPARATE from the
+		-- v2->v3 / v3->v4 migrate() steps (which only backfill EXISTING players).
+		rebirths = 0,
 		stats = {
 			playtimeSeconds = 0,
 			joinCount = 0,
+			lifetimeStardust = 0,
 		},
 		timestamps = {
 			firstJoinUnix = nowUnix,

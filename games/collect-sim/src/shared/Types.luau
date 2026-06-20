@@ -4,7 +4,7 @@
 -- requires nothing (pure types + the pure toView function). See docs/CORE-DESIGN.md §3.2.
 
 export type SchemaVersion = number
-local CURRENT_SCHEMA_VERSION: SchemaVersion = 2
+local CURRENT_SCHEMA_VERSION: SchemaVersion = 4
 
 -- The single persisted player shape (v1). One table, versioned. Every field a deferred
 -- (B2) module touches is reserved now so migrations stay additive and a union-merge of
@@ -18,9 +18,17 @@ export type PlayerData = {
 	currencies: { [string]: number },
 
 	-- --- progression ---
+	-- rebirths: TOP-LEVEL count of permanent rebirths (v3 — added by the rebirth feature). Drives the
+	-- Sell rebirth multiplier (1 + rebirths*REBIRTH_STEP). Client-facing (the HUD shows it) -> mirrored
+	-- in PlayerView with a toView line below.
+	rebirths: number,
 	stats: {
 		playtimeSeconds: number,
 		joinCount: number,
+		-- lifetimeStardust: v4 — total Stardust EARNED over the player's lifetime (monotonic; never
+		-- decremented on spend). Accrued by every earn path (Sell / Daily). Rides the CLOSED `stats`
+		-- literal, so toView (which copies stats wholesale) needs NO extra line for it.
+		lifetimeStardust: number,
 	},
 
 	-- --- time-based features (server clock only; never client time) ---
@@ -50,7 +58,8 @@ export type AnyTable = { [string]: any }
 export type PlayerView = {
 	schemaVersion: SchemaVersion,
 	currencies: { [string]: number },
-	stats: { playtimeSeconds: number, joinCount: number },
+	rebirths: number, -- top-level + client-facing -> mirrored here AND copied in toView
+	stats: { playtimeSeconds: number, joinCount: number, lifetimeStardust: number },
 	upgrades: { [string]: number },
 	flags: { [string]: boolean },
 	daily: { streak: number, lastClaimUnix: number }, -- the HUD badge shows the streak
@@ -66,7 +75,8 @@ function Types.toView(data: PlayerData): PlayerView
 	return {
 		schemaVersion = data.schemaVersion,
 		currencies = data.currencies,
-		stats = data.stats,
+		rebirths = data.rebirths, -- TOP-LEVEL field: needs its own allowlist line (stats does not — copied wholesale)
+		stats = data.stats, -- copies stats WHOLESALE, so lifetimeStardust rides along with NO extra line
 		upgrades = data.upgrades,
 		flags = data.flags,
 		daily = data.daily,

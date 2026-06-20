@@ -22,11 +22,22 @@ local context = Context.build()
 local services = {
 	context.net, -- NetServer  (constructed in Context.build; Start binds the remotes)
 	context.data, -- DataService (constructed in Context.build; Start hooks PlayerAdded)
-	-- [B2] context.security, context.flags, context.analytics, context.monetization,
+	context.analytics, -- AnalyticsService (contract pass; Start fires session_start/session_end)
+	-- [B2] context.security, context.flags, context.monetization,
 	require(Server.services.sample.SampleService), -- [SAMPLE]
 	require(Server.services.collection.CollectionService), -- [collection-core] gather + sell
 	require(Server.services.shop.UpgradesShopService), -- [upgrades-shop] server-validated Stardust purchases
 	require(Server.services.daily.DailyStreakService), -- [daily-streak] once-per-day reward, server-clock gated
+	-- --- contract-pass (v4) STUB services: registered so the wire is complete before fan-out. Each
+	-- --- feature builder REPLACES its stub with real logic. Seam-providers (islands/restock/
+	-- --- monetization) set their identity-default ctx seam in Start; order is irrelevant because the
+	-- --- Sell formula reads the seams per-request (all Starts run at boot, before any request).
+	require(Server.services.islands.IslandsService), -- [islands STUB] UnlockIsland/FetchIslands + ctx.islands seam
+	require(Server.services.leaderboard.LeaderboardService), -- [leaderboard STUB] FetchLeaderboard
+	require(Server.services.monetization.MonetizationService), -- [monetization STUB] ctx.monetization seam (no client action)
+	require(Server.services.offline.OfflineService), -- [offline STUB] ClaimOffline
+	require(Server.services.restock.RestockService), -- [restock STUB] FetchRestock + ctx.restock seam
+	require(Server.services.rebirth.RebirthService), -- [rebirth STUB] Rebirth
 }
 
 Bootstrap.start(services, context)

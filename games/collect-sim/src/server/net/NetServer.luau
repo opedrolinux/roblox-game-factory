@@ -66,6 +66,11 @@ function NetServer.actionContext(self: any, player: any): Net.ActionContext
 		flags = ctx.flags,
 		analytics = ctx.analytics,
 		monetization = ctx.monetization,
+		-- contract pass (v4) feature seams: same object identity as ServerContext's fields, so a
+		-- stub/feature service that sets context.islands / context.restock in Start is visible to
+		-- every handler's ActionContext from then on (the consolidated Sell formula consumes these).
+		islands = ctx.islands,
+		restock = ctx.restock,
 	}
 end
 
