@@ -12,7 +12,12 @@
 --     or lost (real money). A replayed receipt id grants nothing twice.
 --   * Stardust-pack grants ADD a SERVER-owned amount to currencies.Stardust atomically (one ctx.data:update
 --     transform); EARN path -> increment stats.lifetimeStardust by the SAME amount AND emit currency_earned.
---   * 30-min 2x boost is SESSION-ONLY (in-memory expiry vs ctx.clock).
+--   * 30-min 2x boost is PERSISTED (v5): its expiry (boostExpiresUnix) is STAMPED into the player
+--     store atomically with the idempotent receipt ledger, so it SURVIVES a crash/rejoin and is read
+--     back vs ctx.clock — NOT in-memory session state.
+--   * Gamepass ownership is GRANTED SERVER-SIDE (UserOwnsGamePassAsync on join via syncGamepassesFor +
+--     PromptGamePassPurchaseFinished via onGamePassPurchased) into persisted flags['gamepass.*'] booleans;
+--     a flag is NEVER set from a client action.
 --   * Every successful purchase emits `purchase` THROUGH ctx.analytics.
 --
 -- This gate drives the REAL MonetizationService LOGIC (ProcessReceipt / stardustMultiplier /
@@ -358,9 +363,12 @@ describe(
 )
 
 -- ============================================================================================
--- 30-MIN 2x BOOST — session-only, in-memory expiry vs the SERVER clock.
+-- 30-MIN 2x BOOST — PERSISTED (v5) expiry (boostExpiresUnix), STAMPED atomically with the receipt
+-- ledger inside the same lock-held transform, read back vs the SERVER clock. Buying arms 2x, it
+-- expires on the server clock, a replay does not re-arm a second window, and the grant mints no
+-- Stardust. (Persistence across a session round-trip is proven in the dedicated block below.)
 -- ============================================================================================
-describe("monetization: 30-min 2x boost is session-only and clock-gated", function()
+describe("monetization: 30-min 2x boost is persisted and clock-gated", function()
 	it("buying the boost arms a 2x multiplier with no gamepass owned", function()
 		local service, _data, player, clock = setup({ seed = seedFor(1, {}) })
 		expect(service:stardustMultiplier(player.UserId)):toBe(1) -- baseline
@@ -399,6 +407,188 @@ describe("monetization: 30-min 2x boost is session-only and clock-gated", functi
 		expect((replay :: any).value.granted):toBe(false)
 		clock:advance(20) -- past the ORIGINAL expiry (10 + 20 > 0 window remainder)
 		expect(service:hasActiveBoost(player.UserId)):toBe(false) -- no second window armed
+	end)
+end)
+
+-- ============================================================================================
+-- 2x BOOST PERSISTENCE (v5) — the boost expiry is written to the PERSISTED store and SURVIVES a
+-- full session round-trip (release -> save -> a FRESH DataService re-loads the SAME backing store).
+-- An in-memory (non-persisted) boost would vanish on reload, so these tests are falsifiable against
+-- the old "session-only" implementation: a green here REQUIRES boostExpiresUnix to be persisted.
+-- ============================================================================================
+describe("monetization: 30-min 2x boost expiry is PERSISTED (survives rejoin)", function()
+	-- Build a REAL DataService + MockStore + clock and load one player's session, but RETURN the
+	-- store/clock/cfg so the test can release the session and re-load a FRESH DataService over the
+	-- SAME backing store (the round-trip a crash/rejoin performs). Mirrors `setup`, exposing the seam.
+	local function setupShared(userId: number): (any, any, any, any, any)
+		local clock = Mocks.clock(1000)
+		local cfg = config()
+		local store = Mocks.store({ clock = clock, config = cfg, seed = seedFor(userId, {}) })
+		local data = DataService.new(store, clock, cfg, Mocks.logWarn)
+		local player = Mocks.player(userId)
+		data:loadSession(player)
+		local service = MonetizationService.new(data, clock)
+		return service, data, player, clock, store
+	end
+
+	it("ProcessReceipt(201) writes boostExpiresUnix > now into the PERSISTED store", function()
+		local service, data, player, clock = setupShared(1)
+		local now = clock:unix()
+		-- Pre-condition: a fresh player has no persisted boost armed.
+		expect((data:get(player) :: any).value.boostExpiresUnix):toBe(0)
+		local r = grantOnce(service, player.UserId, 201, "persist-stamp")
+		expect(r):toBeOk()
+		expect((r :: any).value.granted):toBe(true)
+		-- The expiry is now a PERSISTED scalar strictly in the future (the 30-min window).
+		local persisted = (data:get(player) :: any).value.boostExpiresUnix
+		expect(persisted > now):toBe(true)
+		expect(persisted):toBe(now + BOOST_SECONDS) -- exactly now + 30 min (server clock), not client time
+	end)
+
+	it("the boost SURVIVES a session release + fresh re-load (still active, still 2x)", function()
+		local service, data, player, clock, store = setupShared(1)
+		grantOnce(service, player.UserId, 201, "persist-roundtrip")
+		expect(service:hasActiveBoost(player.UserId)):toBe(true)
+
+		-- Release the session: this SAVES the persisted blob (incl. boostExpiresUnix) to the
+		-- store's backing AND frees the lock — the crash/leave half of a round-trip. Drop the map
+		-- slot FIRST so the release() call is the statement's tail (no `(`-prefixed call-chain hazard).
+		local sessions = (data :: any)._sessions
+		local session = sessions[player.UserId]
+		sessions[player.UserId] = nil
+		session:release()
+
+		-- Re-join: a BRAND-NEW DataService over the SAME backing store re-loads the player. A
+		-- non-persisted (in-memory) boost would be GONE on this fresh service — the falsifier.
+		local data2 = DataService.new(store, clock, config(), Mocks.logWarn)
+		data2:loadSession(player)
+		local service2 = MonetizationService.new(data2, clock)
+
+		-- The persisted expiry came back: the boost is STILL active and STILL doubles Stardust.
+		expect((data2:get(player) :: any).value.boostExpiresUnix > clock:unix()):toBe(true)
+		expect(service2:hasActiveBoost(player.UserId)):toBe(true)
+		expect(service2:stardustMultiplier(player.UserId)):toBe(2)
+	end)
+
+	it("after rejoin the RESTORED boost still expires on the server clock (back to 1)", function()
+		local service, data, player, clock, store = setupShared(1)
+		grantOnce(service, player.UserId, 201, "persist-expiry")
+
+		local sessions = (data :: any)._sessions
+		local session = sessions[player.UserId]
+		sessions[player.UserId] = nil
+		session:release()
+
+		local data2 = DataService.new(store, clock, config(), Mocks.logWarn)
+		data2:loadSession(player)
+		local service2 = MonetizationService.new(data2, clock)
+		expect(service2:hasActiveBoost(player.UserId)):toBe(true) -- restored, still live
+
+		-- The RESTORED expiry is an absolute server-unix instant, so advancing the clock to it lapses
+		-- the boost even though it was armed on a different service instance (it is not a fresh window).
+		clock:advance(BOOST_SECONDS)
+		expect(service2:hasActiveBoost(player.UserId)):toBe(false)
+		expect(service2:stardustMultiplier(player.UserId)):toBe(1)
+	end)
+end)
+
+-- ============================================================================================
+-- GAMEPASS GRANT PATH (server-authoritative) — ownership is GRANTED on the server from a verified
+-- source (UserOwnsGamePassAsync on join via syncGamepassesFor; PromptGamePassPurchaseFinished via
+-- onGamePassPurchased) into PERSISTED flags['gamepass.*'] booleans. The injected ownership predicate
+-- stands in for the Roblox API so the GRANT logic is Tier-1 testable; a flag is NEVER set from client
+-- input. The observable seam is the 2x-Stardust multiplier and the persisted flag itself.
+-- ============================================================================================
+describe("monetization: gamepass GRANT path (server-authoritative)", function()
+	local TWO_X_GAMEPASS_ID = 1001 -- catalog: 1001 -> 'gamepass.2xStardust'
+
+	-- An ownsGamePass predicate that returns true ONLY for the listed gamePass ids (else false). The
+	-- server-verified source (UserOwnsGamePassAsync) is replaced by this fake so the grant is exercised.
+	local function ownsOnly(ownedIds: { number }): (number, number) -> boolean
+		local owned: { [number]: boolean } = {}
+		for _, id in ownedIds do
+			owned[id] = true
+		end
+		return function(_userId: number, gamePassId: number): boolean
+			return owned[gamePassId] == true
+		end
+	end
+
+	it("syncing an OWNED 2x pass persists the flag AND lifts the multiplier to 2", function()
+		local service, data, player = setup({ seed = seedFor(1, {}) })
+		expect(service:stardustMultiplier(player.UserId)):toBe(1) -- baseline: no flag
+		service:syncGamepassesFor(player.UserId, ownsOnly({ TWO_X_GAMEPASS_ID }))
+		-- The grant reached the PERSISTED store (not just an in-memory toggle)...
+		expect((data:get(player) :: any).value.flags[TWO_X_GAMEPASS_FLAG]):toBe(true)
+		-- ...and the seam now reads 2 (ownership gates the effect).
+		expect(service:stardustMultiplier(player.UserId)):toBe(2)
+	end)
+
+	it("syncing when the player OWNS NOTHING sets no flag and keeps the multiplier 1", function()
+		local service, data, player = setup({ seed = seedFor(1, {}) })
+		service:syncGamepassesFor(player.UserId, ownsOnly({})) -- owns nothing
+		-- No flag was set on a not-owned sync (the predicate gates the grant).
+		expect((data:get(player) :: any).value.flags[TWO_X_GAMEPASS_FLAG]).never:toBe(true)
+		expect(service:stardustMultiplier(player.UserId)):toBe(1)
+	end)
+
+	it("syncGamepassesFor is IDEMPOTENT (twice -> flag still exactly true, no error)", function()
+		local service, data, player = setup({ seed = seedFor(1, {}) })
+		local owns = ownsOnly({ TWO_X_GAMEPASS_ID })
+		service:syncGamepassesFor(player.UserId, owns)
+		service:syncGamepassesFor(player.UserId, owns) -- second sync must be a harmless no-op
+		expect((data:get(player) :: any).value.flags[TWO_X_GAMEPASS_FLAG]):toBe(true) -- exactly true, not corrupted
+		expect(service:stardustMultiplier(player.UserId)):toBe(2)
+	end)
+
+	it("syncGamepassesFor is RESILIENT: a THROWING lookup still syncs the other passes", function()
+		-- A predicate that THROWS for the auto-collect pass (1002) but reports the 2x pass (1001) owned.
+		-- An UNGUARDED lookup would abort the loop at 1002 and never reach/grant 1001 -> multiplier would
+		-- stay 1, failing this test. The pcall guard isolates the throw and lets the other passes sync.
+		local service, data, player = setup({ seed = seedFor(1, {}) })
+		local function flakyOwns(_userId: number, gamePassId: number): boolean
+			if gamePassId == 1002 then
+				error("UserOwnsGamePassAsync network failure")
+			end
+			return gamePassId == TWO_X_GAMEPASS_ID
+		end
+		-- Must NOT throw out of syncGamepassesFor (the join thread is protected).
+		service:syncGamepassesFor(player.UserId, flakyOwns)
+		-- The 2x pass (catalog-listed AFTER the throwing one? order-independent: it must be synced)
+		-- was still granted despite the 1002 lookup throwing.
+		expect((data:get(player) :: any).value.flags[TWO_X_GAMEPASS_FLAG]):toBe(true)
+		expect(service:stardustMultiplier(player.UserId)):toBe(2)
+		-- The throwing pass's flag was NOT set (its lookup failed -> treated as not-owned, never crashed).
+		expect((data:get(player) :: any).value.flags["gamepass.autoCollect"]).never:toBe(true)
+	end)
+
+	it(
+		"onGamePassPurchased(1001) grants the 2x flag, returns true, lifts multiplier to 2",
+		function()
+			local service, data, player = setup({ seed = seedFor(1, {}) })
+			local ok = service:onGamePassPurchased(player.UserId, TWO_X_GAMEPASS_ID)
+			expect(ok):toBe(true) -- a known pass was granted
+			expect((data:get(player) :: any).value.flags[TWO_X_GAMEPASS_FLAG]):toBe(true)
+			expect(service:stardustMultiplier(player.UserId)):toBe(2)
+		end
+	)
+
+	it("onGamePassPurchased with an UNKNOWN id returns false and sets NO flag", function()
+		local service, data, player = setup({ seed = seedFor(1, {}) })
+		local ok = service:onGamePassPurchased(player.UserId, 999999) -- not in the catalog
+		expect(ok):toBe(false)
+		-- No flag of any catalogued kind was written by an unknown purchase.
+		expect((data:get(player) :: any).value.flags[TWO_X_GAMEPASS_FLAG]).never:toBe(true)
+		expect((data:get(player) :: any).value.flags["gamepass.autoCollect"]).never:toBe(true)
+		expect((data:get(player) :: any).value.flags["gamepass.vipIsland"]).never:toBe(true)
+		expect(service:stardustMultiplier(player.UserId)):toBe(1) -- nothing gated
+	end)
+
+	it("grantGamepassFlag persists through the lock path (data:get shows the flag true)", function()
+		local service, data, player = setup({ seed = seedFor(1, {}) })
+		local r = service:grantGamepassFlag(player.UserId, TWO_X_GAMEPASS_FLAG)
+		expect(r):toBeOk() -- the persisted write committed through the data:update lock path
+		expect((data:get(player) :: any).value.flags[TWO_X_GAMEPASS_FLAG]):toBe(true)
 	end)
 end)
 

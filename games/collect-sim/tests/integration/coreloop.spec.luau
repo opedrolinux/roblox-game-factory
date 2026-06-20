@@ -505,7 +505,12 @@ describe("lifetimeStardust rises on every EARN, never on a spend or a reset", fu
 			expect(offline):toBeOk()
 			local offlineGrant = (offline :: any).value.granted
 			local l3 = lifetimeOf(g, p)
-			expect(l3):toBe(l2 + offlineGrant) -- lifetime rose by EXACTLY the offline grant (0 or positive)
+			-- GAP 4 (load-bearing offline grant): the offline EARN must actually PAY for a 600s away
+			-- window. If offline grants 0, the "lifetime rises on the offline earn" claim below is
+			-- vacuously true (l3 == l2 + 0), so a regression to "offline never pays" slips through.
+			-- Require it strictly positive so this test FAILS if the offline path mints nothing.
+			expect(offlineGrant > 0):toBe(true)
+			expect(l3):toBe(l2 + offlineGrant) -- lifetime rose by EXACTLY the (now-required-positive) offline grant
 
 			-- EARN 4: a monetization Stardust-pack grant (idempotent ProcessReceipt path) RAISES lifetime.
 			local mon = g.context.monetization
@@ -742,6 +747,10 @@ describe(
 				-- the same accrual a 600s offline window pays. A grant of ZERO means the accrual base was
 				-- destroyed by the lifecycle (loadSession re-stamps lastSeenUnix = now on every join, wiping the
 				-- leave-time base) — an INTEGRATION BUG, left RED.
+				-- GAP 4 (load-bearing offline grant): make the must-pay requirement DIRECT. The re-entry
+				-- claim has to pay a strictly POSITIVE amount for the 600s away window; a regression to
+				-- "offline never pays" (granted == 0) fails HERE, not just via the granted == probe identity.
+				expect(granted > 0):toBe(true)
 				expect(granted):toBe(probe)
 				expect(stardustOf(g, p)):toBe(balanceAtLeave + granted)
 			end
@@ -958,3 +967,315 @@ describe("A legacy (v1) seeded player migrates and is immediately playable end-t
 		end
 	)
 end)
+
+-- =====================================================================================================
+-- GAP 1 -- DAILY 20-22h CLAIM WINDOW, END-TO-END on the SERVER clock. The existing lifetime test claims
+-- daily ONCE; nothing drives the COOLDOWN window through the whole-game harness. Here a player claims,
+-- a too-soon re-claim is rejected OnCooldown, advancing INTO the 20-22h window grants AGAIN and the
+-- streak INCREMENTS. Driven entirely through g.invoke(A.Daily, ...) on the server clock g.clock.
+-- FALSIFIABLE: a broken cooldown (claim allowed immediately, or never re-allowed) makes this RED.
+-- =====================================================================================================
+describe(
+	"Daily streak: the 20-22h claim window is enforced END-TO-END on the server clock",
+	function()
+		it(
+			"claim grants; a too-soon re-claim is OnCooldown; advancing into the window grants again + streak++",
+			function()
+				-- Start at a day boundary so clock math is clean; the vein isolation is irrelevant here (no Sell).
+				local g = buildGame()
+				local p = Mocks.player(80, "Streaker")
+				g:join(p)
+
+				-- FIRST claim ever: always grants, streak starts at 1, reward is server-derived (> 0).
+				local first = g.invoke(A.Daily, p, {})
+				expect(first):toBeOk()
+				expect((first :: any).value.streak):toBe(1)
+				local firstReward = (first :: any).value.reward
+				expect(firstReward > 0):toBe(true)
+				-- The grant is an EARN: the balance moved up by exactly the reward.
+				expect(stardustOf(g, p)):toBe(firstReward)
+
+				-- TOO SOON: advance LESS than the 20h floor of the window (19h). A second claim is rejected as
+				-- OnCooldown end-to-end; balance + streak are untouched (no grant, no streak bump).
+				g.clock:advance(19 * 3600) -- 19h < the 20h window floor
+				local tooSoon = g.invoke(A.Daily, p, {})
+				expect(tooSoon):toBeErr(Result.Codes.OnCooldown)
+				expect(stardustOf(g, p)):toBe(firstReward) -- nothing granted on the cooldown rejection
+				-- The streak did NOT advance on a rejected claim (re-read the persisted streak).
+				expect(dataOf(g, p).daily.streak):toBe(1)
+
+				-- INTO THE WINDOW: advance the remainder so the TOTAL elapsed since the first claim is inside the
+				-- 20-22h window (21h total here), and below the 48h streak-reset ceiling. The claim now GRANTS
+				-- again and the streak INCREMENTS to 2 (not reset to 1) -- proving both the cooldown OPENED and the
+				-- streak counter advanced, end-to-end on the server clock.
+				g.clock:advance(2 * 3600) -- +2h -> 21h total elapsed: inside [20h, 22h], under 48h reset
+				local second = g.invoke(A.Daily, p, {})
+				expect(second):toBeOk()
+				expect((second :: any).value.streak):toBe(2) -- streak INCREMENTED, not reset
+				local secondReward = (second :: any).value.reward
+				expect(secondReward > 0):toBe(true)
+				-- A higher streak pays MORE (reward scales with the streak): the window re-open is a real EARN.
+				expect(secondReward > firstReward):toBe(true)
+				expect(stardustOf(g, p)):toBe(firstReward + secondReward) -- balance rose by the second grant
+				expect(dataOf(g, p).daily.streak):toBe(2) -- persisted streak advanced
+			end
+		)
+	end
+)
+
+-- =====================================================================================================
+-- GAP 2 -- RESTOCK DAY-BOUNDARY RESET, END-TO-END. The rich vein is day-derived (day = floor(now/86400));
+-- crossing a SERVER day boundary moves the vein to a DIFFERENT island, i.e. the restock RESETS each day.
+-- Proven two ways end-to-end through the whole-game harness: (a) the FetchRestock vein island id CHANGES
+-- across the boundary, and (b) the Sell bonus that landed on the player's island on a vein day is GONE
+-- on the next day (the vein moved off them). Isolated from the island multiplier (player keeps island 1).
+-- FALSIFIABLE: a vein that did NOT reset at the day boundary keeps the same island / keeps paying the
+-- bonus, making this RED.
+-- =====================================================================================================
+describe("Restock: the daily rich vein RESETS at the server day boundary, end-to-end", function()
+	local SECONDS_PER_DAY = 86400
+
+	-- Helper: collect n motes then sell, returning earned (mirrors the multiplier-suite helper).
+	local function collectAndSell(g: Game, p: any, n: number): number
+		for _ = 1, n do
+			expect(g.invoke(A.Collect, p, {})):toBeOk()
+		end
+		local r = g.invoke(A.Sell, p, {})
+		expect(r):toBeOk()
+		return (r :: any).value.earned
+	end
+
+	it(
+		"crossing midnight moves the vein to a different island (FetchRestock id changes + Sell bonus leaves)",
+		function()
+			-- Day 5 -> 5%5==0 -> vein index 1 -> island id 1 (the universally-unlocked starting island), so a
+			-- fresh player IS eligible and the vein bonus reaches their Sell. Start late in day 5 so a single
+			-- clock advance crosses into day 6, where 6%5==1 -> vein index 2 -> island id 2 (the player has NOT
+			-- unlocked it), so the bonus must DISAPPEAR -- the restock reset moved the vein off the player.
+			local g = buildGame({ startUnix = 5 * SECONDS_PER_DAY + (SECONDS_PER_DAY - 100) }) -- 100s before midnight, day 5
+			local p = Mocks.player(81, "Veiner")
+			g:join(p)
+
+			-- BEFORE the boundary: FetchRestock reports the day-5 vein on island 1, and this fresh player is
+			-- eligible (starting island). A vein-day sell on the starting island pays the rich-vein bonus.
+			local beforeFetch = g.invoke(A.FetchRestock, p, {})
+			expect(beforeFetch):toBeOk()
+			local veinBefore = (beforeFetch :: any).value.islandId
+			expect((beforeFetch :: any).value.eligible):toBe(true) -- starting island is today's vein -> eligible
+			local hot = collectAndSell(g, p, 50)
+			expect(hot > 0):toBe(true)
+
+			-- CROSS THE DAY BOUNDARY on the server clock (200s forward: 100s to midnight + 100s into day 6).
+			g.clock:advance(200)
+
+			-- AFTER the boundary: the vein RESET to a DIFFERENT island (day-6 vein is island 2). The
+			-- FetchRestock id changed, and this player (still only island 1) is no longer eligible.
+			local afterFetch = g.invoke(A.FetchRestock, p, {})
+			expect(afterFetch):toBeOk()
+			local veinAfter = (afterFetch :: any).value.islandId
+			expect(veinAfter ~= veinBefore):toBe(true) -- the rich vein MOVED at the day boundary (reset)
+			expect((afterFetch :: any).value.eligible):toBe(false) -- vein is island 2, which the player lacks
+
+			-- And the Sell bonus is GONE: the same 50 motes now pay the plain base (no vein, no island-2, no
+			-- rebirth). The day-5 hot sell strictly EXCEEDED this day-6 cold sell -> the restock truly reset.
+			local cold = collectAndSell(g, p, 50)
+			expect(cold > 0):toBe(true)
+			expect(hot > cold):toBe(true) -- the vein bonus that applied on day 5 is gone on day 6
+			-- The cold sell is the un-multiplied base; the hot sell was an integer multiple of it (the vein).
+			expect(hot % cold):toBe(0)
+			expect(hot / cold):toBe(3) -- RICH_VEIN_MULTIPLIER reached Sell only on the vein day
+		end
+	)
+end)
+
+-- =====================================================================================================
+-- GAP 3 -- currency_spent specifically from a SHOP UPGRADE. The existing analytics test only asserts a
+-- currency_spent fired AT ALL, which an island-unlock spend alone satisfies. Here we require a
+-- currency_spent tagged to the UPGRADE purchase (payload.upgradeId names the bought upgrade, and it
+-- carries NO island sink), so the assertion is NOT satisfiable by island-unlock's currency_spent (which
+-- is tagged sink="island_unlock" + islandId, with no upgradeId). FALSIFIABLE: a shop buy that stopped
+-- emitting currency_spent (or tagged it like an island unlock) makes this RED even with island-unlock
+-- spends present.
+-- =====================================================================================================
+describe(
+	"Analytics: currency_spent is emitted for a SHOP UPGRADE (distinct from island-unlock)",
+	function()
+		it(
+			"a shop BuyUpgrade emits a currency_spent tagged to the upgrade; an island unlock does NOT satisfy it",
+			function()
+				local g = buildGame()
+				local p = Mocks.player(82, "Shopper")
+				g:join(p)
+				setStardust(g, p, 50000) -- afford the upgrade AND an island unlock
+
+				-- Do an ISLAND UNLOCK FIRST, so an island-tagged currency_spent already exists. If the gap test
+				-- merely asserted ">= 1 currency_spent", this unlock alone would (wrongly) satisfy it.
+				expect(g.invoke(A.UnlockIsland, p, { islandId = 2 })):toBeOk()
+
+				-- Now buy a SHOP UPGRADE. The buy's currency_spent must carry the upgradeId of the bought kind.
+				local buy = g.invoke(A.BuyUpgrade, p, { upgradeId = "magnet" })
+				expect(buy):toBeOk()
+				local spentCost = (buy :: any).value.cost
+				expect(spentCost > 0):toBe(true)
+
+				-- Scan currency_spent for one tagged to the UPGRADE: payload.upgradeId == "magnet". An island
+				-- unlock's currency_spent has NO upgradeId (it carries sink="island_unlock" + islandId), so this
+				-- match is satisfiable ONLY by the shop buy's emission -- exactly the coverage the gap demands.
+				local sawUpgradeSpend = false
+				for _, e in g.analytics:eventsOfType("currency_spent") do
+					if e.payload ~= nil and e.payload.upgradeId == "magnet" then
+						sawUpgradeSpend = true
+						-- It is the upgrade's spend, NOT an island unlock's: the upgrade tag is present and the
+						-- island sink tag is absent on this same event.
+						expect(e.payload.sink):toBe(nil)
+						expect(e.payload.amount):toBe(spentCost) -- the server-derived cost, the real spend
+					end
+				end
+				expect(sawUpgradeSpend):toBe(true)
+
+				-- Sanity that we did NOT just match the island unlock: the island-unlock currency_spent exists and
+				-- is tagged differently (sink="island_unlock", no upgradeId), so the gap-3 match is genuinely
+				-- upgrade-specific and could not have been satisfied by the unlock spend alone.
+				local sawIslandSpend = false
+				for _, e in g.analytics:eventsOfType("currency_spent") do
+					if e.payload ~= nil and e.payload.sink == "island_unlock" then
+						sawIslandSpend = true
+						expect(e.payload.upgradeId):toBe(nil) -- the island spend carries NO upgradeId
+					end
+				end
+				expect(sawIslandSpend):toBe(true)
+			end
+		)
+	end
+)
+
+-- =====================================================================================================
+-- V5 TEST A -- the persisted 2x BOOST SURVIVES a rejoin, end-to-end. Buy the 30-min 2x boost
+-- (ProcessReceipt 201 via the live monetization seam), LEAVE (g:leave releases -> saves the persisted
+-- blob, incl. boostExpiresUnix), advance the server clock a LITTLE (< 30 min), REJOIN (g:join ->
+-- loadSession re-loads the persisted blob), and prove the boost is STILL active: an identical sell pays
+-- 2x the pre-boost baseline. FALSIFIABLE: a session-only (in-memory) boost would be LOST on the rejoin
+-- and the post-rejoin sell would pay 1x, making the toBe(base * 2) RED.
+-- =====================================================================================================
+describe(
+	"V5: the persisted 2x boost SURVIVES a leave -> rejoin lifecycle (reaches Sell after rejoin)",
+	function()
+		local SECONDS_PER_DAY = 86400
+
+		local function collectAndSell(g: Game, p: any, n: number): number
+			for _ = 1, n do
+				expect(g.invoke(A.Collect, p, {})):toBeOk()
+			end
+			local r = g.invoke(A.Sell, p, {})
+			expect(r):toBeOk()
+			return (r :: any).value.earned
+		end
+
+		it(
+			"buy boost -> leave -> advance < 30min -> rejoin -> a sell still pays 2x the baseline",
+			function()
+				-- ISOLATE the restock vein: day 12 -> 12%5==2 -> vein island 3 (never unlocked here), so restock
+				-- stays 1 in BOTH sells; the player keeps only island 1 (island mult 1) and never rebirths. The ONLY
+				-- factor that can differ between the baseline and the post-rejoin sell is the persisted 2x boost.
+				local g = buildGame({ startUnix = 12 * SECONDS_PER_DAY + 100 })
+				local p = Mocks.player(83, "Returner2x")
+				g:join(p)
+
+				-- Baseline sell with NO boost (island 1, vein island 3 -> restock 1, rebirths 0).
+				local base = collectAndSell(g, p, 50)
+				expect(base > 0):toBe(true)
+
+				-- Buy the 30-min 2x boost through the LIVE monetization seam (server-driven receipt, not a client
+				-- action). This STAMPS the persisted boostExpiresUnix inside the lock-held receipt transform.
+				local mon = g.context.monetization
+				local pr = mon:ProcessReceipt({
+					PlayerId = p.UserId,
+					ProductId = 201,
+					PurchaseId = "v5a-boost",
+				})
+				expect(pr):toBeOk()
+				expect((pr :: any).value.granted):toBe(true)
+				expect(mon:hasActiveBoost(p.UserId)):toBe(true) -- armed before we leave
+
+				-- LEAVE: the PlayerRemoving path releases the session, SAVING the persisted blob (incl.
+				-- boostExpiresUnix) to the store's backing -- the crash/leave half of the round-trip.
+				g:leave(p)
+
+				-- Advance the server clock a LITTLE: well under the 30-min (1800s) window so the boost is still live.
+				g.clock:advance(600) -- 10 minutes away, < 30-min boost
+
+				-- REJOIN: loadSession re-loads the persisted blob over the SAME backing store. A session-only boost
+				-- would be GONE here; a PERSISTED boostExpiresUnix comes back and is still in the future.
+				g:join(p)
+				expect(mon:hasActiveBoost(p.UserId)):toBe(true) -- the persisted boost survived the rejoin
+
+				-- A subsequent identical sell pays 2x the baseline: the RESTORED persisted boost reached the Sell
+				-- formula via ctx.monetization:stardustMultiplierFor read off the lock-held snapshot. (Same island,
+				-- same vein-island-3 restock, same rebirths -> the boost is the only differing factor: exactly 2x.)
+				local boosted = collectAndSell(g, p, 50)
+				expect(boosted):toBe(base * 2)
+			end
+		)
+	end
+)
+
+-- =====================================================================================================
+-- V5 TEST B -- the server-side gamepass GRANT path composes into Sell, end-to-end. Use the REAL grant
+-- path (ctx.monetization:syncGamepassesFor with an injected ownership predicate that OWNS the 2x pass
+-- 1001) to set the persisted gamepass.2xStardust flag, then prove a subsequent sell pays 2x. This is
+-- the GRANT path (server-verified ownership -> persisted flag -> Sell formula), NOT a hand-set flag.
+-- FALSIFIABLE: if the grant path failed to reach the persisted flag or the Sell formula, the sell would
+-- stay 1x and the toBe(base * 2) goes RED.
+-- =====================================================================================================
+describe(
+	"V5: the server-side gamepass GRANT path reaches the Sell formula (2x), end-to-end",
+	function()
+		local SECONDS_PER_DAY = 86400
+		local TWO_X_GAMEPASS_ID = 1001 -- catalog: 1001 -> 'gamepass.2xStardust'
+
+		local function collectAndSell(g: Game, p: any, n: number): number
+			for _ = 1, n do
+				expect(g.invoke(A.Collect, p, {})):toBeOk()
+			end
+			local r = g.invoke(A.Sell, p, {})
+			expect(r):toBeOk()
+			return (r :: any).value.earned
+		end
+
+		it(
+			"syncGamepassesFor(owns 1001) persists the flag through the grant path, so a sell pays 2x",
+			function()
+				-- ISOLATE restock: day 12 -> vein island 3 (never unlocked) -> restock 1 in both sells. Island 1
+				-- only (mult 1), rebirths 0: the gamepass-granted 2x flag is the only factor that can differ.
+				local g = buildGame({ startUnix = 12 * SECONDS_PER_DAY + 100 })
+				local p = Mocks.player(84, "GrantedWhale")
+				g:join(p)
+				local mon = g.context.monetization
+
+				-- Baseline sell BEFORE any grant (the 2x flag is not set yet).
+				local base = collectAndSell(g, p, 50)
+				expect(base > 0):toBe(true)
+				expect(mon:stardustMultiplier(p.UserId)):toBe(1) -- no flag granted yet
+
+				-- The REAL server-side GRANT path: an injected ownership predicate that OWNS the 2x gamepass (1001),
+				-- standing in for UserOwnsGamePassAsync. syncGamepassesFor writes the persisted gamepass.2xStardust
+				-- flag through the lock path -- a flag NEVER set from a client action.
+				local function ownsTwoX(_userId: number, gamePassId: number): boolean
+					return gamePassId == TWO_X_GAMEPASS_ID
+				end
+				mon:syncGamepassesFor(p.UserId, ownsTwoX)
+
+				-- The grant reached the PERSISTED store (read back through the lock-queued data layer)...
+				expect(dataOf(g, p).flags["gamepass.2xStardust"]):toBe(true)
+				-- ...and lifted the seam to 2.
+				expect(mon:stardustMultiplier(p.UserId)):toBe(2)
+
+				-- A subsequent identical sell pays 2x: the GRANT-PATH flag reached the consolidated Sell formula via
+				-- ctx.monetization:stardustMultiplierFor read off the lock-held snapshot. Only the granted 2x flag
+				-- differs from the baseline (same island, same vein-island-3 restock, same rebirths) -> exactly 2x.
+				local granted = collectAndSell(g, p, 50)
+				expect(granted):toBe(base * 2)
+			end
+		)
+	end
+)
