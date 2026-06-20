@@ -90,7 +90,6 @@ local Net = {}
 
 -- Stable action-name constants the spine + B2 features share (avoids typos across files).
 Net.Actions = {
-	Sample = "sample.ping", -- [SAMPLE]
 	Collect = "collect.gather", -- [collection-core] gather a nearby mote into the backpack
 	Sell = "collect.sell", -- [collection-core] sell the backpack at the refiner for Stardust
 	BuyUpgrade = "shop.buy", -- [upgrades-shop] spend Stardust to level a collect/backpack/magnet/speed upgrade

@@ -34,7 +34,6 @@ local SPEC_PATHS = {
 	"./unit/offline.spec",
 	"./unit/rebirth.spec",
 	"./unit/restock.spec",
-	"./unit/sample.spec",
 	"./unit/shop.spec",
 	"./unit/validation.spec",
 	"./unit/selene_guard.spec",

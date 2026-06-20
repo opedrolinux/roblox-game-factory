@@ -18,13 +18,12 @@ local context = Context.build()
 -- `context` (context.net IS services[1]); they appear here only to receive Start().
 -- 1. NetServer:Start binds the RemoteFunction/RemoteEvent before any service registers an action.
 -- 2. DataService:Start hooks PlayerAdded/Removing before any service reads/writes data.
--- 3. Feature services (the sample) register their actions last.
+-- 3. Feature services register their actions last.
 local services = {
 	context.net, -- NetServer  (constructed in Context.build; Start binds the remotes)
 	context.data, -- DataService (constructed in Context.build; Start hooks PlayerAdded)
 	context.analytics, -- AnalyticsService (contract pass; Start fires session_start/session_end)
 	-- [B2] context.security, context.flags, context.monetization,
-	require(Server.services.sample.SampleService), -- [SAMPLE]
 	require(Server.services.collection.CollectionService), -- [collection-core] gather + sell
 	require(Server.services.shop.UpgradesShopService), -- [upgrades-shop] server-validated Stardust purchases
 	require(Server.services.daily.DailyStreakService), -- [daily-streak] once-per-day reward, server-clock gated
