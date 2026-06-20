@@ -96,9 +96,13 @@ function DataService.loadSession(self: any, player: PlayerLike): Result<any>
 			local session = loaded.value
 			-- Migrate on every load (round-trip safe; §3.5).
 			session.data = Migrations.migrate(session.data)
-			-- Bump join bookkeeping on the SERVER clock (never client time).
+			-- Bump join bookkeeping on the SERVER clock (never client time). joinCount increments on
+			-- every load. lastSeenUnix is DELIBERATELY NOT re-stamped here: it is the offline-earnings
+			-- base (Types §timestamps: "written on save/release"), so the value persisted at the previous
+			-- release IS the start of the away window. Re-stamping it to `now` on join would collapse every
+			-- offline window to zero (elapsed = now - now), so offline would never pay. A fresh player's
+			-- base is the default()/creation time; release (and the offline claim) advance it forward.
 			session.data.stats.joinCount = (session.data.stats.joinCount or 0) + 1
-			session.data.timestamps.lastSeenUnix = clock:unix()
 			self._sessions[player.UserId] = session
 			return Result.ok(session)
 		end

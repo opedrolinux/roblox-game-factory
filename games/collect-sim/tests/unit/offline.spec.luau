@@ -680,7 +680,15 @@ describe(
 				local clockC = Mocks.clock(nowA + newWindow) -- 1800: a fresh claim at a strictly later time
 				local harnessC = Mocks.net({ clock = clockC, data = data, gate = false })
 				OfflineService:Start({ net = harnessC.registry })
-				local third = harnessC.invoke(CLAIM, player, {})
+				-- `data` is the SHARED yieldOnUpdate store, so this claim's update YIELDS — it MUST be
+				-- driven through a drained coroutine. A bare main-thread invoke here would yield the main
+				-- thread with nothing to resume it, making Lune exit 0 mid-run and mask the whole suite.
+				local third: any = nil
+				drain({
+					coroutine.create(function()
+						third = harnessC.invoke(CLAIM, player, {})
+					end),
+				})
 				expect(third):toBeOk()
 				-- The new window is exactly nowA..nowA+newWindow == 100s (base must be nowA, not nowB).
 				-- On the buggy impl the base is nowB=1690, so elapsed = 1800-1690 = 110 -> re-mints the 10s.
