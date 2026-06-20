@@ -1,0 +1,34 @@
+# Line-ending policy for the factory.
+#
+# WHY: stylua.toml mandates `line_endings = "Unix"` (LF), and the gauntlet runs
+# `stylua --check`. With `core.autocrlf=true` on Windows, every checkout/branch-switch
+# rewrites tracked .luau files to CRLF in the working tree, which fails `stylua --check`
+# even though `git diff` shows nothing (git normalizes on compare). An `eol` attribute
+# OVERRIDES core.autocrlf, so these rules pin LF in the working tree on every platform.
+#
+# Store LF in git AND check out LF everywhere.
+* text=auto eol=lf
+
+# Explicit per file type (belt-and-suspenders over the wildcard above).
+*.luau text eol=lf
+*.lua  text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.js   text eol=lf
+*.sh   text eol=lf
+
+# Binary artifacts — never normalize line endings.
+*.rbxl  binary
+*.rbxlx binary
+*.rbxm  binary
+*.rbxmx binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ogg   binary
+*.mp3   binary
+*.wav   binary
