@@ -91,8 +91,9 @@ Net.Actions = {
 	Collect = "collect.gather", -- [collection-core] gather a nearby mote into the backpack
 	Sell = "collect.sell", -- [collection-core] sell the backpack at the refiner for Stardust
 	BuyUpgrade = "shop.buy", -- [upgrades-shop] spend Stardust to level a collect/backpack/magnet/speed upgrade
+	Daily = "daily.claim", -- [daily-streak] claim the once-per-day reward; server-clock gated, streak persisted
 	-- [B2] Rebirth = "rebirth.do", Claim = "offline.claim",
-	-- [B2] Daily = "daily.claim", Purchase is server-driven (ProcessReceipt), not a client action.
+	-- [B2] Purchase is server-driven (ProcessReceipt), not a client action.
 }
 
 -- Creates a fresh, empty registry (one per server; tests create throwaway ones).

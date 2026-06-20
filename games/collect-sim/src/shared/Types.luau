@@ -4,7 +4,7 @@
 -- requires nothing (pure types + the pure toView function). See docs/CORE-DESIGN.md §3.2.
 
 export type SchemaVersion = number
-local CURRENT_SCHEMA_VERSION: SchemaVersion = 1
+local CURRENT_SCHEMA_VERSION: SchemaVersion = 2
 
 -- The single persisted player shape (v1). One table, versioned. Every field a deferred
 -- (B2) module touches is reserved now so migrations stay additive and a union-merge of
@@ -34,6 +34,11 @@ export type PlayerData = {
 	flags: { [string]: boolean }, -- [B2 live-ops / one-time grants] per-player booleans
 	receipts: { [string]: boolean }, -- [B2 monetization] processed receipt IDs (idempotency)
 	analytics: { lastEventUnix: number }?, -- [B2 analytics] light per-player bookkeeping
+
+	-- --- daily streak (v2 — a REAL persisted field added by the daily-streak feature, NOT a
+	-- reserved seam; its addition is what bumped the schema to v2 + needed a Migrations step).
+	-- Server-clock gated: lastClaimUnix is SERVER unix time (§5), never client time. ---
+	daily: { streak: number, lastClaimUnix: number },
 }
 
 export type AnyTable = { [string]: any }
@@ -48,6 +53,7 @@ export type PlayerView = {
 	stats: { playtimeSeconds: number, joinCount: number },
 	upgrades: { [string]: number },
 	flags: { [string]: boolean },
+	daily: { streak: number, lastClaimUnix: number }, -- the HUD badge shows the streak
 }
 
 local Types = {}
@@ -63,6 +69,7 @@ function Types.toView(data: PlayerData): PlayerView
 		stats = data.stats,
 		upgrades = data.upgrades,
 		flags = data.flags,
+		daily = data.daily,
 	}
 end
 

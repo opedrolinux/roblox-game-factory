@@ -26,6 +26,7 @@ local services = {
 	require(Server.services.sample.SampleService), -- [SAMPLE]
 	require(Server.services.collection.CollectionService), -- [collection-core] gather + sell
 	require(Server.services.shop.UpgradesShopService), -- [upgrades-shop] server-validated Stardust purchases
+	require(Server.services.daily.DailyStreakService), -- [daily-streak] once-per-day reward, server-clock gated
 }
 
 Bootstrap.start(services, context)

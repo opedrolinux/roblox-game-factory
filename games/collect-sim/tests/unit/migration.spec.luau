@@ -112,6 +112,49 @@ describe("Migrations.migrate (round-trip, no data loss)", function()
 		expect(migrated.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
 		expect(migrated.currencies.Stardust):toBe(1)
 	end)
+
+	it(
+		"migrates a v1 blob UP to v2: adds the daily field, preserves everything, terminates",
+		function()
+			-- A record persisted under schemaVersion 1 (before the daily-streak feature) has NO `daily`
+			-- field. migrate() must run step[1] to add it, stamp v2, and lose nothing — and TERMINATE
+			-- (step[1] stamps the version so the loop cannot re-run it forever).
+			local v1Blob: { [string]: any } = {
+				schemaVersion = 1,
+				currencies = { Stardust = 500, Prisms = 2 },
+				stats = { playtimeSeconds = 10, joinCount = 3 },
+				timestamps = { firstJoinUnix = 100, lastSeenUnix = 200 },
+				upgrades = { ["collect-speed"] = 4 },
+				flags = { tutorialDone = true },
+				receipts = { r1 = true },
+			}
+			local migrated = Migrations.migrate(v1Blob)
+			expect(migrated.schemaVersion):toBe(2)
+			expect(migrated.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
+			-- the new v2 field is present and defaulted
+			expect(type((migrated :: any).daily)):toBe("table")
+			expect((migrated :: any).daily.streak):toBe(0)
+			expect((migrated :: any).daily.lastClaimUnix):toBe(0)
+			-- nothing pre-existing was lost in the round-trip
+			expect(migrated.currencies.Stardust):toBe(500)
+			expect(migrated.currencies.Prisms):toBe(2)
+			expect(migrated.upgrades["collect-speed"]):toBe(4)
+			expect(migrated.flags.tutorialDone):toBe(true)
+			expect(migrated.receipts.r1):toBe(true)
+			expect(migrated.stats.joinCount):toBe(3)
+		end
+	)
+
+	it("does NOT reset an already-advanced daily value on re-migrate (idempotent)", function()
+		-- Re-migrating a current (v2) blob whose streak has progressed must preserve it — step[1] is
+		-- guarded (only fills daily when absent), and a v2 blob skips the steps loop entirely.
+		local data = Migrations.default(1)
+		data.daily.streak = 5
+		data.daily.lastClaimUnix = 999
+		local migrated = Migrations.migrate(data)
+		expect((migrated :: any).daily.streak):toBe(5)
+		expect((migrated :: any).daily.lastClaimUnix):toBe(999)
+	end)
 end)
 
 describe("Types.toView (allowlist projection — the client-safe contract)", function()

@@ -9,7 +9,16 @@ local Types = require("./Types")
 export type MigrationStep = (old: { [string]: any }) -> { [string]: any }
 
 local steps: { MigrationStep } = {
-	-- [1] = function(v1) ... -> v2 end,  -- added when the shape first changes
+	-- [1] v1 -> v2: the daily-streak feature added a REAL persisted `daily` field. Add it (idempotent
+	-- — preserve any existing value) and STAMP schemaVersion = 2 so migrate()'s loop advances past
+	-- this step (without the stamp the loop would re-run step[1] forever on a v1 blob).
+	[1] = function(old: { [string]: any }): { [string]: any }
+		if old.daily == nil then
+			old.daily = { streak = 0, lastClaimUnix = 0 }
+		end
+		old.schemaVersion = 2
+		return old
+	end,
 }
 
 local Migrations = {}
@@ -31,6 +40,7 @@ function Migrations.default(nowUnix: number): { [string]: any }
 		upgrades = {},
 		flags = {},
 		receipts = {},
+		daily = { streak = 0, lastClaimUnix = 0 },
 	}
 end
 
