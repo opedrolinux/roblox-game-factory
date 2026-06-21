@@ -1,9 +1,16 @@
 --!strict
 -- core/src/server/security/Gate.luau
--- The minimal spine rate/ownership gate. Original, Lune-clean (relative require + injected
--- clock, no Roblox global). The seed B2's full RateLimiter/ViolationTracker grow from, behind
--- the same Net.dispatch call site. See docs/CORE-DESIGN.md §3.6.
-local Result = require("../../shared/Result")
+-- The minimal spine rate/ownership gate. Original, Lune-clean (under Lune the relative require resolves
+-- with the clock injected and no Roblox global run). The seed B2's full RateLimiter/ViolationTracker
+-- grow from, behind the same Net.dispatch call site. See docs/CORE-DESIGN.md §3.6.
+-- [D1 shim] In Roblox src/shared maps to ReplicatedStorage.Shared (a different service) -> require by instance.
+local Result
+if script == nil then
+	Result = require("../../shared/Result")
+else
+	local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+	Result = require((Shared :: any).Result)
+end
 type Result<T> = Result.Result<T>
 
 export type ClockLike = {

@@ -19,10 +19,19 @@
 -- double-grant a level for a single payment. There is NO read-then-write across the yield: the
 -- transform body is synchronous and reads only the snapshot it is handed.
 --
--- Lune-clean: relative requires only; no Roblox global touched. The action is plain data +
--- pure-ish functions over injected ctx, so a spec can drive it through Mocks.net -> Net.dispatch.
-local Net = require("../../../shared/Net")
-local Result = require("../../../shared/Result")
+-- Dual-runtime require [D1 shim]: under Lune (script == nil) these resolve via the filesystem and touch
+-- no Roblox global, so a spec drives the action through Mocks.net -> Net.dispatch. In Roblox, src/shared
+-- maps to ReplicatedStorage.Shared (a DIFFERENT service than this ServerScriptService module), so the
+-- relative string can't reach it — the script ~= nil branch requires it by instance.
+local Net, Result
+if script == nil then
+	Net = require("../../../shared/Net")
+	Result = require("../../../shared/Result")
+else
+	local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+	Net = require((Shared :: any).Net)
+	Result = require((Shared :: any).Result)
+end
 
 -- ----- SERVER-OWNED CATALOG (authoritative; the client never sees or supplies any of this) -----
 -- Each upgrade kind: a Stardust `base` cost and a `maxLevel`. The cost of the NEXT level (when

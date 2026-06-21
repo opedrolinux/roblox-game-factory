@@ -1,11 +1,18 @@
 --!strict
 -- core/src/server/data/MockStore.luau
 -- In-memory implementation of the Store interface. The spine runtime default AND the Tier-1
--- fixture. Lune-clean (relative require, no Roblox global — note: it uses ONLY coroutine.*,
--- never the Roblox `task` global, which is nil under Lune). Implements the §4.1 per-key FIFO
--- lock queue LITERALLY so the anti-double-spend guarantee is genuinely tested (§9.3).
+-- fixture. Lune-clean (under Lune the relative require resolves with no Roblox global run — note: it
+-- uses ONLY coroutine.*, never the Roblox `task` global, which is nil under Lune). Implements the §4.1
+-- per-key FIFO lock queue LITERALLY so the anti-double-spend guarantee is genuinely tested (§9.3).
 -- See docs/CORE-DESIGN.md §4.2.
-local Result = require("../../shared/Result")
+-- [D1 shim] In Roblox src/shared maps to ReplicatedStorage.Shared (a different service) -> require by instance.
+local Result
+if script == nil then
+	Result = require("../../shared/Result")
+else
+	local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+	Result = require((Shared :: any).Result)
+end
 type Result<T> = Result.Result<T>
 
 export type ClockLike = {

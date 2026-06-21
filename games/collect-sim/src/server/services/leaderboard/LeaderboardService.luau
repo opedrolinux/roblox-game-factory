@@ -33,10 +33,19 @@
 -- replaces the snapshot wholesale, so a stale or missing read for one player degrades to that player
 -- being absent/zero this cycle — never corrupts another player's rank and never writes anything.
 --
--- Lune-clean: relative requires only; the Roblox `task`/`Players` globals are referenced ONLY behind
--- a runtime guard in Start (nil under Lune), so a spec drives refresh/maybeRefresh/fetch directly.
-local Net = require("../../../shared/Net")
-local Result = require("../../../shared/Result")
+-- Lune-clean: under Lune (script == nil) the requires resolve via the filesystem and the Roblox
+-- `task`/`Players` globals are referenced ONLY behind a runtime guard in Start (nil under Lune), so a
+-- spec drives refresh/maybeRefresh/fetch directly. In Roblox, src/shared maps to ReplicatedStorage.Shared
+-- (a DIFFERENT service than this module), so the script ~= nil branch requires it by instance. [D1 shim]
+local Net, Result
+if script == nil then
+	Net = require("../../../shared/Net")
+	Result = require("../../../shared/Result")
+else
+	local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+	Net = require((Shared :: any).Net)
+	Result = require((Shared :: any).Result)
+end
 
 -- ----- SERVER-OWNED TUNABLES (the client supplies none of this) -----
 -- TOP_N: how many ranked entries the fetch returns (the in-world board shows the top slice).

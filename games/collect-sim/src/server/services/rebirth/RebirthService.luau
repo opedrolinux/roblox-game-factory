@@ -34,10 +34,19 @@
 -- the transform body is synchronous and reads ONLY the snapshot it is handed; the Prisms amount is
 -- derived INSIDE the transform from that same lock-held snapshot.
 --
--- Lune-clean: relative requires only; no Roblox global touched. The action is plain data + pure-ish
--- functions over injected ctx, so a spec can drive it through Mocks.net -> Net.dispatch.
-local Net = require("../../../shared/Net")
-local Result = require("../../../shared/Result")
+-- Dual-runtime require [D1 shim]: under Lune (script == nil) these resolve via the filesystem and touch
+-- no Roblox global, so a spec drives the action through Mocks.net -> Net.dispatch. In Roblox, src/shared
+-- maps to ReplicatedStorage.Shared (a DIFFERENT service than this ServerScriptService module), so the
+-- relative string can't reach it — the script ~= nil branch requires it by instance.
+local Net, Result
+if script == nil then
+	Net = require("../../../shared/Net")
+	Result = require("../../../shared/Result")
+else
+	local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+	Net = require((Shared :: any).Net)
+	Result = require((Shared :: any).Result)
+end
 
 -- ----- SERVER-OWNED CONSTANTS (authoritative; the client never sees or supplies any of this) -----
 -- The minimum Stardust a player must hold to rebirth. Below this the action returns Insufficient.

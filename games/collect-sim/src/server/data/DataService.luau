@@ -5,9 +5,20 @@
 -- store/clock/config are INJECTED (never sibling-requires a Roblox-only module); specs call
 -- get/update/save directly with a Mocks.player. Only Start connects Roblox events, and no
 -- spec calls Start. See docs/CORE-DESIGN.md §4.4.
-local Migrations = require("../../shared/Migrations")
-local Types = require("../../shared/Types")
-local Result = require("../../shared/Result")
+-- [D1 shim] src/shared maps to ReplicatedStorage.Shared in Roblox (a different service than this
+-- ServerScriptService module), so the relative strings can't reach it there — require by instance;
+-- under Lune (script == nil) the filesystem paths resolve.
+local Migrations, Types, Result
+if script == nil then
+	Migrations = require("../../shared/Migrations")
+	Types = require("../../shared/Types")
+	Result = require("../../shared/Result")
+else
+	local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+	Migrations = require((Shared :: any).Migrations)
+	Types = require((Shared :: any).Types)
+	Result = require((Shared :: any).Result)
+end
 type Result<T> = Result.Result<T>
 
 -- Backoff between retries. Lune-safe: the Roblox `task` global is NIL under Lune, so we only

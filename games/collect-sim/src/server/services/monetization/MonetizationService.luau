@@ -50,7 +50,16 @@
 --
 -- Lune-clean at the LOGIC level: ProcessReceipt / stardustMultiplier / the seam touch no Roblox
 -- global, so a spec drives them directly. Only Start() references MarketplaceService (no spec calls it).
-local Result = require("../../../shared/Result")
+-- [D1 shim] src/shared maps to ReplicatedStorage.Shared in Roblox (a different service than this
+-- ServerScriptService module), so the relative string can't reach it there — require by instance;
+-- under Lune (script == nil) the filesystem path resolves.
+local Result
+if script == nil then
+	Result = require("../../../shared/Result")
+else
+	local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+	Result = require((Shared :: any).Result)
+end
 type Result<T> = Result.Result<T>
 
 -- ----- SERVER-OWNED PRODUCT CATALOG (authoritative; the client supplies none of these numbers) -----
