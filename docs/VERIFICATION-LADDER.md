@@ -64,12 +64,58 @@ across `src`) read as correctness badges. They are the opposite — they mark a 
 service boundary and whose Roblox branch Lune never exercises. They lulled maker≠checker, adversarial
 review, *and* convergence, all of which themselves run under Lune.
 
+**The shape of the gap — today's escalation vs. the fix:**
+
+```mermaid
+flowchart TB
+  subgraph TODAY["Today — the conflation: T1 treated as ready"]
+    direction LR
+    t0["T0<br/>static"] --> t1["T1<br/>Lune logic · 313 green"]
+    t1 -. "skips T0.5 + T2<br/>Lune-green = ready" .-> tH["T3<br/>HUMAN playtest"]
+  end
+  subgraph FIXED["Fixed — each rung gates the next"]
+    direction LR
+    f0["T0<br/>static"] --> f05["T0.5<br/>require ✦L1"] --> f1["T1<br/>Lune"] --> f2["T2<br/>in-engine ✦L3"] --> fH["T3<br/>HUMAN"]
+  end
+  TODAY ==> |"add L1 + L2 + L3"| FIXED
+  classDef newrung fill:#fff3cd,stroke:#d39e00,stroke-width:2px;
+  class f05,f2 newrung;
+```
+
 ---
 
 ## 2. The ladder — named rungs that each gate the next
 
 Replace the single boolean with an **ordered ladder**. A rung only runs if the rung below is green.
 The game's **status is the highest contiguous green rung** — never a bare "ready."
+
+```mermaid
+flowchart TD
+  S(["build-game loop"]) --> T0
+  T0["T0 — Static<br/>stylua · selene · rojo build<br/>proves: compiles to a place"]
+  T05["T0.5 — Require-resolution ✦ NEW (L1)<br/>gate-require.luau · protected-config<br/>proves: every require resolves in the DataModel<br/>catches the cross-service boot bug — no Roblox"]
+  T1["T1 — Lune logic<br/>tests/run.luau + integration<br/>proves: economy/state correct under the file loader"]
+  T2["T2 — In-engine smoke ✦ NEW (L3)<br/>boot the real place — Studio + MCP<br/>proves: it BOOTS · services Start · loop on the real wire"]
+  T3["T3 — Human playtest<br/>fun · feel · presentation · input · world"]
+  STOP{{"REFUSE handoff<br/>status = highest green rung<br/>in-progress, not ready"}}
+
+  T0 -->|green| T05
+  T05 -->|green| T1
+  T1 -->|green| T2
+  T2 -->|"green OR blocked-on-human"| T3
+
+  T0 -. red .-> STOP
+  T05 -. red .-> STOP
+  T1 -. red .-> STOP
+  T2 -. "red / unrun" .-> STOP
+
+  classDef new fill:#fff3cd,stroke:#d39e00,stroke-width:2px;
+  classDef human fill:#e7f1ff,stroke:#0d6efd,stroke-width:2px;
+  classDef stop fill:#f8d7da,stroke:#dc3545,stroke-width:2px;
+  class T05,T2 new;
+  class T3 human;
+  class STOP stop;
+```
 
 | Rung | What it runs | What it proves | Engine? | Built today? |
 |---|---|---|---|---|
