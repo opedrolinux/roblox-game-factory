@@ -3,8 +3,10 @@
 --
 --   lune run .claude/skills/lib/gauntlet.luau <gameDir>
 --
--- Runs, with cwd = <gameDir>: `stylua --check .` · `selene src` · `rojo build` · `lune run
--- tests/run.luau` — the same four checks a human runs by hand — and prints ONE JSON line:
+-- Runs, with cwd = <gameDir>: `stylua --check .` · `selene src` · `rojo build` · an in-process static
+-- `require-resolve` gate (gate-require.luau — verifies every require resolves in the Roblox DataModel,
+-- catching cross-service requires that pass under Lune but throw at Roblox boot) · `lune run
+-- tests/run.luau` — and prints ONE JSON line:
 --   {"ok":bool,"gameDir":"...","stages":[{"name":"stylua","ok":bool,"output":"..."},...]}
 -- Exit 0 iff every stage passed. The pipeline's builder / test-gate agents call this to get a
 -- single deterministic verdict instead of each re-deriving the gauntlet.
@@ -17,6 +19,9 @@ local process = require("@lune/process")
 local serde = require("@lune/serde")
 local fs = require("@lune/fs")
 local stdio = require("@lune/stdio")
+
+-- T0.5 require-resolution gate (in-process; runs the static check the other four stages are blind to).
+local GateRequire = require("./gate-require")
 
 type Stage = { name: string, ok: boolean, output: string }
 
@@ -112,6 +117,7 @@ local stages: { Stage } = {
 	run("stylua", "stylua", { "--check", "." }),
 	run("selene", "selene", { "src" }),
 	run("rojo", "rojo", { "build", "default.project.json", "--output", buildOut }),
+	GateRequire.run(dir),
 	runLune(),
 }
 
