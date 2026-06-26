@@ -21,6 +21,7 @@ local controllers = {
 	require(Client.controllers.restock.RestockController), -- [restock] today's rich-vein HUD hint
 	require(Client.controllers.rebirth.RebirthController), -- [rebirth] prestige HUD
 	require(Client.controllers.collection.CollectionController), -- [collection] cosmetic motes + magnet Collect/Sell
+	require(Client.controllers.shop.ShopController), -- [shop] greybox upgrades panel firing BuyUpgrade
 }
 
 Bootstrap.start(controllers, context)

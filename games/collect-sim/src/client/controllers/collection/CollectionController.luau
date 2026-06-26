@@ -22,6 +22,7 @@ local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local Client = LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("Client")
 local Hud = require(Client.hud.Hud)
+local Pads = require(Client.world.Pads)
 local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 local Net = require(Shared.Net)
 local Result = require(Shared.Result)
@@ -63,40 +64,6 @@ local function randomOffset(): any
 	return Vector3.new(math.cos(angle) * dist, 2 + math.random() * 3, math.sin(angle) * dist)
 end
 
--- Locate a pad WorldService built, by its padKind attribute (+ optional islandId). Returns nil until
--- the server's World folder has replicated, so callers poll via waitForPad.
-local function findPad(kind: string, islandId: number?): any
-	local world = workspace:FindFirstChild("World")
-	if world == nil then
-		return nil
-	end
-	local pads = world:FindFirstChild("Pads")
-	if pads == nil then
-		return nil
-	end
-	for _, pad in pads:GetChildren() do
-		if pad:GetAttribute("padKind") == kind then
-			if islandId == nil or pad:GetAttribute("islandId") == islandId then
-				return pad
-			end
-		end
-	end
-	return nil
-end
-
--- Poll for a pad until it replicates (WorldService builds it server-side at boot). Bounded so a
--- mis-built world never spins forever.
-local function waitForPad(kind: string, islandId: number?): any
-	for _ = 1, 200 do
-		local pad = findPad(kind, islandId)
-		if pad ~= nil then
-			return pad
-		end
-		task.wait(0.1)
-	end
-	return findPad(kind, islandId)
-end
-
 function CollectionController:Start(context: any): ()
 	local net = context.net
 
@@ -106,35 +73,22 @@ function CollectionController:Start(context: any): ()
 	local lastCapacity: number? = nil
 
 	-- ----- Refiner pad -> Sell (the call lives here so we update the HUD from the reply) -----
-	task.spawn(function(): ()
-		local pad = waitForPad("refiner")
-		if pad == nil then
-			return
-		end
-		local prompt = pad:FindFirstChildWhichIsA("ProximityPrompt")
-		if prompt == nil then
-			return
-		end
-		-- Connected on the CLIENT only (never also server-side) so the action fires exactly once; the
-		-- server stays authoritative because Sell is server-validated regardless of who triggered it.
-		prompt.Triggered:Connect(function(triggerPlayer: any): ()
-			if triggerPlayer ~= LocalPlayer then
-				return
-			end
-			local result = net:call(Net.Actions.Sell, {})
-			if result.ok then
-				backpackFull = false
-				Hud.setBackpack(0, lastCapacity) -- backpack emptied; keep the known capacity
-				Hud.setStardust(result.value.balance)
-				if result.value.sold > 0 then
-					Hud.flash(`Sold {result.value.sold} motes for {result.value.earned} Stardust`)
-				else
-					Hud.flash("Backpack empty — go collect some motes")
-				end
+	-- Pads.onTrigger waits for the pad to replicate, then connects its prompt on the CLIENT only (never
+	-- also server-side) so Sell fires exactly once; the server stays authoritative regardless.
+	Pads.onTrigger("refiner", nil, LocalPlayer, function(_pad: any): ()
+		local result = net:call(Net.Actions.Sell, {})
+		if result.ok then
+			backpackFull = false
+			Hud.setBackpack(0, lastCapacity) -- backpack emptied; keep the known capacity
+			Hud.setStardust(result.value.balance)
+			if result.value.sold > 0 then
+				Hud.flash(`Sold {result.value.sold} motes for {result.value.earned} Stardust`)
 			else
-				Hud.flash("Sell failed")
+				Hud.flash("Backpack empty — go collect some motes")
 			end
-		end)
+		else
+			Hud.flash("Sell failed")
+		end
 	end)
 
 	-- ----- Cosmetic mote cloud + magnet Collect -----
