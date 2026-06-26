@@ -516,3 +516,96 @@ describe(
 		)
 	end
 )
+
+describe("Collection core — auto-collect ticker (gamepass-gated, server-clock driven)", function()
+	-- The auto-collect ticker (CollectionService.tickAutoCollect, fed at runtime by the guarded
+	-- driver) grants a pass-holder one mote per AUTO_COLLECT_INTERVAL of elapsed SERVER MONOTONIC
+	-- time, into the SAME backpack Collect/Sell share — so auto-collected motes sell normally.
+	-- Authored from the spec's gamepass-gated auto-collect guarantee, driven through the injected
+	-- fake clock (deterministic; no task.wait). We grab the ticker AFTER the setup whose backpack we
+	-- then Sell from (Start sets CollectionService.tickAutoCollect over that setup's backpack).
+	local AUTO_FLAG = "gamepass.autoCollect" -- the spec's auto-collect gamepass ownership flag
+
+	-- Round-robin coroutine driver so a write works whether or not the store yields.
+	local function drainOne(thunk: () -> ()): ()
+		local co = coroutine.create(thunk)
+		local guard = 0
+		while coroutine.status(co) ~= "dead" do
+			guard += 1
+			if guard > 500 then
+				error("write did not converge")
+			end
+			local ok, err = coroutine.resume(co)
+			if not ok then
+				error(`coroutine errored: {tostring(err)}`)
+			end
+		end
+	end
+
+	-- Grant a persisted flag (the auto-collect gamepass) through the canonical write path.
+	local function setFlag(data: any, player: any, key: string): ()
+		local r: any = nil
+		drainOne(function()
+			r = data:update(player, function(d)
+				if d.flags == nil then
+					d.flags = {}
+				end
+				d.flags[key] = true
+				return d
+			end)
+		end)
+		expect(r):toBeOk()
+	end
+
+	it("a NON-holder never auto-collects, no matter how much time elapses", function()
+		local harness, data, player, clock = setup()
+		local tick = CollectionService.tickAutoCollect
+		local ctx = { clock = clock, data = data }
+		expect(tick(ctx, player)):toBe(0) -- first observation anchors the clock, grants nothing
+		clock:advance(10)
+		expect(tick(ctx, player)):toBe(0) -- no gamepass -> strict no-op even after 10s
+		expect((harness.invoke(SELL, player, {}) :: any).value.sold):toBe(0) -- backpack empty
+	end)
+
+	it("a HOLDER accrues one mote per elapsed second, and they sell normally", function()
+		local harness, data, player, clock = setup()
+		setFlag(data, player, AUTO_FLAG)
+		local tick = CollectionService.tickAutoCollect
+		local ctx = { clock = clock, data = data }
+		expect(tick(ctx, player)):toBe(0) -- anchor
+		clock:advance(5)
+		expect(tick(ctx, player)):toBe(5) -- five seconds -> five motes granted
+		local sell = (harness.invoke(SELL, player, {}) :: any).value
+		expect(sell.sold):toBe(5) -- the auto-granted motes are in the shared backpack
+		expect(sell.earned > 0):toBe(true) -- and convert to Stardust like hand-collected motes
+	end)
+
+	it("the sub-interval remainder is carried, never lost", function()
+		local _h, data, player, clock = setup()
+		setFlag(data, player, AUTO_FLAG)
+		local tick = CollectionService.tickAutoCollect
+		local ctx = { clock = clock, data = data }
+		expect(tick(ctx, player)):toBe(0) -- anchor
+		clock:advance(2.5)
+		expect(tick(ctx, player)):toBe(2) -- floor(2.5) = 2 granted, 0.5 carried forward
+		clock:advance(0.5) -- + the carried 0.5 = one full interval
+		expect(tick(ctx, player)):toBe(1) -- the carried remainder completes one more mote
+	end)
+
+	it("the grant is clamped to capacity (never overfills the backpack)", function()
+		-- Discover capacity on a clean probe (never copy the implementation constant).
+		local ph, _pd, pp = setup({ userId = 4242 })
+		local capacity = fillToCapacity(ph, pp)
+
+		local harness, data, player, clock = setup({ userId = 77 })
+		setFlag(data, player, AUTO_FLAG)
+		local tick = CollectionService.tickAutoCollect -- grabbed AFTER the player-77 setup
+		local ctx = { clock = clock, data = data }
+		expect(tick(ctx, player)):toBe(0) -- anchor
+		clock:advance(capacity * 10) -- far more elapsed than a backpack can hold
+		expect(tick(ctx, player)):toBe(capacity) -- clamped to capacity, not capacity*10
+		clock:advance(capacity * 10)
+		expect(tick(ctx, player)):toBe(0) -- already full -> no further grant
+		expect((harness.invoke(SELL, player, {}) :: any).value.sold):toBe(capacity)
+	end)
+end)

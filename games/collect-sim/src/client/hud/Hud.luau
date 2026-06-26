@@ -148,6 +148,125 @@ local function ensure(): ()
 	flash.TextXAlignment = Enum.TextXAlignment.Center
 	state.labels.Flash = flash
 
+	-- Daily streak badge + claim button (Gap #2: Daily has no controller — HudController owns the
+	-- call and registers it via Hud.onDailyClaim; this is just the surface).
+	local daily: any = Instance.new("Frame")
+	daily.Name = "Daily"
+	daily.Position = UDim2.new(0, 16, 0, 132)
+	daily.Size = UDim2.new(0, 240, 0, 36)
+	daily.BackgroundColor3 = Color3.new(0, 0, 0)
+	daily.BackgroundTransparency = 0.45
+	daily.BorderSizePixel = 0
+	daily.Parent = gui
+	local dailyCorner: any = Instance.new("UICorner")
+	dailyCorner.Parent = daily
+	local dailyPad: any = Instance.new("UIPadding")
+	dailyPad.PaddingLeft = UDim.new(0, 8)
+	dailyPad.PaddingRight = UDim.new(0, 8)
+	dailyPad.Parent = daily
+	local dailyRow: any = Instance.new("UIListLayout")
+	dailyRow.FillDirection = Enum.FillDirection.Horizontal
+	dailyRow.VerticalAlignment = Enum.VerticalAlignment.Center
+	dailyRow.Padding = UDim.new(0, 8)
+	dailyRow.Parent = daily
+	local dailyLabel: any = Instance.new("TextLabel")
+	dailyLabel.Name = "Text"
+	dailyLabel.Size = UDim2.new(0, 148, 1, 0)
+	dailyLabel.BackgroundTransparency = 1
+	dailyLabel.TextColor3 = Color3.new(1, 1, 1)
+	dailyLabel.TextXAlignment = Enum.TextXAlignment.Left
+	dailyLabel.Font = Enum.Font.GothamMedium
+	dailyLabel.TextSize = 18
+	dailyLabel.Text = "Daily streak: 0"
+	dailyLabel.Parent = daily
+	state.labels.Daily = dailyLabel
+	local claim: any = Instance.new("TextButton")
+	claim.Name = "Claim"
+	claim.Size = UDim2.new(0, 64, 0, 26)
+	claim.BackgroundColor3 = Color3.new(0.30, 0.52, 0.34)
+	claim.BorderSizePixel = 0
+	claim.TextColor3 = Color3.new(1, 1, 1)
+	claim.Font = Enum.Font.GothamMedium
+	claim.TextSize = 16
+	claim.Text = "Claim"
+	claim.Parent = daily
+	local claimCorner: any = Instance.new("UICorner")
+	claimCorner.Parent = claim
+	claim.Activated:Connect(function(): ()
+		if state.dailyClaimFn ~= nil then
+			state.dailyClaimFn()
+		end
+	end)
+
+	-- Restock "rich vein" hint (top-right), fed by RestockController.
+	local restock: any = newLabel(gui, "Restock", 0)
+	restock.AnchorPoint = Vector2.new(1, 0)
+	restock.Position = UDim2.new(1, -16, 0, 16)
+	restock.Size = UDim2.new(0, 340, 0, 26)
+	restock.TextXAlignment = Enum.TextXAlignment.Right
+	state.labels.Restock = restock
+
+	-- Welcome-back popup (hidden until OfflineController reports an offline grant > 0).
+	local popup: any = Instance.new("Frame")
+	popup.Name = "WelcomeBack"
+	popup.Visible = false
+	popup.AnchorPoint = Vector2.new(0.5, 0.5)
+	popup.Position = UDim2.new(0.5, 0, 0.4, 0)
+	popup.Size = UDim2.new(0, 360, 0, 170)
+	popup.BackgroundColor3 = Color3.new(0.08, 0.09, 0.12)
+	popup.BackgroundTransparency = 0.05
+	popup.BorderSizePixel = 0
+	popup.Parent = gui
+	local popupCorner: any = Instance.new("UICorner")
+	popupCorner.Parent = popup
+	local popupPad: any = Instance.new("UIPadding")
+	popupPad.PaddingLeft = UDim.new(0, 16)
+	popupPad.PaddingRight = UDim.new(0, 16)
+	popupPad.PaddingTop = UDim.new(0, 14)
+	popupPad.PaddingBottom = UDim.new(0, 14)
+	popupPad.Parent = popup
+	local popupLayout: any = Instance.new("UIListLayout")
+	popupLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	popupLayout.Padding = UDim.new(0, 10)
+	popupLayout.Parent = popup
+	local popupTitle: any = Instance.new("TextLabel")
+	popupTitle.LayoutOrder = 0
+	popupTitle.Size = UDim2.new(1, 0, 0, 30)
+	popupTitle.BackgroundTransparency = 1
+	popupTitle.TextColor3 = Color3.new(1, 1, 1)
+	popupTitle.Font = Enum.Font.GothamBold
+	popupTitle.TextSize = 24
+	popupTitle.Text = "Welcome back!"
+	popupTitle.Parent = popup
+	local popupBody: any = Instance.new("TextLabel")
+	popupBody.Name = "Body"
+	popupBody.LayoutOrder = 1
+	popupBody.Size = UDim2.new(1, 0, 0, 66)
+	popupBody.BackgroundTransparency = 1
+	popupBody.TextColor3 = Color3.new(1, 1, 1)
+	popupBody.Font = Enum.Font.GothamMedium
+	popupBody.TextSize = 18
+	popupBody.TextWrapped = true
+	popupBody.Text = ""
+	popupBody.Parent = popup
+	state.labels.WelcomeBackBody = popupBody
+	state.welcomeBack = popup
+	local popupClose: any = Instance.new("TextButton")
+	popupClose.LayoutOrder = 2
+	popupClose.Size = UDim2.new(1, 0, 0, 32)
+	popupClose.BackgroundColor3 = Color3.new(0.20, 0.42, 0.62)
+	popupClose.BorderSizePixel = 0
+	popupClose.TextColor3 = Color3.new(1, 1, 1)
+	popupClose.Font = Enum.Font.GothamMedium
+	popupClose.TextSize = 18
+	popupClose.Text = "Collect"
+	popupClose.Parent = popup
+	local popupCloseCorner: any = Instance.new("UICorner")
+	popupCloseCorner.Parent = popupClose
+	popupClose.Activated:Connect(function(): ()
+		popup.Visible = false
+	end)
+
 	state.mounted = true
 end
 
@@ -221,6 +340,43 @@ function Hud.flash(text: string): ()
 				state.labels.Flash.Text = ""
 			end
 		end)
+	end
+end
+
+function Hud.setDailyStreak(streak: number): ()
+	ensure()
+	if state.labels.Daily then
+		state.labels.Daily.Text = `Daily streak: {streak}`
+	end
+end
+
+-- Register the daily-claim button's click handler (HudController owns the actual Daily net call,
+-- covering Gap #2). The button built in ensure() invokes whatever is registered here.
+function Hud.onDailyClaim(fn: () -> ()): ()
+	ensure()
+	state.dailyClaimFn = fn
+end
+
+function Hud.setRestockHint(text: string): ()
+	ensure()
+	if state.labels.Restock then
+		state.labels.Restock.Text = text
+	end
+end
+
+-- Show the welcome-back popup with the server-reported offline grant (OfflineController calls this
+-- once on join when granted > 0). All numbers are server-authoritative; we only display them.
+function Hud.showWelcomeBack(granted: number, balance: number): ()
+	ensure()
+	if state.labels.WelcomeBackBody then
+		state.labels.WelcomeBackBody.Text = "You earned "
+			.. commas(granted)
+			.. " Stardust while away.\nBalance: "
+			.. commas(balance)
+			.. "."
+	end
+	if state.welcomeBack then
+		state.welcomeBack.Visible = true
 	end
 end
 

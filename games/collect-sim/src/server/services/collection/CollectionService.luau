@@ -40,6 +40,10 @@ local REBIRTH_STEP = 0.1
 -- testable through the injected fake clock — no task.wait, no scheduler, no real-time dependency.
 local AUTO_COLLECT_INTERVAL = 1 -- seconds of elapsed mono time per auto-granted mote (pass-holders)
 
+-- How often the RUNTIME driver (Roblox-only) ticks every live player. Coarse on purpose: the ticker
+-- carries the sub-interval remainder, so a 1s loop never grants ahead of real elapsed mono time.
+local AUTO_COLLECT_DRIVE_INTERVAL = 1
+
 -- The gamepass flag key checked on PlayerData.flags. Only players whose flags[AUTO_COLLECT_FLAG]
 -- is truthy receive auto-collected motes; everyone else is a strict no-op.
 local AUTO_COLLECT_FLAG = "gamepass.autoCollect"
@@ -288,10 +292,32 @@ function CollectionService:Start(context: any): ()
 	local backpacks: { [number]: number } = {}
 	context.net:register(makeCollectAction(backpacks))
 	context.net:register(makeSellAction(backpacks))
-	-- Expose the deterministic, clock-driven auto-collect ticker. The runtime driver (a task loop that
-	-- calls this per live pass-holder) is wired by the collection feature later; the spine keeps it
-	-- side-effect-free + injected-clock-driven so it is Tier-1 testable now (no task.wait here).
+	-- Expose the deterministic, clock-driven auto-collect ticker (Tier-1 tested directly via the fake
+	-- clock — no task.wait inside it). The RUNTIME driver below feeds it the live players.
 	self.tickAutoCollect = makeAutoCollectTicker(backpacks)
+
+	-- ----- RUNTIME-ONLY auto-collect driver (Roblox-only; a strict no-op under Lune) -----
+	-- `game`/`task` are real globals on the Roblox server but NIL under Lune, so the whole driver sits
+	-- behind the established guard (the LeaderboardService/DataService pattern): under Lune, Start has
+	-- ALREADY registered the actions + set the ticker above, then returns here — so the existing tests
+	-- (which drive tickAutoCollect directly) are untouched. Only at runtime do we spin the loop that
+	-- ticks every live player, granting auto-collected motes into the SAME backpack Collect/Sell share.
+	local realGame: any = game
+	local realTask: any = task
+	if realGame == nil or realTask == nil or type(realTask.spawn) ~= "function" then
+		return
+	end
+	local Players = realGame:GetService("Players")
+	-- The narrow ctx the ticker needs: the injected SERVER clock (mono) + the per-player data accessor.
+	local tickCtx = { clock = context.clock, data = context.data }
+	realTask.spawn(function(): ()
+		while true do
+			for _, player in Players:GetPlayers() do
+				self.tickAutoCollect(tickCtx, player)
+			end
+			realTask.wait(AUTO_COLLECT_DRIVE_INTERVAL)
+		end
+	end)
 end
 
 return CollectionService

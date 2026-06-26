@@ -5,9 +5,14 @@
 -- computes elapsed time, a rate, a multiplier, or a grant — it asks the server (which derives everything
 -- from the persisted lastSeenUnix + the server clock) and shows the result.
 --
--- ROBLOX-ONLY (uses the client Net via the bootstrap context). No spec requires it; mirrors the sample /
--- islands controller pattern: claim once on join, expose a typed claim() the UI button can call, and
--- keep the latest authoritative grant for the "welcome back" popup to read.
+-- ROBLOX-ONLY (uses the client Net via the bootstrap context + the Hud singleton). No spec requires
+-- it; mirrors the sample/islands controller pattern: claim once on join, expose a typed claim() the UI
+-- can call, and (Slice 5) show the server-reported grant in the HUD's welcome-back popup. Never
+-- requires a sibling controller — it reaches the HUD through the shared Hud module.
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local Client = LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("Client")
+local Hud = require(Client.hud.Hud)
 local Net = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared").Net)
 
 local OfflineController = { name = "OfflineController" }
@@ -43,6 +48,12 @@ function OfflineController:Start(context: any): ()
 	-- Claim-on-join: fire once when the controller starts so a returning player sees their accrued
 	-- earnings immediately. The server caps + advances the base, so this is the only claim that grants.
 	claim()
+
+	-- Show the welcome-back popup with the SERVER-reported grant (only when something was actually
+	-- accrued). All numbers are authoritative — we only display what the server granted.
+	if self._lastClaim ~= nil and (self._lastClaim.granted or 0) > 0 then
+		Hud.showWelcomeBack(self._lastClaim.granted, self._lastClaim.balance)
+	end
 end
 
 return OfflineController

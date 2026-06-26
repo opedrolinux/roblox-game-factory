@@ -12,6 +12,9 @@ local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local Client = LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("Client")
 local Hud = require(Client.hud.Hud)
+local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+local Net = require(Shared.Net)
+local Result = require(Shared.Result)
 
 local HudController = { name = "HudController" }
 
@@ -40,6 +43,30 @@ function HudController:Start(context: any): ()
 		if view.rebirths ~= nil then
 			Hud.setRebirths(view.rebirths)
 		end
+		if view.daily ~= nil and view.daily.streak ~= nil then
+			Hud.setDailyStreak(view.daily.streak)
+		end
+	end)
+
+	-- Gap #2: the daily-claim button has no controller of its own — HudController owns the call. The
+	-- client sends ONLY the empty intent; the server is the sole authority over the cooldown, the
+	-- streak, and the server-derived reward. We just render the authoritative reply. The call yields,
+	-- so it runs on its own task off the button click.
+	Hud.onDailyClaim(function(): ()
+		task.spawn(function(): ()
+			local result = net:call(Net.Actions.Daily, {})
+			if result.ok then
+				Hud.setStardust(result.value.balance)
+				Hud.setDailyStreak(result.value.streak)
+				Hud.flash(
+					`Daily reward: +{result.value.reward} Stardust (streak {result.value.streak})`
+				)
+			elseif result.code == Result.Codes.OnCooldown then
+				Hud.flash("Daily already claimed — come back tomorrow")
+			else
+				Hud.flash("Daily claim failed")
+			end
+		end)
 	end)
 end
 
