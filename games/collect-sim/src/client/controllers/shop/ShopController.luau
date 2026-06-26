@@ -148,6 +148,8 @@ function ShopController:Start(context: any): ()
 					Hud.flash(`Not enough Stardust for {label}`)
 				elseif result.code == Result.Codes.OutOfRange then
 					Hud.flash(`{label} is maxed out`)
+				elseif result.code == Result.Codes.RateLimited then
+					Hud.flash("Buying too fast — try again in a moment")
 				else
 					Hud.flash("Purchase failed")
 				end

@@ -313,7 +313,10 @@ function CollectionService:Start(context: any): ()
 	realTask.spawn(function(): ()
 		while true do
 			for _, player in Players:GetPlayers() do
-				self.tickAutoCollect(tickCtx, player)
+				-- Isolate each tick: a throw for ONE player must not unwind the loop and silently kill
+				-- auto-collect server-wide. (The ticker is engineered throw-free — get returns a Result,
+				-- the math is pure — but defend in depth, mirroring Net.dispatch's per-handler pcall.)
+				pcall(self.tickAutoCollect, tickCtx, player)
 			end
 			realTask.wait(AUTO_COLLECT_DRIVE_INTERVAL)
 		end

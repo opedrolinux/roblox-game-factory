@@ -151,7 +151,16 @@ function DataService.update(self: any, player: PlayerLike, transform: (any) -> a
 	if session == nil then
 		return Result.err(Result.Codes.NoData, "session not loaded")
 	end
-	return session:update(transform)
+	local result = session:update(transform)
+	-- §4.5: push the refreshed client-safe view after a SUCCESSFUL write so every "data" subscriber
+	-- (HUD currencies/rebirths/Prisms/streak, islands + restock eligibility) stays in sync without
+	-- each action reply having to carry every field. This is the post-write analog of the on-load push
+	-- in Start (the only other "data" emit). Nil-guarded: tests construct DataService with no net (push
+	-- skipped, behavior unchanged), and a failed write mutated nothing so there is nothing to push.
+	if result.ok and self._net ~= nil then
+		self._net:fireClient(player, "data", Types.toView(result.value))
+	end
+	return result
 end
 
 -- Force a save (throttled/retried per budget). Normally automatic on release. Retries a

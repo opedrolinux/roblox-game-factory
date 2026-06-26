@@ -63,6 +63,10 @@ function RebirthController:Start(context: any): ()
 	Pads.onTrigger("rebirth", nil, LocalPlayer, function(_pad: any): ()
 		local result = self.rebirth()
 		if result.ok then
+			-- Update the HUD prestige readouts straight from the authoritative reply (snappy); the
+			-- post-write "data" push reconciles Stardust (the reply carries no balance — rebirth zeroes it).
+			Hud.setRebirths(result.value.rebirths)
+			Hud.setPrisms(result.value.prisms)
 			Hud.flash(
 				`Rebirth complete — {result.value.rebirths} rebirths, {result.value.prisms} Prisms`
 			)

@@ -57,13 +57,15 @@ function IslandsController:Start(context: any): ()
 	local function attemptUnlock(islandId: number): ()
 		local result = self.unlock(islandId)
 		if result.ok then
+			Hud.setStardust(result.value.balance) -- reflect the spent cost in the HUD now
 			Hud.flash(`Unlocked island {islandId}!`)
 		elseif result.code == Result.Codes.Insufficient then
 			Hud.flash("Not enough Stardust to unlock that island")
 		elseif result.code == Result.Codes.NotOwner then
 			Hud.flash("That island needs the VIP gamepass")
 		elseif result.code == Result.Codes.OutOfRange then
-			Hud.flash("Unlock the previous island first")
+			-- OutOfRange covers unknown / starting / out-of-order / already-unlocked — keep it generic.
+			Hud.flash("You can't unlock that island yet")
 		else
 			Hud.flash("Unlock failed")
 		end

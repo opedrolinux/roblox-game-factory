@@ -110,16 +110,6 @@ end
 -- floor, so a player who has unlocked nothing extra gets exactly 1 — behavior-identical to the
 -- pre-feature Sell. `d` is the LOCK-HELD player-data snapshot; when absent we return the identity
 -- default 1 (the current Sell caller passes nil, so this keeps that path a no-op multiplier).
--- One catalog row projected for the SERVER-side world generator: the same server-owned numbers
--- FetchIslands projects to the client, MINUS the per-player `unlocked` boolean (the geometry builds
--- every platform; the client renders locked state from FetchIslands). `order` is the 1-based index.
-export type CatalogEntry = {
-	id: number,
-	order: number,
-	cost: number,
-	multiplier: number,
-	vip: boolean,
-}
 
 local IslandsSeam = {}
 function IslandsSeam.multiplierFor(_self: any, d: any): number
@@ -133,6 +123,17 @@ function IslandsSeam.multiplierFor(_self: any, d: any): number
 	end
 	return 1 -- defensive: the starting island always matches above, so this is unreachable
 end
+
+-- One catalog row projected for the SERVER-side world generator: the same server-owned numbers
+-- FetchIslands projects to the client, MINUS the per-player `unlocked` boolean (the geometry builds
+-- every platform; the client renders locked state from FetchIslands). `order` is the 1-based index.
+export type CatalogEntry = {
+	id: number,
+	order: number,
+	cost: number,
+	multiplier: number,
+	vip: boolean,
+}
 
 -- ----- THE WORLD-GENERATOR SEAM: read-only catalog projection (no player, no snapshot) -----
 -- WorldService reads this in Start to build one platform per island, so the greybox geometry tracks

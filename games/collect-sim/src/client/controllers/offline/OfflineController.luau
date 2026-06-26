@@ -52,6 +52,7 @@ function OfflineController:Start(context: any): ()
 	-- Show the welcome-back popup with the SERVER-reported grant (only when something was actually
 	-- accrued). All numbers are authoritative — we only display what the server granted.
 	if self._lastClaim ~= nil and (self._lastClaim.granted or 0) > 0 then
+		Hud.setStardust(self._lastClaim.balance) -- reflect the grant in the persistent readout now
 		Hud.showWelcomeBack(self._lastClaim.granted, self._lastClaim.balance)
 	end
 end

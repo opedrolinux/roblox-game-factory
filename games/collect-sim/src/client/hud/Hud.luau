@@ -307,7 +307,11 @@ function Hud.setBackpack(count: number, capacity: number?): ()
 	end
 	local cap = state.capacity or 0
 	if state.labels.Backpack then
-		state.labels.Backpack.Text = "Backpack: " .. tostring(count) .. " / " .. tostring(cap)
+		if cap > 0 then
+			state.labels.Backpack.Text = "Backpack: " .. tostring(count) .. " / " .. tostring(cap)
+		else
+			state.labels.Backpack.Text = "Backpack: " .. tostring(count)
+		end
 	end
 	if state.backpackFill then
 		local frac = 0

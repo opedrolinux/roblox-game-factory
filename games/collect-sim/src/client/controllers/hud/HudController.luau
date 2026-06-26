@@ -21,12 +21,9 @@ local HudController = { name = "HudController" }
 function HudController:Start(context: any): ()
 	local net = context.net
 
-	-- Build the HUD now so it exists before the first data push lands, and seed the backpack readout.
-	Hud.ensure()
-	Hud.setBackpack(0)
-
-	-- Mirror the client-safe view on every push (load + after relevant writes). Read-only display: we
-	-- only ever render fields the server chose to replicate; a missing field leaves its label as-is.
+	-- Register the "data" subscription FIRST: the HUD build (ensure -> PlayerGui) yields, and NetClient
+	-- drops a "data" event that arrives with no handler (there is no replay). Registering before any
+	-- yield means a join push landing mid-build is still applied (the setters lazily build the HUD).
 	net:on("data", function(view: any): ()
 		if view == nil then
 			return
@@ -47,6 +44,10 @@ function HudController:Start(context: any): ()
 			Hud.setDailyStreak(view.daily.streak)
 		end
 	end)
+
+	-- Build the HUD now (so it exists for the first setter) and seed the backpack readout.
+	Hud.ensure()
+	Hud.setBackpack(0)
 
 	-- Gap #2: the daily-claim button has no controller of its own — HudController owns the call. The
 	-- client sends ONLY the empty intent; the server is the sole authority over the cooldown, the

@@ -212,3 +212,71 @@ describe("DataService load-retry loop (SessionLocked contention seam — concern
 		expect(service:loadSession(player)):toBeErr(Result.Codes.NoData)
 	end)
 end)
+
+describe(
+	"DataService.update — pushes the client-safe view after a successful write (§4.5)",
+	function()
+		-- The post-write "data" push keeps every client subscriber (HUD currencies/rebirths/Prisms/streak,
+		-- islands + restock eligibility) in sync; without it the client only ever sees the join push. We
+		-- inject a recording net surrogate and assert update() emits exactly one "data" event carrying
+		-- toView(the NEW data) for the writing player — and that update without a net never crashes (the
+		-- production tests construct DataService with no net, so the push must stay strictly nil-guarded).
+		local function recordingNet(): any
+			local calls: { any } = {}
+			return {
+				calls = calls,
+				fireClient = function(_self: any, player: any, event: string, payload: any): ()
+					table.insert(calls, { player = player, event = event, payload = payload })
+				end,
+			}
+		end
+
+		it(
+			"a successful update fires ONE 'data' push with toView(new data) for that player",
+			function()
+				local clock = Mocks.clock(1000)
+				local config = testConfig(3)
+				local store = Mocks.store({ clock = clock, config = config })
+				local service = DataService.new(store, clock, config, Mocks.logWarn)
+				local net = recordingNet()
+				service._net = net -- production sets this in Start; tests inject it directly
+				local player = Mocks.player(1)
+				service:loadSession(player)
+
+				local updated = service:update(player, function(d)
+					d.currencies.Stardust += 25
+					return d
+				end)
+				expect(updated):toBeOk()
+
+				-- exactly one push, for THIS player, on the "data" channel.
+				expect(#net.calls):toBe(1)
+				expect(net.calls[1].player):toBe(player)
+				expect(net.calls[1].event):toBe("data")
+				-- the payload is the client-safe view of the NEW data (the write is visible in the push)...
+				expect(net.calls[1].payload.currencies.Stardust):toBe(25)
+				-- ...and it is the toView projection, never a server-only ledger like receipts.
+				expect((net.calls[1].payload :: any).receipts):toBe(nil)
+			end
+		)
+
+		it(
+			"update with NO net wired pushes nothing and never crashes (the tests' default world)",
+			function()
+				local clock = Mocks.clock(1000)
+				local config = testConfig(3)
+				local store = Mocks.store({ clock = clock, config = config })
+				local service = DataService.new(store, clock, config, Mocks.logWarn)
+				local player = Mocks.player(1)
+				service:loadSession(player)
+				-- service._net is nil (no Start): update still succeeds and simply skips the push.
+				local updated = service:update(player, function(d)
+					d.currencies.Stardust += 5
+					return d
+				end)
+				expect(updated):toBeOk()
+				expect((service:get(player) :: any).value.currencies.Stardust):toBe(5)
+			end
+		)
+	end
+)

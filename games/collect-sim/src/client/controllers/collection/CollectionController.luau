@@ -86,6 +86,8 @@ function CollectionController:Start(context: any): ()
 			else
 				Hud.flash("Backpack empty — go collect some motes")
 			end
+		elseif result.code == Result.Codes.RateLimited then
+			Hud.flash("Selling too fast — try again in a moment")
 		else
 			Hud.flash("Sell failed")
 		end
