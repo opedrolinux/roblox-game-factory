@@ -6,10 +6,18 @@
 -- result. The permanent multiplier shown is whatever the server returns (derived server-side at
 -- read), never fabricated here.
 --
--- ROBLOX-ONLY (uses the client Net via the bootstrap context). No spec requires it; mirrors the
--- sample/islands controller pattern: subscribe to the pushed data view for the live rebirth/Prisms
--- count, and expose a typed rebirth() the UI button calls.
-local Net = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared").Net)
+-- ROBLOX-ONLY (uses the client Net via the bootstrap context + the Hud singleton + the Pads helper).
+-- No spec requires it; mirrors the sample/islands controller pattern: subscribe to the pushed data
+-- view for the live rebirth/Prisms count, expose a typed rebirth() the UI calls, and (Slice 4) bind
+-- the in-world rebirth pad's ProximityPrompt to it. Never requires another controller.
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local Client = LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("Client")
+local Hud = require(Client.hud.Hud)
+local Pads = require(Client.world.Pads)
+local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+local Net = require(Shared.Net)
+local Result = require(Shared.Result)
 
 local RebirthController = { name = "RebirthController" }
 
@@ -48,6 +56,22 @@ function RebirthController:Start(context: any): ()
 		end
 		return result
 	end
+
+	-- Slice 4: bind the in-world rebirth pad (built by WorldService) to self.rebirth(). Wired on the
+	-- CLIENT only (never also server-side) so the action fires once; the server owns the threshold,
+	-- the Prisms grant, and the full atomic reset — we just translate the reply into a HUD message.
+	Pads.onTrigger("rebirth", nil, LocalPlayer, function(_pad: any): ()
+		local result = self.rebirth()
+		if result.ok then
+			Hud.flash(
+				`Rebirth complete — {result.value.rebirths} rebirths, {result.value.prisms} Prisms`
+			)
+		elseif result.code == Result.Codes.Insufficient then
+			Hud.flash("Not enough Stardust to rebirth yet")
+		else
+			Hud.flash("Rebirth failed")
+		end
+	end)
 end
 
 return RebirthController
