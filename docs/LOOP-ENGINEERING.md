@@ -114,6 +114,21 @@ Loop engineering **validates the existing Phase B roadmap and adds three sharpen
    that downgrades autonomy / pauses-and-pings at a $/token or parked-failure threshold (traffic-light:
    green reversible / yellow bounded / red human). *(small)*
 
+**Foundational rung beneath upgrades 3 and 4 — the verification ladder (`docs/VERIFICATION-LADDER.md`).**
+A cross-turn `/goal` grader (3) and an LLM-as-judge (4) are only as honest as the tiers they grade. The
+factory shipped a game that passed 313/313 Lune tests and **did not boot in Roblox at all** — every
+readiness signal bottomed out at one bit (`gauntlet ok`), conflating *Lune-green* with *ready-for-human*.
+Before a grader can mean *"boots and the loop is reachable"* rather than *"passes under Lune,"* the loop
+needs an **ordered ladder** (T0 static → T0.5 require-resolution → T1 Lune → T2 in-engine smoke → T3
+human) with an **exhaust-automation-first** rule: never escalate while a cheaper automatable rung is red
+or un-run, and a game's status is the highest contiguous green rung, never a bare "ready". Built as L1
+(`gate-require.luau`, the T0.5 gate), L2 (the ladder + handoff guard `tier-ladder.luau` + honest tier
+labels), L3 (`smoke-gate.js`, the T2 in-engine smoke, park-mode until Studio MCP is live). **Authoring
+corollary:** a `-- Lune-clean` / `[D1 shim]` comment is a *risk-marker to verify*, never a correctness
+badge — it names a Roblox-invisible code path that no Lune gate exercises. So the §8 done-condition the
+grader checks must read *"every automatable tier (T0..T2) is green or blocked-on-human,"* not *"the
+gauntlet is green."*
+
 ## 5. Sources (primary-weighted)
 
 - Addy Osmani — *Loop Engineering*: https://addyosmani.com/blog/loop-engineering/

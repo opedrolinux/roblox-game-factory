@@ -75,6 +75,41 @@ real player data or real money, or hands an exploiter the economy.
 11. **Audit every inserted asset.** No Creator-Store asset lands without a human okay (assets can hide
     backdoors). v1 is greybox-in-code anyway.
 
+## Cross-service requires — use the dual-runtime (D1) shim, always
+
+A `require` that crosses a **Rojo service-root boundary** is the single most dangerous line a feature can
+write, because it passes every Lune check and then throws at the first require in Roblox. The project maps
+`src/shared → ReplicatedStorage.Shared`, `src/server → ServerScriptService.Server`, `src/client →
+StarterPlayer.StarterPlayerScripts.Client` — three **different** top-level services with no common `../`
+ancestor. So a bare `require("../../shared/Net")` from a server module resolves against the *filesystem*
+under Lune (where `server`/`shared` are siblings) → passes → but resolves against the *instance tree* in
+Roblox → `Server.shared` (does not exist) → **throws at boot, before any service Start.** A green gauntlet
+will not save you; this exact bug shipped a game that never booted.
+
+**The rule:**
+- **Same-mount sibling require** (both files under the same service root, e.g. `shared/Migrations` →
+  `./Types`) — a bare relative string is fine; it resolves identically in both runtimes.
+- **Cross-mount require** (shared↔server↔client) — **MUST** use the dual-runtime **D1 shim** (this is the
+  exact form the real spine uses, e.g. `services/shop/UpgradesShopService.luau`):
+  ```lua
+  local Net
+  if script == nil then
+    Net = require("../../../shared/Net") -- Lune: filesystem loader (relative path depth varies by file)
+  else
+    local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+    Net = require((Shared :: any).Net) -- Roblox: instance tree. The `:: any` cast is REQUIRED under
+    -- --!strict — a WaitForChild result is typed `Instance`, so `.Net` errors without it.
+  end
+  ```
+  The instance branch is the always-supported engine path; both branches **must resolve to the same
+  module**. The T0.5 require gate (`gate-require.luau`) fails any bare cross-service string require and any
+  shim whose branches drift — but author it correctly, do not lean on the gate.
+- A `-- Lune-clean` / `[D1 shim]` comment is **not a correctness badge** — it marks a file whose Roblox
+  branch Lune never exercises. Treat it as a reason to *verify* the instance branch (the require gate / an
+  in-engine smoke), never as evidence to trust it.
+
+See `docs/VERIFICATION-LADDER.md` for why this rung exists.
+
 ## The shared contracts are READ-ONLY to feature work
 
 `src/shared/` is the integration seam every feature touches — the action registry (`Net.luau`), the

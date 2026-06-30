@@ -11,9 +11,16 @@ to reach the human. It extends `LOOP-ENGINEERING.md` §4 upgrades 3–4 (cross-t
 with the rung those upgrades assume but the factory does not yet have: **proof the game runs in
 Roblox at all.**
 
-Status: **PLAN — nothing here is built yet.** Grounded in a read of the live gauntlet, escalation
-gate, and require conventions (2026-06-21). Companion to the `tier1-tier2-require-blindspot` memory
-and `docs/TESTING.md` §9.
+Status: **L1 + L2 BUILT; L3 BUILT in park-mode (2026-06-30).** Originally a plan (2026-06-21); now
+implemented. **L1** — `gate-require.luau`, the T0.5 gate, wired into the gauntlet (`0aa4d1e`). **L2** —
+the handoff guard `.claude/skills/lib/tier-ladder.luau` (`highestTierReached` + `handoff`, unit-tested
+in `.claude/skills/lib/tests/tier_ladder_spec.luau`), `integration-gate.js`' `verificationTier` field,
+honest tier labels
+in `FACTORY.md` §8 + `portfolio/README.md`, and the D1-shim-by-default authoring rule in
+`core/CLAUDE.md`. **L3** — `.claude/workflows/smoke-gate.js`, the T2 in-engine smoke gate, in **park-mode**:
+it prepares the lane (authors the smoke script + runbook) and returns `T2-blocked-on-human`, never
+claiming `T2-green` without a real JSON evidence line; it activates when the Studio MCP bridge exposes a
+run tool. Companion to the `tier1-tier2-require-blindspot` memory and `docs/TESTING.md` §9.
 
 ---
 
@@ -412,8 +419,11 @@ make the graded condition mean *"boots and the loop is reachable,"* not *"passes
 **Decided:**
 
 - **L1 ships as protected-config** (§3.5) — the gate that defines "green" is not editable by the agents
-  it grades.
-- **Plan first, build later** — this document is the deliverable; no code is written yet.
+  it grades. *(Adding `gate-require.luau` + `gauntlet.luau` to `PROTECTED_FENCE_FILES` remains the one
+  human-only follow-up; `tier-ladder.luau` should join them when that lands — the handoff verdict must
+  not be agent-editable either.)*
+- ~~**Plan first, build later**~~ — **done: L1 + L2 are built, L3 is built in park-mode** (see the status
+  block at the top). This document is now both the design rationale and the record of what shipped.
 
 **Open (for a future build pass):**
 

@@ -8,10 +8,22 @@
 
 local process = require("@lune/process")
 local mergeSpec = require("./merge_spec")
+local tierLadderSpec = require("./tier_ladder_spec")
 
-local checks, failures = mergeSpec()
+local checks = 0
+local failures: { string } = {}
 
-print(string.format("merge classifier: %d checks", checks))
+local function runSpec(name: string, spec: () -> (number, { string }))
+	local specChecks, specFailures = spec()
+	checks += specChecks
+	print(string.format("%s: %d checks", name, specChecks))
+	for _, f in specFailures do
+		table.insert(failures, name .. ": " .. f)
+	end
+end
+
+runSpec("merge classifier", mergeSpec)
+runSpec("verification ladder", tierLadderSpec)
 
 if #failures > 0 then
 	print(string.format("FAIL - %d of %d checks failed:", #failures, checks))
@@ -21,5 +33,5 @@ if #failures > 0 then
 	process.exit(1)
 end
 
-print(string.format("PASS - all %d merge-classifier checks behaved as specified.", checks))
+print(string.format("PASS - all %d build-pipeline helper checks behaved as specified.", checks))
 process.exit(0)

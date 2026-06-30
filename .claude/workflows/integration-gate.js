@@ -100,6 +100,15 @@ const failing = (author && author.failingCriteria) || []
 const redteamBugs = (redteam && redteam.integrationBugs) || []
 const totalBugs = failing.length + redteamBugs.length
 const verdict = totalBugs > 0 ? 'integration-bugs-found' : (coverage && coverage.verdict === 'pass' && author && author.gauntletOk) ? 'green' : 'needs-review'
-log(`integration-gate DONE. verdict: ${verdict} | failingCriteria: ${failing.length} | redteamBugs: ${redteamBugs.length} | coverage: ${coverage ? coverage.verdict : 'n/a'}. Orchestrator adjudicates + fixes falsify-first.`)
 
-return { gameDir, verdict, author, coverage, redteam, failingCriteria: failing, redteamBugs }
+// This gate runs entirely under Lune — it proves the logic is correct under the FILESYSTEM loader, NOT
+// that the game boots in-engine. So a 'green' verdict is T1-green ONLY, with T2 (in-engine smoke) still
+// unverified. This gate only LABELS the tier; it does NOT itself refuse escalation. The refusal lives in
+// the handoff guard (.claude/skills/lib/tier-ladder.luau, handoff()) — built + unit-tested — which the
+// build-game handoff/FF step calls to refuse a non-engine-verified tree; wiring it in is the remaining
+// integration task (VERIFICATION-LADDER.md §4.2). Surfacing verificationTier here keeps any reader from
+// laundering Lune-green into "ready/engine-verified" (the conflation).
+const verificationTier = verdict === 'green' ? 'T1-green,T2-unverified' : 'below-T1-green'
+log(`integration-gate DONE. verdict: ${verdict} | verificationTier: ${verificationTier} | failingCriteria: ${failing.length} | redteamBugs: ${redteamBugs.length} | coverage: ${coverage ? coverage.verdict : 'n/a'}. Orchestrator adjudicates + fixes falsify-first.`)
+
+return { gameDir, verdict, verificationTier, author, coverage, redteam, failingCriteria: failing, redteamBugs }

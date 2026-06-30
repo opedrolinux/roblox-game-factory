@@ -4,13 +4,25 @@ Every game the factory touches, and where it is in the funnel. The factory write
 here; the human reads this to decide what needs attention and what to kill or scale.
 
 ## Funnel stages
-`spec → building → verified-local → awaiting-human-gate → soft-launch → measuring → scaled | killed`
+`spec → building → verified-local-T1 → engine-smoked-T2 → awaiting-human-gate-T3 → soft-launch → measuring → scaled | killed`
+
+The `verified-local` stage is split into **honest verification tiers** (`docs/VERIFICATION-LADDER.md`),
+because "passes the Lune gauntlet" is *not* "boots in Roblox":
+- **`verified-local-T1`** — logic correct under the file loader (T0 static + T0.5 require-resolution + T1
+  Lune tests all green). **NOT engine-booted.** This is as far as the automatable lane reaches when the
+  engine lane (Studio MCP / Open Cloud) is unconnected — T2 is then recorded `blocked-on-human`.
+- **`engine-smoked-T2`** — the real place was booted; services Start; the core loop ran on the live wire.
+- **`awaiting-human-gate-T3`** — everything automatable is green/blocked-on-human; waiting on the human
+  playtest (fun, feel, presentation, input, world) and the publish decision.
+
+A game's stage is the **highest contiguous green rung** — never a bare "verified". The loop will not move
+a game to `awaiting-human-gate-T3` while a cheaper automatable rung (T0..T2) is still red or un-run.
 
 ## Games
 
 | Game | Codename | Stage | Waiting on | Notes |
 |---|---|---|---|---|
-| Collect Simulator | stardust | building | feature fan-out (build-game) | First game. Spec: `specs/collect-sim.md`. **Scaffolded** from core/ (2026-06-19) — gauntlet-green; features next. Theme proposal pending confirm. |
+| Collect Simulator | stardust | **verified-local-T1** | engine smoke (T2) — Studio MCP not connected | First game. Spec: `specs/collect-sim.md`. build-game v1 complete (8 features, 313/313 logic, both gates + adversarial review green) on `staging/collect-sim`. **Boot fix + T0.5 require gate** (D1 shims) on `fix/tier2-roblox-boot` — require-resolution statically verified, **not yet Studio-booted**. **Greybox presentation** (world/HUD/input, 321/321) on `feat/collect-sim-presentation`. Every rung T0..T1 green; **T2 (in-engine smoke) blocked-on-human** until the place is opened in Studio with the MCP plugin. NOT engine-verified; not merged to `main`. **Caveat (the contiguous-ladder rule cuts honestly across branches):** this T1 status holds only on `fix/tier2-roblox-boot` (the branch carrying the boot fix + T0.5 require gate); `staging/collect-sim`/`main` is still **T0** — its T0.5 require gate is *red* (the original cross-service boot bug) until the boot fix merges. |
 
 ## Decision log
 - 2026-06-14 — Factory bootstrapped (Phase A: structure). Greenfield, not based on prior templates.
@@ -66,6 +78,19 @@ here; the human reads this to decide what needs attention and what to kill or sc
   one DataStore → player-data cross-contamination) plus 8 other findings. First game **collect-sim**
   scaffolded green (stylua/selene/rojo + 80/80). Also added `core/CLAUDE.md` (the per-game engineering
   contract template). Next in B4: `build-features` + `build-game`.
+
+- 2026-06-30 — **Verification ladder (closing the "Lune-green ≠ Roblox-runs" gap).** After a build
+  passed 313/313 Lune tests + every gate yet did not boot in Roblox (a cross-service require that
+  resolves under Lune but throws in the DataModel), the readiness signal was found to be a **conflation**:
+  one bit (gauntlet `ok`) stood in for "ready", so the loop escalated straight to the human, skipping the
+  in-engine rung. Fix is a 3-layer ladder (`docs/VERIFICATION-LADDER.md`): **L1** the T0.5 require-gate
+  (`gate-require.luau`, shipped `0aa4d1e`) catches the boot class statically with no Roblox; **L2** an
+  explicit T0→T0.5→T1→T2→T3 ladder + the "exhaust-automation-first" handoff guard
+  (`.claude/skills/lib/tier-ladder.luau`, unit-tested) + honest tier labels (this funnel, `FACTORY.md` §8,
+  `integration-gate.js`' `verificationTier`) + a D1-shim-by-default authoring rule (`core/CLAUDE.md`);
+  **L3** an in-engine smoke gate (`smoke-gate.js`) shipped in **park-mode** — it prepares the lane + a
+  runbook and parks at `awaiting-engine-smoke` until Studio MCP is live (never claims T2 without the
+  evidence). On branch `feat/verification-ladder-l2`; not merged.
 
 ## Deferred / known gaps (on purpose, not forgotten)
 - **Asset pipeline** (manifest + backdoor-scan gate) — not needed for greybox v1; build when a game needs real assets.

@@ -167,8 +167,26 @@ the human reviews only at the visual/publish gate (§5).
 **Definition of done — before a game reaches your gate.** A build is "ready for human review" only when:
 the core loop is completable end-to-end · every feature is green at both test gates · the adversarial
 pass found no open exploit · monetization + the core analytics events are wired · the re-entry hooks
-exist · and the gauntlet is green. Anything short of that is *in progress*, not *done* — and the run
-says so rather than pretending.
+exist · and **every automatable verification tier (T0..T2) is green or explicitly blocked-on-human, with
+the status label stating the highest tier passed.** Anything short of that is *in progress*, not *done* —
+and the run says so rather than pretending.
+
+> **"The gauntlet is green" is necessary but NOT sufficient — it is one rung, not the whole ladder.**
+> The factory once shipped a game that passed every Lune check and *did not boot in Roblox at all*: a
+> cross-service `require` resolved under Lune's file loader but threw in the DataModel. The gauntlet
+> proves *formats + lints + compiles-to-a-place + require-resolves + logic-passes-under-Lune* (T0, T0.5,
+> T1) — it does **not** prove the game boots in-engine (T2). So readiness is an **ordered ladder**
+> (`docs/VERIFICATION-LADDER.md`), and a game's status is the **highest contiguous green rung**, never a
+> bare "ready": **T0** static · **T0.5** require-resolution · **T1** Lune logic · **T2** in-engine smoke
+> · **T3** human playtest. The loop **must not escalate to a human while a cheaper automatable rung
+> (T0..T2) is still red or un-run** — exhaust automation first. When the engine lane is unconnected, T2
+> is honestly recorded `blocked-on-human` and the label reads `verified-local-T1 (logic only, NOT
+> engine-booted)` — it is *never* relabeled "ready" off T1. The handoff guard
+> (`.claude/skills/lib/tier-ladder.luau`, `highestTierReached` + `handoff`) is the **built, unit-tested
+> policy** that computes this verdict mechanically rather than from prose — the build-game handoff/FF step
+> calls it so no step can launder Lune-green into engine-verified. *(Wiring it into the handoff step is
+> the remaining integration task per `docs/VERIFICATION-LADDER.md` §4.2; until then the same rule is
+> applied by the orchestrator/human at the gate, with the guard as the canonical reference.)*
 
 Outputs land in `portfolio/` so the funnel (build → soft-launch → measure → kill/scale) is tracked.
 
