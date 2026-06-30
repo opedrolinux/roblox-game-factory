@@ -183,10 +183,11 @@ and the run says so rather than pretending.
 > is honestly recorded `blocked-on-human` and the label reads `verified-local-T1 (logic only, NOT
 > engine-booted)` — it is *never* relabeled "ready" off T1. The handoff guard
 > (`.claude/skills/lib/tier-ladder.luau`, `highestTierReached` + `handoff`) is the **built, unit-tested
-> policy** that computes this verdict mechanically rather than from prose — the build-game handoff/FF step
-> calls it so no step can launder Lune-green into engine-verified. *(Wiring it into the handoff step is
-> the remaining integration task per `docs/VERIFICATION-LADDER.md` §4.2; until then the same rule is
-> applied by the orchestrator/human at the gate, with the guard as the canonical reference.)*
+> policy** that computes this verdict mechanically rather than from prose, so no step can launder
+> Lune-green into engine-verified. It is **runnable today** as
+> `lune run .claude/skills/lib/tier-status.luau <gameDir>`, which runs the live gauntlet and prints a
+> game's honest tier. *(Auto-invoking it inside the build-game handoff/FF step is the remaining wiring per
+> `docs/VERIFICATION-LADDER.md` §4.2; until then the orchestrator/human runs it at the gate.)*
 
 Outputs land in `portfolio/` so the funnel (build → soft-launch → measure → kill/scale) is tracked.
 

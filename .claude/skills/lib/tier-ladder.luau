@@ -90,43 +90,39 @@ export type Handoff = {
 function M.handoff(results: Results, engineLaneAvailable: boolean): Handoff
 	local highestGreen = M.highestTierReached(results)
 	local lastAutomatable = if engineLaneAvailable then "T2" else "T1"
-	local lastIdx = M.rungIndex(lastAutomatable)
 
-	-- Walk the automatable rungs bottom-up; the first one that is neither green nor (legitimately)
-	-- blocked-on-human refuses handoff.
-	for _, rung in RUNGS do
-		if M.rungIndex(rung.id) > lastIdx then
-			break
-		end
-		local status = results[rung.id]
-		if status == "green" then
-			continue
-		end
-		-- T2 is allowed to be blocked-on-human ONLY when the engine lane is unavailable (then it is not
-		-- in the must-exhaust set anyway, lastAutomatable == T1, so this loop never reaches T2). Any
-		-- other non-green automatable rung — red or un-run — blocks handoff.
+	local function refuse(rungId: string, status: Status?, why: string): Handoff
 		return {
 			ready = false,
 			highestGreen = highestGreen,
 			lastAutomatable = lastAutomatable,
-			label = string.format("in-progress (%s %s), NOT ready", rung.id, status or "unrun"),
-			blockedBy = rung.id,
-			reason = string.format(
-				"%s (%s) is %s; the loop refuses to escalate to a human while an automatable rung "
-					.. "is red/un-run — exhaust automation first (VERIFICATION-LADDER.md §4.1)",
-				rung.id,
-				rung.label,
-				status or "unrun"
-			),
+			label = string.format("in-progress (%s %s), NOT ready", rungId, status or "unrun"),
+			blockedBy = rungId,
+			reason = string.format("%s (%s) %s", rungId, RUNGS[M.rungIndex(rungId)].label, why),
 		}
 	end
 
-	-- Every automatable rung up to lastAutomatable is green. Escalation is allowed; the label states
-	-- the honest highest tier. T2-green earns the engine-smoked label HOWEVER it was produced — the
-	-- automated lane OR a human Studio run fed back through smoke-gate ingest (in which case the lane is
-	-- still "unavailable" but T2 is genuinely verified). So the label keys off the T2 RESULT, not the
-	-- lane flag — otherwise a human-verified boot would be under-claimed as "NOT engine-booted".
-	if results["T2"] == "green" then
+	-- The base rungs T0..T1 are ALWAYS runnable, so all three must be green to escalate. The first
+	-- non-green one refuses handoff — this is where the conflation dies: a require-red (T0.5) or un-run
+	-- T1 tree can never reach the human, no matter how green the rungs above it look.
+	for _, id in { "T0", "T0.5", "T1" } do
+		if results[id] ~= "green" then
+			return refuse(
+				id,
+				results[id],
+				"is red/un-run; exhaust automation before escalating to a human (VERIFICATION-LADDER.md §4.1)"
+			)
+		end
+	end
+
+	-- T2 (in-engine smoke) disposition. Note red is handled SEPARATELY from un-run: a recorded engine
+	-- FAILURE blocks regardless of the lane flag (the game is known not to boot), whereas an un-run T2 is
+	-- allowed to wait on the human when the lane is down.
+	local t2 = results["T2"]
+	if t2 == "green" then
+		-- T2 passed — HOWEVER it was produced (the automated lane OR a human Studio run fed back through
+		-- smoke-gate ingest, in which case the lane is still "unavailable" but T2 is genuinely verified).
+		-- The label keys off the T2 RESULT, not the lane flag, so a real boot is never under-claimed.
 		return {
 			ready = true,
 			highestGreen = highestGreen,
@@ -136,6 +132,26 @@ function M.handoff(results: Results, engineLaneAvailable: boolean): Handoff
 			reason = "T0..T2 green; in-engine smoke passed; the only rung left is the human playtest",
 		}
 	end
+	if t2 == "red" then
+		-- A RECORDED in-engine failure is fatal regardless of the lane — never relabel a non-booting game
+		-- "ready". This is the case the lane-down fall-through must NOT swallow.
+		return refuse(
+			"T2",
+			"red",
+			"FAILED — the game does not boot in-engine; not ready for a human"
+		)
+	end
+	if engineLaneAvailable then
+		-- The lane is up, so an un-run (or stale blocked-on-human) T2 is an un-exhausted automatable rung:
+		-- run the smoke before escalating.
+		return refuse(
+			"T2",
+			t2,
+			"is un-run and the engine lane is available — run the in-engine smoke first"
+		)
+	end
+	-- Lane down + T2 un-run: T2 is the human's to run; escalate with the honest, explicitly-NOT-engine
+	-- -booted label so no reader mistakes Lune-green for engine-verified.
 	return {
 		ready = true,
 		highestGreen = highestGreen,
@@ -188,6 +204,23 @@ function M.fromGauntlet(
 		["T0.5"] = statusOf({ "require" }),
 		["T1"] = statusOf({ "lune" }),
 	}
+end
+
+-- The aggregator (VERIFICATION-LADDER.md §4.2): compose a full ladder from a gauntlet result plus any
+-- higher-rung evidence the gauntlet cannot produce — `t2` from an in-engine smoke (smoke-gate), `t3`
+-- from a human playtest — then return the handoff verdict. Both default to "unrun" (fail-closed: absent
+-- evidence is never green). This is what the build-game handoff step calls so the verdict is computed,
+-- not asserted in prose. The runnable CLI `tier-status.luau` is a thin wrapper over this.
+function M.statusFor(
+	gauntlet: { ok: boolean, stages: { { name: string, ok: boolean } } },
+	t2: Status?,
+	t3: Status?,
+	engineLaneAvailable: boolean
+): Handoff
+	local results = M.fromGauntlet(gauntlet)
+	results["T2"] = t2 or "unrun"
+	results["T3"] = t3 or "unrun"
+	return M.handoff(results, engineLaneAvailable)
 end
 
 return M

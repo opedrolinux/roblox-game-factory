@@ -14,8 +14,10 @@ Roblox at all.**
 Status: **L1 + L2 BUILT; L3 BUILT in park-mode (2026-06-30).** Originally a plan (2026-06-21); now
 implemented. **L1** — `gate-require.luau`, the T0.5 gate, wired into the gauntlet (`0aa4d1e`). **L2** —
 the handoff guard `.claude/skills/lib/tier-ladder.luau` (`highestTierReached` + `handoff`, unit-tested
-in `.claude/skills/lib/tests/tier_ladder_spec.luau`), `integration-gate.js`' `verificationTier` field,
-honest tier labels
+in `.claude/skills/lib/tests/tier_ladder_spec.luau`) plus the **runnable aggregator**
+`.claude/skills/lib/tier-status.luau` (`lune run …/tier-status.luau <gameDir>` → runs the gauntlet,
+layers in any recorded T2 smoke, prints the honest handoff verdict), `integration-gate.js`'
+`verificationTier` field, honest tier labels
 in `FACTORY.md` §8 + `portfolio/README.md`, and the D1-shim-by-default authoring rule in
 `core/CLAUDE.md`. **L3** — `.claude/workflows/smoke-gate.js`, the T2 in-engine smoke gate, in **park-mode**:
 it prepares the lane (authors the smoke script + runbook) and returns `T2-blocked-on-human`, never
@@ -264,7 +266,12 @@ as `blocked-on-human: Studio not connected`. If T0.5 is red or un-run, the loop 
 - **A thin `build-game` aggregator** (the orchestrator `BUILD-GAME-DESIGN.md` §13 currently leaves to
   the human/main-session). Add `highestTierReached(results)` — walks T0 → T0.5 → T1 → T2 and returns
   the highest *contiguous* green rung — plus the handoff guard above. This is the code that finally
-  enforces `FACTORY.md` §8's prose conjunction.
+  enforces `FACTORY.md` §8's prose conjunction. **BUILT** as the pure policy
+  `.claude/skills/lib/tier-ladder.luau` (`highestTierReached` + `handoff` + `statusFor`/`fromGauntlet`)
+  and the runnable wrapper `.claude/skills/lib/tier-status.luau` (runs the gauntlet for a `<gameDir>`,
+  layers in a recorded T2 smoke, prints the verdict, exit 0 iff `ready`). **Remaining:** auto-invoke
+  `tier-status` inside the build-game handoff/FF step so the gate is mechanical end-to-end, not run by
+  hand.
 - **`integration-gate.js`** (~line 102/105) — the precise spot where Lune-green is laundered into
   `green`. Add a `verificationTier` field (`T1-green` | `T1-green,T2-unverified` | …) to the verdict
   and the return object, so no downstream reader can mistake Lune-green for engine-verified. Logic

@@ -138,6 +138,22 @@ return function(): (number, { string })
 		"a genuinely-booted T2 is NOT mislabeled 'NOT engine-booted'"
 	)
 
+	-- A RECORDED in-engine FAILURE (T2 red) blocks handoff EVEN with the lane down — a known non-booting
+	-- game is never relabeled "ready". (Regression: the earlier walk-based handoff swallowed a red T2 when
+	-- the lane was unavailable, wrongly emitting verified-local-T1.)
+	local smokeFailedLaneDown =
+		ladder.handoff({ T0 = "green", ["T0.5"] = "green", T1 = "green", T2 = "red" }, false)
+	eq(
+		smokeFailedLaneDown.ready,
+		false,
+		"a recorded T2 FAILURE blocks handoff even with the lane down"
+	)
+	eq(smokeFailedLaneDown.blockedBy, "T2", "blocked by the failed in-engine smoke")
+	check(
+		string.find(smokeFailedLaneDown.label, "T2 red") ~= nil,
+		"the label names the failed engine smoke, not a false 'verified-local-T1'"
+	)
+
 	-- The blocked-on-human boundary: with the engine lane AVAILABLE, a rung marked blocked-on-human is a
 	-- contradiction (the loop could run it) -> it is non-green and refuses handoff (finding L-2).
 	local laneT2blocked = ladder.handoff(
@@ -223,6 +239,54 @@ return function(): (number, { string })
 		},
 	})
 	eq(dupRedThenGreen["T0"], "red", "duplicate stylua [red, then green] -> T0 red (red wins)")
+
+	-- ── statusFor: the aggregator (gauntlet result -> handoff verdict) ────────
+	local function gauntlet(
+		stylua: boolean,
+		selene: boolean,
+		rojo: boolean,
+		require_: boolean,
+		lune: boolean
+	)
+		return {
+			ok = stylua and selene and rojo and require_ and lune,
+			stages = {
+				stage("stylua", stylua),
+				stage("selene", selene),
+				stage("rojo", rojo),
+				stage("require", require_),
+				stage("lune", lune),
+			},
+		}
+	end
+
+	-- A fully green gauntlet, no engine lane, no smoke yet -> verified-local-T1, ready for the human gate.
+	local sFresh = ladder.statusFor(gauntlet(true, true, true, true, true), nil, nil, false)
+	eq(sFresh.ready, true, "all-green gauntlet + no lane -> ready (T1)")
+	eq(sFresh.highestGreen, "T1", "fresh status reaches T1")
+	check(
+		string.find(sFresh.label, "NOT engine%-booted") ~= nil,
+		"fresh status label is honest (T1 only)"
+	)
+
+	-- The conflation, end-to-end from a real gauntlet shape: require stage red -> refuse handoff.
+	local sBoot = ladder.statusFor(gauntlet(true, true, true, false, true), nil, nil, false)
+	eq(sBoot.ready, false, "require-red gauntlet -> statusFor refuses handoff")
+	eq(sBoot.blockedBy, "T0.5", "statusFor names the require rung as the blocker")
+
+	-- A recorded human/engine smoke (T2 green) layered onto a green gauntlet -> engine-smoked.
+	local sSmoked = ladder.statusFor(gauntlet(true, true, true, true, true), "green", nil, false)
+	eq(sSmoked.ready, true, "T2 evidence layered in -> ready")
+	eq(sSmoked.highestGreen, "T2", "layered T2 green reaches T2")
+	check(
+		string.find(sSmoked.label, "engine%-smoked%-T2") ~= nil,
+		"statusFor surfaces engine-smoked"
+	)
+
+	-- Engine lane available but no smoke recorded yet -> must run T2 first.
+	local sLane = ladder.statusFor(gauntlet(true, true, true, true, true), nil, nil, true)
+	eq(sLane.ready, false, "lane available + T2 unrun -> statusFor refuses (run the smoke)")
+	eq(sLane.blockedBy, "T2", "statusFor blocks on the un-run T2 when the lane exists")
 
 	-- ── rungIndex ────────────────────────────────────────────────────────────
 	check(ladder.rungIndex("T0") < ladder.rungIndex("T0.5"), "T0 below T0.5")
