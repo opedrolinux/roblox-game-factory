@@ -113,10 +113,14 @@ Loop engineering **validates the existing Phase B roadmap and adds three sharpen
 5. **[NEW] Portfolio-as-work-queue + scheduled re-entry** — the funnel table is already a de-facto queue;
    poll it to pick up the next `spec`-stage game or a freed parked feature, re-entering within the fence.
    *Do this only after upgrade 1 is proven.* *(medium)*
-6. **[NEW] Durable sub-agent memory + a cross-game `learnings.md`** — persist recurring Roblox failure
-   modes (economy-dupe shapes, clock-rollback exploits, DataStore-budget misuse) so the builder sees them
-   as up-front checklist items. The self-improving (context-level, not model-level) flywheel that compounds
-   the factory's reuse thesis (`FACTORY.md` §2). *(medium)*
+6. **[STARTED — `docs/LEARNINGS.md`] Durable sub-agent memory + a cross-game learnings file** — persist
+   recurring Roblox failure modes (economy-dupe shapes, clock-rollback exploits, DataStore-budget misuse)
+   so the builder sees them as up-front checklist items. The self-improving (context-level, not
+   model-level) flywheel that compounds the factory's reuse thesis (`FACTORY.md` §2). **Built:**
+   `docs/LEARNINGS.md` — every real bug class the gates have caught (economy cap-bypass on restore, the
+   cross-service-require boot bug, offline-base re-stamping, the sample-mint, gate↔bootstrap parity,
+   Unknown-laundering, …), wired into `core/CLAUDE.md` so every feature builder reads it first.
+   **Remaining:** broader durable *sub-agent* memory (per-agent recall beyond the one shared file). *(medium)*
 7. **[NEW] Budget circuit-breaker** — turn *"watch `/usage`"* (`FACTORY.md` §6) into an automated breaker
    that downgrades autonomy / pauses-and-pings at a $/token or parked-failure threshold (traffic-light:
    green reversible / yellow bounded / red human). *(small)*

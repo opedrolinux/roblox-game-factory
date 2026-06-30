@@ -39,6 +39,14 @@ lune run tests/run.luau   # Tier-1 unit tests
 A PostToolUse hook runs stylua + selene on each edited `.luau` and feeds failures back — fix them
 in the **same turn**. A feature that can't go green is **parked** for human review, never merged.
 
+## Read first: the factory's known failure modes
+
+Before writing a feature, skim **`docs/LEARNINGS.md`** — the cross-game checklist of every real bug class
+the factory's gates have caught (economy cap-bypass on restore, the cross-service-require boot bug,
+offline-base re-stamping, tautological concurrency tests, the sample-mint, an Unknown laundering to
+"done", …). The independent gate that grades your code is *looking for these*; seeing them up front is
+cheaper than re-discovering them. Add to that file when a gate catches a new one — that is the flywheel.
+
 ## Non-negotiable engineering rules (apply to ALL generated code)
 
 These are the §10 rules. They are not style preferences — most exist because violating them loses
