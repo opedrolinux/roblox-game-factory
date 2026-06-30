@@ -9,6 +9,7 @@
 local process = require("@lune/process")
 local mergeSpec = require("./merge_spec")
 local tierLadderSpec = require("./tier_ladder_spec")
+local gateSampleSpec = require("./gate_sample_spec")
 
 local checks = 0
 local failures: { string } = {}
@@ -24,6 +25,7 @@ end
 
 runSpec("merge classifier", mergeSpec)
 runSpec("verification ladder", tierLadderSpec)
+runSpec("sample-removal gate", gateSampleSpec)
 
 if #failures > 0 then
 	print(string.format("FAIL - %d of %d checks failed:", #failures, checks))

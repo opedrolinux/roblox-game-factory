@@ -90,7 +90,9 @@ Format: **the trap** · *why it's dangerous* · the shape to watch for · the fi
   `init.server` still registers it. The deletable `sample` scaffold shipped a **client-callable mint**
   (`SampleAction` credited a client `{amount}` straight to Stardust) because the pipeline never removed it
   after real features existed. **Fix:** remove the sample scaffold once real features replace it; keep the
-  gate's world matching the real bootstrap. *(Adversarial review — the per-feature gates couldn't see it.)*
+  gate's world matching the real bootstrap. The **sample-removal finalization gate** (`gate-sample.luau`)
+  now fails a game that still carries the sample alongside real features. *(Adversarial review — the
+  per-feature gates couldn't see it.)*
 - **Tautological tests pass a broken impl.** *Coverage theatre.* A "concurrency" test on a PURE READER
   (e.g. a leaderboard fetch) has no FIFO-lock race to exercise — it passes vacuously. Write falsifiable
   assertions: prove the test RED on the unfixed code before trusting it GREEN. *(Anti-tautology critic
