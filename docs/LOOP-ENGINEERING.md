@@ -94,15 +94,22 @@ Loop engineering **validates the existing Phase B roadmap and adds three sharpen
 2. **[B4 — planned] Build the `build-game` / `build-features` pipeline (the loop body).** Feature
    fan-out, worktree isolation, union-merge, the two gates wired together, the adversarial pass —
    currently doctrine and diagrams, not code. Without it there is no loop to engineer. *(large)*
-3. **[NEW] Wrap the build in a `/goal` cross-turn outer loop with a fresh-model grader.** Highest-leverage
-   new idea. Make the definition-of-done (`FACTORY.md` §8) a written condition — *"gauntlet green AND both
-   test gates pass AND the adversarial pass found no open exploit"* — graded each turn by a *separate*
-   model, instead of the orchestrator deciding "done" in-session. This is the core loop-engineering
-   insight, made machine-enforced. *(medium)*
-4. **[NEW] Add an LLM-as-judge quality layer atop the deterministic gates.** The gates prove *"the logic
-   is correct"* (`TESTING.md` §9 is honest that this is necessary-not-sufficient). A single-call rubric
-   judge (0.0–1.0 + pass/fail, with an "Unknown" escape valve) adds *"is it good / does it match the
-   spec?"* — catching spec-drift and narrowing the human visual gate to genuine taste calls. *(medium)*
+3. **[GRADER BUILT 2026-06-30 — `grade.js`] Wrap the build in a `/goal` cross-turn outer loop with a
+   fresh-model grader.** Highest-leverage new idea. Make the definition-of-done (`FACTORY.md` §8) a written
+   condition, graded each turn by a *separate* model, instead of the orchestrator deciding "done"
+   in-session. **Built** as `.claude/workflows/grade.js`: a DETERMINISTIC tier stage (runs
+   `tier-status.luau`, grounding "done" in the verification ladder — *boots-and-reachable* when the engine
+   lane is live, else T1-green with T2 explicitly blocked-on-human, carried verbatim in the verdict label)
+   + an INDEPENDENT judge agent that grades each spec `## Success criteria` checkbox
+   pass/fail/unknown with concrete evidence; fail-closed (an Unknown is never a pass). **Remaining:** the
+   *cross-turn outer-loop* wrapping (re-entering the build each turn until `grade.done`) is harness-level
+   (`/goal`); `grade.js` is the gradeable check that loop calls. *(medium)*
+4. **[BUILT — inside `grade.js`] Add an LLM-as-judge quality layer atop the deterministic gates.** The
+   gates prove *"the logic is correct"* (`TESTING.md` §9 is honest that this is necessary-not-sufficient).
+   A single-call rubric judge (0.0–1.0 + pass/fail, with an "Unknown" escape valve) adds *"is it good /
+   does it match the spec?"* — catching spec-drift and narrowing the human visual gate to genuine taste
+   calls. **Built** as the `qualityJudge` in `grade.js` (specMatchScore + verdict + gaps), gated by a
+   `qualityThreshold`. *(medium)*
 5. **[NEW] Portfolio-as-work-queue + scheduled re-entry** — the funnel table is already a de-facto queue;
    poll it to pick up the next `spec`-stage game or a freed parked feature, re-entering within the fence.
    *Do this only after upgrade 1 is proven.* *(medium)*
