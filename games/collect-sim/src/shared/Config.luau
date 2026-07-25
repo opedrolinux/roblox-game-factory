@@ -8,6 +8,12 @@ export type DataStoreBudget = {
 	maxRetries: number, -- same-key write retry budget (DataStore budget awareness)
 	retryBaseSeconds: number, -- backoff base (uses injected clock in tests)
 	writeMinIntervalSeconds: number, -- throttle floor between same-key writes
+	-- [B2 SessionStore] session-lock + write-cadence tunables (B2-SESSIONSTORE-DESIGN §8):
+	lockTtlSeconds: number, -- MemoryStore lock TTL (auto-expiry = crash-safe steal; D1/D3)
+	heartbeatIntervalSeconds: number, -- TTL renew cadence (= lockTtl/2, beats the TTL under jitter)
+	autosaveIntervalSeconds: number, -- periodic DataStore flush (0 = save-on-release-only; D5)
+	sessionLockedWaitSeconds: number, -- load's SessionLocked-specific wait budget (>= lockTtl; H1)
+	globalWritesPerMinute: number, -- shutdown/steady global write budget (D8)
 }
 
 export type RateDefault = {
@@ -30,6 +36,11 @@ local Config: Config = {
 		maxRetries = 4,
 		retryBaseSeconds = 1.0,
 		writeMinIntervalSeconds = 6.0,
+		lockTtlSeconds = 30,
+		heartbeatIntervalSeconds = 15,
+		autosaveIntervalSeconds = 60,
+		sessionLockedWaitSeconds = 40,
+		globalWritesPerMinute = 60,
 	},
 	rateDefaults = {
 		maxPerWindow = 10,

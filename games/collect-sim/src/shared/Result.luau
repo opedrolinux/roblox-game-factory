@@ -16,8 +16,8 @@ local Result = {}
 -- time-gate: OnCooldown (a time-gated action claimed before its server-time window opens)
 -- authority: NotOwner, RateLimited, Rejected (panic flag)
 -- routing/data: UnknownAction, NoData, Internal
--- lock contention (reserved now for the B2 SessionStore, never returned by MockStore):
---   SessionLocked, LockStolen
+-- lock contention (returned by the B2 SessionStore; MockStore returns them ONLY under the
+-- D6 test hooks returnSessionLocked/stealLockAfter): SessionLocked, LockStolen
 Result.Codes = {
 	BadPayload = "BadPayload",
 	BadType = "BadType",

@@ -6,6 +6,8 @@
 -- that happens in each object's Start. ROBLOX-ONLY: uses script/game. Never required by a spec.
 local ServerScriptService = game:GetService("ServerScriptService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local DataStoreService = game:GetService("DataStoreService")
 
 local Server = ServerScriptService:WaitForChild("Server")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -14,10 +16,27 @@ local Config = require(Shared.Config)
 
 local Clock = require(Server.data.Clock)
 local MockStore = require(Server.data.MockStore)
+local SessionStore = require(Server.data.SessionStore)
 local DataService = require(Server.data.DataService)
 local Gate = require(Server.security.Gate)
 local NetServer = require(Server.net.NetServer)
 local AnalyticsService = require(Server.services.analytics.AnalyticsService)
+
+-- [B2 §6] Pick the store by REAL DataStore capability, never by `game ~= nil` (this module
+-- already dereferences `game` at module scope, so that guard's else-branch is dead — L8) and
+-- never by Studio-vs-live (Studio WITH API access should exercise the real store). The probe:
+-- running (not edit mode) AND a real DataStore read succeeds. Without API access the pcall
+-- fails -> MockStore fallback (in-memory, honest: a playtest sees data not persisting rather
+-- than a hard error on every save).
+local function canPersist(): boolean
+	if not RunService:IsRunning() then
+		return false
+	end
+	local ok = pcall(function()
+		DataStoreService:GetDataStore(Config.storeName):GetAsync("__capability_probe")
+	end)
+	return ok
+end
 
 local Context = {}
 
@@ -31,9 +50,14 @@ function Context.build(): any
 	local clock = Clock.real(time)
 	local config = Config
 
-	-- Spine runtime default store is the in-memory MockStore (B2 swaps SessionStore behind the
-	-- same Store interface — a drop-in, no DataService change).
-	local store = MockStore.new({ clock = clock, config = config })
+	-- [B2 §6] The real session-locked SessionStore when DataStores are actually usable;
+	-- MockStore otherwise (edit mode / no API access). Same Store interface — a drop-in.
+	local store
+	if canPersist() then
+		store = SessionStore.new({ clock = clock, config = config })
+	else
+		store = MockStore.new({ clock = clock, config = config })
+	end
 
 	local data = DataService.new(store, clock, config)
 	local gate = Gate.new(clock)

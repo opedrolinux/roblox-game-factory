@@ -35,6 +35,10 @@ export type MockOptions = {
 	throttleSaves: number?, -- first N saves per key return a throttled Err, then succeed
 	yieldOnUpdate: boolean?, -- force a yield in the update critical section (race tests)
 	seed: { [string]: any }?, -- preload keys
+	-- [B2 D6] session-lock contention hooks, so the DataService reactions are Tier-1-testable
+	-- (falsify-first) without a real store (B2-SESSIONSTORE-DESIGN §11):
+	returnSessionLocked: number?, -- first N loads per key return Err(SessionLocked), then grant
+	stealLockAfter: number?, -- after N successful saves per key, every save returns Err(LockStolen)
 }
 
 -- Internal per-key lock state. `held` is true while a transform owns the critical section;
@@ -79,6 +83,9 @@ function MockStore.new(options: MockOptions): any
 	-- Per-key save bookkeeping for throttle + retry simulation.
 	local saveThrottleRemaining: { [string]: number } = {}
 	local lastWriteMono: { [string]: number } = {}
+	-- [B2 D6] per-key contention-hook bookkeeping.
+	local sessionLockedRemaining: { [string]: number } = {}
+	local successfulSaves: { [string]: number } = {}
 
 	local function getLock(key: string): LockState
 		local state = locks[key]
@@ -130,6 +137,18 @@ function MockStore.new(options: MockOptions): any
 			return Result.err(Result.Codes.Internal, "MockStore.failLoad")
 		end
 
+		-- [B2 D6] returnSessionLocked: the first N loads per key see another server's live lock,
+		-- so DataService's SessionLocked wait budget (incl. the exhaustion->kick path) is testable.
+		if options.returnSessionLocked ~= nil then
+			if sessionLockedRemaining[key] == nil then
+				sessionLockedRemaining[key] = options.returnSessionLocked
+			end
+			if sessionLockedRemaining[key] > 0 then
+				sessionLockedRemaining[key] -= 1
+				return Result.err(Result.Codes.SessionLocked, "MockStore.returnSessionLocked")
+			end
+		end
+
 		-- Single-process mock: grant the session lock instantly.
 		heldKeys[key] = true
 		if backing[key] == nil then
@@ -175,6 +194,16 @@ function MockStore.new(options: MockOptions): any
 		end
 
 		function session.save(self: any): Result<any>
+			-- [B2 D6] stealLockAfter: after N successful saves the session lock has been re-claimed
+			-- by "another server" — every further save is a PERMANENT LockStolen (never retryable),
+			-- exactly the §4.2 write-exclusion outcome, so the terminal reaction is testable.
+			if
+				options.stealLockAfter ~= nil
+				and (successfulSaves[key] or 0) >= options.stealLockAfter
+			then
+				return Result.err(Result.Codes.LockStolen, "MockStore.stealLockAfter")
+			end
+
 			if options.failSave then
 				return Result.err(Result.Codes.Internal, "MockStore.failSave")
 			end
@@ -199,6 +228,7 @@ function MockStore.new(options: MockOptions): any
 
 			lastWriteMono[key] = nowMono
 			backing[key] = self.data
+			successfulSaves[key] = (successfulSaves[key] or 0) + 1
 			return Result.ok(self.data)
 		end
 
