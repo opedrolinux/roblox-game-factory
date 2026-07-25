@@ -1,6 +1,7 @@
 # B2-SESSIONSTORE-DESIGN.md — the real persistence layer
 
-> **DRAFT for the human checkpoint (rev 2, post independent adversarial review).** Pre-build design for
+> **APPROVED (rev 3, 2026-07-25): the human checkpoint passed — all eight decisions D1–D8 accepted
+> as recommended (§13). Build unblocked per FACTORY.md design → checkpoint → build.** Pre-build design for
 > B2's #1 piece: the real session-locked DataStore behind the **unchanged `Store` interface**. It makes
 > the player-data + receipts-ledger **durable across restarts** — today the runtime store is the
 > in-memory `MockStore`, so a restart loses all data + the idempotency ledger (a real-money receipt could
@@ -235,6 +236,10 @@ synchronous confirmed `save()` this needs — no contract change, but it must be
   monetization slice this unblocks.
 
 ## 13. Decisions for the human checkpoint
+
+> **All eight APPROVED as recommended by the human, 2026-07-25.** D1 = (a) MemoryStore TTL +
+> DataStore data + lockId stamp; D3/D5 = the 30/15/60/40s defaults + periodic autosave; D7 = kick
+> with a "rejoin to sync" message; D2/D4/D6/D8 accepted as written.
 
 | # | Decision | Recommendation |
 |---|---|---|
