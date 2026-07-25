@@ -1,10 +1,18 @@
 --!strict
--- core/src/server/services/sample/SampleAction.luau   [SAMPLE — Lune-clean: relative requires only]
+-- core/src/server/services/sample/SampleAction.luau   [SAMPLE]
 -- The sample action DEFINITION: plain data + pure functions => spec-requirable under Lune, no
--- Roblox global. The spec requires THIS directly and drives it through Mocks.net (-> real
+-- Roblox global run. The spec requires THIS directly and drives it through Mocks.net (-> real
 -- Net.dispatch). new-game deletes this whole folder. See docs/CORE-DESIGN.md §8.
-local Net = require("../../../shared/Net")
-local Result = require("../../../shared/Result")
+-- [D1 shim] In Roblox src/shared maps to ReplicatedStorage.Shared (a different service) -> require by instance.
+local Net, Result
+if script == nil then
+	Net = require("../../../shared/Net")
+	Result = require("../../../shared/Result")
+else
+	local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+	Net = require((Shared :: any).Net)
+	Result = require((Shared :: any).Result)
+end
 
 local SampleAction: Net.Action<{ amount: number }, { balance: number }> = {
 	name = Net.Actions.Sample, -- "sample.ping"

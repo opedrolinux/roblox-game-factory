@@ -2,8 +2,15 @@
 -- core/src/server/data/Store.luau
 -- The low-level persistence INTERFACE. MockStore (spine) and SessionStore (B2) both
 -- implement it, unchanged. All methods may yield and return a Result (no throwing across
--- the boundary). Lune-clean: relative require only. See docs/CORE-DESIGN.md §4.1.
-local Result = require("../../shared/Result")
+-- the boundary). Lune-clean: under Lune (script == nil) the relative require resolves; in Roblox
+-- src/shared maps to ReplicatedStorage.Shared (a different service), so require by instance. [D1 shim]
+local Result
+if script == nil then
+	Result = require("../../shared/Result")
+else
+	local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+	Result = require((Shared :: any).Result)
+end
 type Result<T> = Result.Result<T>
 
 -- A loaded, session-locked record. The lock is the single-writer guarantee: only the server
