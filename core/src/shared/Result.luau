@@ -14,8 +14,8 @@ local Result = {}
 -- type/range/payload: BadPayload, BadType, OutOfRange
 -- authority: NotOwner, RateLimited, Rejected (panic flag)
 -- routing/data: UnknownAction, NoData, Internal
--- lock contention (reserved now for the B2 SessionStore, never returned by MockStore):
---   SessionLocked, LockStolen
+-- lock contention (returned by the B2 SessionStore; MockStore returns them ONLY under the
+-- D6 test hooks returnSessionLocked/stealLockAfter): SessionLocked, LockStolen
 Result.Codes = {
 	BadPayload = "BadPayload",
 	BadType = "BadType",

@@ -25,8 +25,9 @@ local SPEC_PATHS = {
 	"./unit/migration.spec",
 	"./unit/net.spec",
 	"./unit/sample.spec",
-	"./unit/validation.spec",
 	"./unit/selene_guard.spec",
+	"./unit/session_lock.spec",
+	"./unit/validation.spec",
 }
 table.sort(SPEC_PATHS) -- belt-and-suspenders determinism (concern 10)
 
