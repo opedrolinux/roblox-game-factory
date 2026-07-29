@@ -100,6 +100,8 @@ function DataService.new(
 	-- [B2 H2] userId -> true while the session is DEAD (lock stolen, delta unrecoverable).
 	-- Cleared by a fresh successful loadSession (rejoin) or the player leaving.
 	self._dead = {} :: { [number]: boolean }
+	-- [B2 D5] set by Stop so the periodic autosave loop does not race the shutdown flush.
+	self._autosaveStopped = false
 	-- optional NetServer for pushing the client-safe view; set during Start, nil in tests.
 	self._net = nil :: any
 	return self
@@ -216,7 +218,7 @@ function DataService.save(self: any, player: PlayerLike): Result<any>
 	end
 	local saved = self:saveSession(session)
 	if not saved.ok and (saved :: any).code == Result.Codes.LockStolen then
-		self:markDead(player.UserId, Result.Codes.LockStolen)
+		self:markDead(player.UserId, Result.Codes.LockStolen, session)
 	end
 	return saved
 end
@@ -255,13 +257,59 @@ function DataService.saveSession(self: any, session: any): Result<any>
 	end
 end
 
+-- Internal: release one session (final save + unlock) with the SAME budget-aware retry policy
+-- saveSession uses. The leave path and the shutdown flush both go through here, because
+-- `release` IS the final durable write — a single unretried attempt would lose a whole session's
+-- progress to one transient throttle, and it is the most frequent durable write in a live game.
+-- LockStolen stays terminal (the new owner is authoritative; retrying is pure waste).
+function DataService.releaseSession(self: any, session: any): Result<any>
+	local maxRetries = self._config.dataStore.maxRetries
+	local attempt = 0
+	while true do
+		local released = session:release()
+		if released.ok then
+			return released
+		end
+		local code = (released :: any).code
+		if code == Result.Codes.LockStolen then
+			self._logWarn(
+				`DataService.release: key "{session.key}" lock stolen — terminal, delta unrecoverable`
+			)
+			return released
+		end
+		attempt += 1
+		if attempt > maxRetries then
+			self._logWarn(
+				`DataService.release: key "{session.key}" exhausted {maxRetries} retries: {tostring(
+					code
+				)}`
+			)
+			return released
+		end
+		backoff(self._clock, self._config.dataStore.retryBaseSeconds * attempt)
+	end
+end
+
 -- [B2 H2/D4/D7] Terminal teardown for a stolen session: the in-memory delta can never persist
 -- (the new owner is authoritative), so stop serving it and notify the D7 seam (runtime default,
 -- set in Start: kick with a "rejoin to sync" message; tests inject a spy). pcall-guarded — a
 -- bad onDead must never break the data path.
-function DataService.markDead(self: any, userId: number, code: string): ()
+-- `session` is optional but SHOULD be passed: it hands the store its session back so the store
+-- drops it too. Without that the store keeps the entry for the server's whole lifetime, its
+-- `isLocked(key)` then lies about a session we no longer own, and the data blob leaks. Releasing
+-- a stolen session writes NOTHING (the store short-circuits on its own steal flag) — it only
+-- tears down.
+function DataService.markDead(self: any, userId: number, code: string, session: any?): ()
 	self._sessions[userId] = nil
 	self._dead[userId] = true
+	if session ~= nil then
+		local ok, err = pcall(function()
+			session:release()
+		end)
+		if not ok then
+			self._logWarn(`DataService.markDead: store teardown errored: {tostring(err)}`)
+		end
+	end
 	if self._onDead ~= nil then
 		local ok, err = pcall(self._onDead, userId, code)
 		if not ok then
@@ -275,18 +323,52 @@ end
 -- flush so an ungraceful crash costs at most one interval of progress AND away-window. A stolen
 -- session found here is torn down (markDead + onDead); transient failures were already logged by
 -- saveSession and simply retry next tick.
+-- Dispatched CONCURRENTLY for the same reason Stop is: each save can block on the store's global
+-- write limiter, so a serial pass over a full server would take longer than the interval itself
+-- and the disclosed "crash costs at most one autosave interval" guarantee would quietly stop
+-- being true. Under Lune every flush completes synchronously, so the returned counts stay
+-- deterministic for specs.
 function DataService.autosaveTick(self: any): { flushed: number, stolen: number }
+	local realTask: any = task
 	local flushed = 0
 	local stolen = 0
-	for userId, session in self._sessions do
-		session.data.timestamps.lastSeenUnix = self._clock:unix()
-		local saved = self:saveSession(session)
-		if saved.ok then
-			flushed += 1
-		elseif (saved :: any).code == Result.Codes.LockStolen then
-			stolen += 1
-			self:markDead(userId, Result.Codes.LockStolen)
+	local pending = 0
+
+	local function flushOne(userId: number, session: any): ()
+		local ok, err = pcall(function()
+			session.data.timestamps.lastSeenUnix = self._clock:unix()
+			local saved = self:saveSession(session)
+			if saved.ok then
+				flushed += 1
+			elseif (saved :: any).code == Result.Codes.LockStolen then
+				stolen += 1
+				self:markDead(userId, Result.Codes.LockStolen, session)
+			end
+		end)
+		if not ok then
+			self._logWarn(`DataService.autosaveTick: flush errored: {tostring(err)}`)
 		end
+		pending -= 1
+	end
+
+	-- Snapshot the keys first: markDead mutates _sessions, and mutating a table while iterating
+	-- it is undefined behavior in Luau.
+	local live: { { userId: number, session: any } } = {}
+	for userId, session in self._sessions do
+		table.insert(live, { userId = userId, session = session })
+	end
+
+	for _, entry in live do
+		pending += 1
+		if realTask ~= nil and type(realTask.spawn) == "function" then
+			realTask.spawn(flushOne, entry.userId, entry.session)
+		else
+			flushOne(entry.userId, entry.session)
+		end
+	end
+
+	while pending > 0 and realTask ~= nil and type(realTask.wait) == "function" do
+		realTask.wait(0.1)
 	end
 	return { flushed = flushed, stolen = stolen }
 end
@@ -333,7 +415,9 @@ function DataService.Start(self: any, context: any): ()
 		local session = self._sessions[player.UserId]
 		if session ~= nil then
 			session.data.timestamps.lastSeenUnix = self._clock:unix()
-			local released = session:release()
+			-- Budget-aware RETRY: this is the session's final durable write, so a single
+			-- throttled attempt would discard everything the player just did.
+			local released = self:releaseSession(session)
 			if not released.ok then
 				self._logWarn(
 					`DataService: release for {player.Name} failed: {tostring(
@@ -354,9 +438,20 @@ function DataService.Start(self: any, context: any): ()
 	local autosaveInterval = self._config.dataStore.autosaveIntervalSeconds or 0
 	if autosaveInterval > 0 then
 		task.spawn(function()
-			while true do
+			while not self._autosaveStopped do
 				task.wait(autosaveInterval)
-				self:autosaveTick()
+				if self._autosaveStopped then
+					break
+				end
+				-- pcall: an unguarded error here would silently kill the ONLY periodic
+				-- durability mechanism for the rest of the server's life — every player would
+				-- then be relying on release-only saves without any signal that it happened.
+				local ok, err = pcall(function()
+					self:autosaveTick()
+				end)
+				if not ok then
+					self._logWarn(`DataService.autosave: tick errored: {tostring(err)}`)
+				end
 			end
 		end)
 	end
@@ -373,25 +468,29 @@ end
 function DataService.Stop(self: any, _context: any): ()
 	local realTask: any = task
 	local pending = 0
+	-- Stop the periodic autosave first: left running it would race this flush, burn write-budget
+	-- tokens the shutdown window cannot spare, and re-stamp records these releases just cleared.
+	self._autosaveStopped = true
 
 	local function flushOne(userId: number, session: any): ()
 		local ok, err = pcall(function()
 			session.data.timestamps.lastSeenUnix = self._clock:unix()
-			local saved = self:saveSession(session)
-			if not saved.ok then
-				local code = (saved :: any).code
+			-- ONE durable write per key (§7). `release` IS the final save (it flushes AND clears
+			-- the lock stamp), so the previous save-then-release did two writes per player and
+			-- halved the effective shutdown capacity in the exact window the budget protects.
+			local released = self:releaseSession(session)
+			if not released.ok then
+				local code = (released :: any).code
 				self._logWarn(
 					`DataService.Stop: data-loss-risk flushing {session.key}: {tostring(code)}`
 				)
 				if code == Result.Codes.LockStolen then
-					-- [B2 H2/D4] stolen: do NOT write and do NOT release the new owner's
-					-- lock; dead-session teardown instead.
-					self:markDead(userId, code)
+					-- [B2 H2/D4] stolen: wrote nothing, and the new owner's lock is left
+					-- untouched; dead-session teardown instead.
+					self:markDead(userId, code, session)
 					return
 				end
 			end
-			-- Release the lock regardless (idempotent) so a restart can re-acquire.
-			session:release()
 			self._sessions[userId] = nil
 		end)
 		if not ok then
@@ -400,18 +499,25 @@ function DataService.Stop(self: any, _context: any): ()
 		pending -= 1
 	end
 
+	-- Snapshot first: flushOne clears _sessions (and markDead mutates it too), and under Lune it
+	-- runs synchronously inside this loop — mutating a table while iterating it is undefined.
+	local live: { { userId: number, session: any } } = {}
 	for userId, session in self._sessions do
+		table.insert(live, { userId = userId, session = session })
+	end
+
+	for _, entry in live do
 		pending += 1
 		if realTask ~= nil and type(realTask.spawn) == "function" then
 			-- Roblox: concurrent dispatch (D8) — each key's flush yields through the store's
 			-- writes while the store's global limiter paces the burst within budget. A bare
 			-- coroutine.resume would strand the thread at the first scheduler yield; task.spawn
 			-- parks/resumes it correctly.
-			realTask.spawn(flushOne, userId, session)
+			realTask.spawn(flushOne, entry.userId, entry.session)
 		else
 			-- Lune (mock store): run synchronously — deterministic for specs, and an injected
 			-- logWarn may yield through Lune's async stdio, which only the MAIN thread survives.
-			flushOne(userId, session)
+			flushOne(entry.userId, entry.session)
 		end
 	end
 

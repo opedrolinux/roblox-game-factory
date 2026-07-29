@@ -13,7 +13,11 @@ export type DataStoreBudget = {
 	heartbeatIntervalSeconds: number, -- TTL renew cadence (= lockTtl/2, beats the TTL under jitter)
 	autosaveIntervalSeconds: number, -- periodic DataStore flush (0 = save-on-release-only; D5)
 	sessionLockedWaitSeconds: number, -- load's SessionLocked-specific wait budget (>= lockTtl; H1)
-	globalWritesPerMinute: number, -- shutdown/steady global write budget (D8)
+	-- Global write budget (D8). Roblox grants a SERVER ~(60 + 10·players) DataStore writes/min, so
+	-- the limiter models BOTH terms — a flat number would throttle a full server to a fraction of
+	-- its real allowance and stall both the autosave pass and the shutdown flush (§7/M5).
+	globalWritesPerMinute: number, -- the base term
+	globalWritesPerPlayerPerMinute: number, -- the per-live-session term
 }
 
 export type RateDefault = {
@@ -41,6 +45,7 @@ local Config: Config = {
 		autosaveIntervalSeconds = 60,
 		sessionLockedWaitSeconds = 40,
 		globalWritesPerMinute = 60,
+		globalWritesPerPlayerPerMinute = 10,
 	},
 	rateDefaults = {
 		maxPerWindow = 10,

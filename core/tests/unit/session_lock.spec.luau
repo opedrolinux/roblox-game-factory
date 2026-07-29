@@ -209,6 +209,128 @@ describe("DataService terminal LockStolen + dead session (H2/D4/D7)", function()
 	end)
 end)
 
+describe("DataService durable-write policy (§7 budget · §4.2 retry)", function()
+	it("releaseSession RETRIES a throttled final write instead of losing the delta", function()
+		local clock = Mocks.clock(1000)
+		local config = testConfig(5, 10)
+		-- throttleSaves = 2: the first two final-write attempts are throttled. A single
+		-- unretried release (the pre-fix leave path) would surface that Err and drop the
+		-- session's whole delta — the most common durable write in a live game.
+		local store = Mocks.store({ clock = clock, config = config, throttleSaves = 2 })
+		local service = DataService.new(store, clock, config, Mocks.logWarn)
+		local player = Mocks.player(1)
+		service:loadSession(player)
+		expect(service:releaseSession(service._sessions[1])):toBeOk()
+	end)
+
+	it("Stop performs ONE durable write per key (release IS the final save)", function()
+		local clock = Mocks.clock(1000)
+		local config = testConfig(3, 10)
+		local real = Mocks.store({ clock = clock, config = config })
+		local saveCalls = 0
+		-- Count writes at the session boundary. NOTE MockStore's own release() delegates to
+		-- session.save, so exactly ONE save call means DataService called release alone; the
+		-- pre-fix Stop called saveSession AND release, giving 2 — double the shutdown burst.
+		local counting = {
+			load = function(_self: any, key: string, default: () -> any): any
+				local loaded = real:load(key, default)
+				if not loaded.ok then
+					return loaded
+				end
+				local session = (loaded :: any).value
+				local realSave = session.save
+				session.save = function(s: any): any
+					saveCalls += 1
+					return realSave(s)
+				end
+				return loaded
+			end,
+			isLocked = function(_self: any, key: string): boolean
+				return real:isLocked(key)
+			end,
+		}
+		local service = DataService.new(counting, clock, config, Mocks.logWarn)
+		service:loadSession(Mocks.player(1))
+		service:Stop({})
+		expect(saveCalls):toBe(1)
+	end)
+
+	it("Stop flushes EVERY session durably under throttling, not just the first few", function()
+		local clock = Mocks.clock(1000)
+		local config = testConfig(5, 10)
+		-- throttleSaves is PER KEY: each of the 5 players throttles once, then succeeds.
+		local store = Mocks.store({ clock = clock, config = config, throttleSaves = 1 })
+		local service = DataService.new(store, clock, config, Mocks.logWarn)
+		for index = 1, 5 do
+			local player = Mocks.player(index)
+			service:loadSession(player)
+			service:update(player, function(d)
+				d.currencies.Stardust = index * 10
+				return d
+			end)
+		end
+		service:Stop({})
+		-- Load-bearing: re-load each key and confirm the value actually reached the backing
+		-- store. A Stop that dropped or truncated flushes would lose these.
+		for index = 1, 5 do
+			local player = Mocks.player(index)
+			service:loadSession(player)
+			expect((service:get(player) :: any).value.currencies.Stardust):toBe(index * 10)
+		end
+	end)
+end)
+
+describe("DataService load budgets are independent (SessionLocked vs Internal)", function()
+	it("a mixed SessionLocked -> Internal -> ok sequence still loads", function()
+		local clock = Mocks.clock(1000)
+		local config = testConfig(3, 20)
+		local attempts = 0
+		local real = Mocks.store({ clock = clock, config = config })
+		-- Two contention errors then two transient I/O errors: each budget is consumed by its
+		-- own error class, so neither exhausts the other and the load ultimately succeeds.
+		local flaky = {
+			load = function(_self: any, key: string, default: () -> any): any
+				attempts += 1
+				if attempts <= 2 then
+					return Result.err(Result.Codes.SessionLocked, "contended")
+				elseif attempts <= 4 then
+					return Result.err(Result.Codes.Internal, "transient")
+				end
+				return real:load(key, default)
+			end,
+			isLocked = function(_self: any, _key: string): boolean
+				return false
+			end,
+		}
+		local service = DataService.new(flaky, clock, config, Mocks.logWarn)
+		expect(service:loadSession(Mocks.player(1))):toBeOk()
+		expect(attempts):toBe(5)
+	end)
+end)
+
+describe("MockStore update is exception-safe (the per-key lock must never leak)", function()
+	it("a throwing transform releases the lock, so later updates still run", function()
+		local clock = Mocks.clock(1000)
+		local config = testConfig(3, 10)
+		local store = Mocks.store({ clock = clock, config = config })
+		local loaded = store:load("k", function()
+			return { n = 0 }
+		end)
+		local session = (loaded :: any).value
+		-- Pre-fix this errored out of update holding the key's lock forever; every later
+		-- update on that key then parked with nothing to resume it.
+		expect(session:update(function(_d)
+			error("boom")
+		end)):toBeErr(Result.Codes.Internal)
+		local after = session:update(function(d)
+			d.n += 1
+			return d
+		end)
+		expect(after):toBeOk()
+		expect((after :: any).value.n):toBe(1)
+	end)
+end)
+
 describe("DataService.autosaveTick (D5 periodic flush, Tier-1-callable)", function()
 	it("flushes every live session and reports the count", function()
 		local clock = Mocks.clock(1000)

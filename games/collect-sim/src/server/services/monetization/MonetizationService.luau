@@ -329,6 +329,24 @@ function MonetizationService.ProcessReceipt(self: any, receiptInfo: any): Result
 		return updated
 	end
 
+	-- SAVE-BEFORE-ACK (B2-SESSIONSTORE-DESIGN §10) — load-bearing, real money.
+	-- `update` commits to MEMORY only; the durable write is the autosave/release. Acknowledging
+	-- here tells Roblox the receipt is consumed FOREVER (it stops redelivering), so if we
+	-- acknowledged while the grant lived only in RAM, an ungraceful restart inside that window
+	-- would mean the player paid and got nothing, unrecoverably. Force a CONFIRMED save and only
+	-- acknowledge on its success; any failure returns an Err, the adapter maps it to
+	-- NotProcessedYet, and Roblox redelivers later.
+	--
+	-- This sits ABOVE the replay branch deliberately: a "replay" is not proof of durability. If
+	-- the ORIGINAL delivery committed to memory and then failed its save, the ledger entry is
+	-- present in RAM but absent from the store — and the redelivery we are handling right now is
+	-- Roblox giving us the second chance. Short-circuiting it as already-processed would consume
+	-- the receipt against data that was never written. Both paths must be durable before we ack.
+	local persisted = self._data:save(player)
+	if not persisted.ok then
+		return persisted
+	end
+
 	-- Replayed receipt: the ledger already had it; nothing was granted this time. Report success
 	-- (the purchase WAS honored, on the original delivery) so the runtime returns PurchaseGranted and
 	-- Roblox stops redelivering. No grant, no analytics (the original delivery already emitted).

@@ -119,6 +119,62 @@ local function grantOnce(service: any, userId: number, productId: number, purcha
 	})
 end
 
+-- Build the same real stack but over a store whose DURABLE writes always fail, so the
+-- save-before-ack rule is exercised (the in-memory transform still commits; only persistence
+-- fails — exactly the crash-window shape §10 exists to close).
+local function setupUnwritable(): (any, any, any)
+	local clock = Mocks.clock(1000)
+	local cfg = config()
+	local store = Mocks.store({ clock = clock, config = cfg, failSave = true })
+	local data = DataService.new(store, clock, cfg, Mocks.logWarn)
+	local player = Mocks.player(1)
+	data:loadSession(player)
+	return MonetizationService.new(data, clock), data, player
+end
+
+-- ============================================================================================
+-- SAVE-BEFORE-ACK — real money. A receipt may only be acknowledged once the grant is DURABLE.
+-- Acknowledging tells Roblox to stop redelivering forever, so acknowledging a grant that lives
+-- only in RAM means a crash makes the player pay for nothing, unrecoverably.
+-- ============================================================================================
+describe("monetization: a receipt is never acknowledged before the grant is durable", function()
+	it("a grant whose durable save fails -> Err, and the adapter says NotProcessedYet", function()
+		local service, _data, player = setupUnwritable()
+		local result = grantOnce(service, player.UserId, 101, "rcpt-durability-1")
+		expect(result):toBeErr()
+		expect(service:receiptDecision({
+			PlayerId = player.UserId,
+			ProductId = 101,
+			PurchaseId = "rcpt-durability-1",
+		})):toBe("NotProcessedYet")
+	end)
+
+	it("the REDELIVERY of a receipt whose save failed is refused too, not laundered", function()
+		local service, _data, player = setupUnwritable()
+		expect(grantOnce(service, player.UserId, 101, "rcpt-durability-2")):toBeErr()
+		-- The first attempt already wrote the ledger entry IN MEMORY, so the replay guard sees
+		-- a "known" receipt. It must NOT report success on that basis: the store still has
+		-- nothing, and this redelivery is Roblox's second chance to make it durable. Treating a
+		-- replay as proof of durability consumes the receipt against data that was never saved.
+		expect(grantOnce(service, player.UserId, 101, "rcpt-durability-2")):toBeErr()
+	end)
+
+	it("once the store accepts writes, the same receipt acknowledges exactly one grant", function()
+		local service, data, player = setup({ seed = seedFor(1, {}) })
+		local before = (data:get(player) :: any).value.currencies.Stardust
+		local first = grantOnce(service, player.UserId, 101, "rcpt-durability-3")
+		expect(first):toBeOk()
+		expect((first :: any).value.granted):toBe(true)
+		local replay = grantOnce(service, player.UserId, 101, "rcpt-durability-3")
+		expect(replay):toBeOk()
+		expect((replay :: any).value.granted):toBe(false)
+		expect((replay :: any).value.alreadyProcessed):toBe(true)
+		-- Granted once, and only once, despite two deliveries.
+		local after = (data:get(player) :: any).value.currencies.Stardust
+		expect(after - before):toBe((first :: any).value.amount)
+	end)
+end)
+
 -- ============================================================================================
 -- GAMEPASS GATING — the three gamepasses gate their effects via OWNERSHIP flags; the observable
 -- seam is the 2x-Stardust multiplier.

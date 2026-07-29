@@ -27,14 +27,37 @@ local NetServer = require(Server.net.NetServer)
 -- running (not edit mode) AND a real DataStore read succeeds. Without API access the pcall
 -- fails -> MockStore fallback (in-memory, honest: a playtest sees data not persisting rather
 -- than a hard error on every save).
+-- The probe cannot tell "no API access" (permanent — the case §6 exists for) from "DataStores are
+-- throttled/erroring this second" (transient). Getting that wrong is expensive: a single unlucky
+-- boot-time error would run the ENTIRE server lifetime in memory, and every player on it would
+-- play a full session that is silently never saved. So retry a few times before concluding, and
+-- if we do fall back, say so LOUDLY — a silent downgrade to a non-persistent store is exactly the
+-- kind of failure that looks fine until a day of player progress is already gone.
+local PROBE_ATTEMPTS = 3
+
 local function canPersist(): boolean
 	if not RunService:IsRunning() then
-		return false
+		return false -- edit mode: no DataStores, and nothing to warn about
 	end
-	local ok = pcall(function()
-		DataStoreService:GetDataStore(Config.storeName):GetAsync("__capability_probe")
-	end)
-	return ok
+	local lastErr: any = nil
+	for attempt = 1, PROBE_ATTEMPTS do
+		local ok, err = pcall(function()
+			DataStoreService:GetDataStore(Config.storeName):GetAsync("__capability_probe")
+		end)
+		if ok then
+			return true
+		end
+		lastErr = err
+		if attempt < PROBE_ATTEMPTS then
+			task.wait(attempt) -- 1s, then 2s — brief, bounded, before the server serves anyone
+		end
+	end
+	warn(
+		`[DataService] NO PERSISTENCE: DataStore probe failed {PROBE_ATTEMPTS}x — running on the `
+			.. `in-memory MockStore. Player progress on this server will NOT be saved. `
+			.. `Last error: {tostring(lastErr)}`
+	)
+	return false
 end
 
 local Context = {}

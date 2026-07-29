@@ -183,14 +183,26 @@ function MockStore.new(options: MockOptions): any
 			end
 
 			-- §4.1 step 3: run the SYNCHRONOUS transform and write the result back to backing.
-			local newValue = transform(current)
-			backing[key] = newValue
-			self.data = newValue
+			-- pcall'd: the transform is feature code and CAN throw, and `locks` outlives the
+			-- session — an error escaping here would leak the per-key lock forever, parking every
+			-- later update on this key with nothing to resume it (that player's economy actions
+			-- hang, surviving release AND rejoin). The transform works on a SNAPSHOT, so a
+			-- half-applied mutation is discarded rather than written back.
+			local ok, newValueOrErr = pcall(transform, current)
+			if not ok then
+				release(key)
+				return Result.err(
+					Result.Codes.Internal,
+					`MockStore.update: transform errored: {tostring(newValueOrErr)}`
+				)
+			end
+			backing[key] = newValueOrErr
+			self.data = newValueOrErr
 
 			-- §4.1 step 4: release the lock and resume the next FIFO waiter (which re-reads).
 			release(key)
 
-			return Result.ok(newValue)
+			return Result.ok(newValueOrErr)
 		end
 
 		function session.save(self: any): Result<any>

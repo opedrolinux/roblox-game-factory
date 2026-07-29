@@ -66,14 +66,23 @@ function SessionStore.new(options: SessionStoreOptions): any
 	local config = options.config
 	local budget = config.dataStore
 
-	-- §8 tunables (defensive defaults in case a game's config fork predates B2).
-	local lockTtl: number = budget.lockTtlSeconds or 30
-	local heartbeatInterval: number = budget.heartbeatIntervalSeconds or 15
+	-- §8 tunables (defensive defaults in case a game's config fork predates B2). Each is clamped
+	-- to a sane floor: a 0 in a game's config fork must never mean "wait forever" (0 reads as
+	-- truthy in Lua, so `or` alone does not catch it).
+	local lockTtl: number = math.max(budget.lockTtlSeconds or 30, 1)
+	local heartbeatInterval: number = math.max(budget.heartbeatIntervalSeconds or 15, 1)
 	local writeMinInterval: number = budget.writeMinIntervalSeconds or 6
-	local writesPerMinute: number = budget.globalWritesPerMinute or 60
+	-- §7's real constraint is a per-SERVER budget of ~(60 + 10·players) writes/min, so a single
+	-- static number cannot model it: on a 50-player server a flat 60 throttles to ~1/9 of the
+	-- real allowance (and starves both the autosave pass and the shutdown flush). Model both
+	-- terms; capacity is recomputed from the live session count on every token take.
+	local writesBase: number = math.max(budget.globalWritesPerMinute or 60, 1)
+	local writesPerPlayer: number = math.max(budget.globalWritesPerPlayerPerMinute or 10, 0)
 
 	-- [D2] the per-server-lifetime writer identity: game.JobId is unique + non-empty on live
 	-- servers and EMPTY in Studio solo — fall back to one GUID per store instance there.
+	-- TODO(verify): game.JobId is non-empty + unique per live server (empty in Studio solo).
+	-- Tier-2 must confirm; a colliding or empty JobId would break write-exclusion entirely.
 	local myId: string = if game.JobId ~= ""
 		then game.JobId
 		else "studio-" .. HttpService:GenerateGUID(false)
@@ -128,16 +137,23 @@ function SessionStore.new(options: SessionStoreOptions): any
 	-- Every DataStore write (load-stamp, save, release) takes a token; when the bucket is dry
 	-- the writer WAITS (task.wait — all writers are Roblox-side coroutines). This is what lets
 	-- DataService.Stop dispatch every key's flush concurrently and still respect the global
-	-- ~(60 + 10·players)/min budget: the bucket paces the burst; per-key floors don't compose
-	-- into a global bound (M5).
-	local tokensPerSecond = writesPerMinute / 60
-	local tokens: number = writesPerMinute
+	-- budget: the bucket paces the burst; per-key floors don't compose into a global bound (M5).
+	-- Capacity TRACKS the live session count (§7's `base + perPlayer·players`), so a full server
+	-- gets the allowance it is actually granted instead of a flat floor.
+	local liveSessions = 0
+	local tokens: number = writesBase
 	local lastRefillMono: number = clock:mono()
+
+	local function writeCapacity(): number
+		return writesBase + writesPerPlayer * liveSessions
+	end
 
 	local function takeWriteToken(): ()
 		while true do
+			local capacity = writeCapacity()
+			local tokensPerSecond = capacity / 60
 			local now = clock:mono()
-			tokens = math.min(writesPerMinute, tokens + (now - lastRefillMono) * tokensPerSecond)
+			tokens = math.min(capacity, tokens + (now - lastRefillMono) * tokensPerSecond)
 			lastRefillMono = now
 			if tokens >= 1 then
 				tokens -= 1
@@ -164,15 +180,36 @@ function SessionStore.new(options: SessionStoreOptions): any
 		local prior = sessions[key]
 		if prior ~= nil then
 			prior:release()
+			-- release() now KEEPS a session alive on a transient write failure so it can be
+			-- retried — but here we are about to install a replacement, and two live sessions on
+			-- one key is precisely the L11 hazard. Force-drop whatever survived.
+			if sessions[key] ~= nil then
+				sessions[key] = nil
+				liveSessions -= 1
+			end
 		end
+
+		-- Take the write token BEFORE claiming (the claim→stamp gap must stay SHORT). Taking it
+		-- after the claim would let a starved bucket stall us for longer than lockTtl: our claim
+		-- would silently expire, another server could legitimately claim + stamp + start serving,
+		-- and our late stamp would then overwrite THEIRS — killing a live session. Ordering the
+		-- token first bounds the gap to one UpdateAsync round-trip.
+		takeWriteToken()
 
 		-- §4.1 step 1: claim the LIVENESS lock via an atomic MemoryStore CAS. An entry that
 		-- expired (crashed owner) reads as nil — claimable in ≤ lockTtl with no manual stale
 		-- sizing (the H1 fix). Our own id re-claims re-entrantly.
+		-- TODO(verify): MemoryStoreHashMap:UpdateAsync(key, transform, expiration) — that this is
+		-- the exact signature, that returning nil ABORTS the write without raising, and that an
+		-- expired entry reads as nil. LOAD-BEARING: if a nil return RAISES instead, this pcall
+		-- fails and load returns Internal rather than SessionLocked, which silently swaps the H1
+		-- wait budget for the shorter Internal budget and reinstates the crash-rejoin kick-loop.
+		-- Tier-1 cannot see this (MockStore hands DataService the codes directly) — Tier-2 must.
 		local claimed = false
 		local claimOk, claimErr = pcall(function()
 			lockMap:UpdateAsync(key, function(existing: any)
-				-- PURE + non-yielding (L9): may be invoked multiple times by the service.
+				-- PURE + non-yielding (L9): may be invoked multiple times by the service, so
+				-- every branch SETS `claimed` (never leaves a stale true from a prior attempt).
 				if existing == nil or existing.lockId == myId then
 					claimed = true
 					return { lockId = myId }
@@ -190,8 +227,7 @@ function SessionStore.new(options: SessionStoreOptions): any
 
 		-- §4.1 step 2 (amended): ATOMIC read+stamp — stamp lockId=myId and read the record in
 		-- ONE UpdateAsync (see the header amendment: crash-stale-stamp takeover + the
-		-- claim→first-save window). Counts against the global write budget.
-		takeWriteToken()
+		-- claim→first-save window). Token already taken above.
 		local record: any = nil
 		local readOk, readErr = pcall(function()
 			dataStore:UpdateAsync(key, function(stored: any)
@@ -233,10 +269,22 @@ function SessionStore.new(options: SessionStoreOptions): any
 			acquire(key)
 			-- Re-read the LATEST value under the lock as a fresh snapshot (§4.1 step 2).
 			local current = deepCopy(self.data)
-			local newValue = transform(current)
-			self.data = newValue
+			-- The transform is feature code and CAN throw. It must never escape holding the
+			-- per-key lock: `locks` is store-scoped and outlives the session, so a leaked lock
+			-- would park every later update on this key forever (that player's economy actions
+			-- hang, surviving release AND rejoin). pcall + release-in-both-paths; the snapshot
+			-- means a half-applied transform is discarded, never written back.
+			local ok, resultOrErr = pcall(transform, current)
+			if not ok then
+				releaseLock(key)
+				return Result.err(
+					Result.Codes.Internal,
+					`SessionStore.update: transform errored: {tostring(resultOrErr)}`
+				)
+			end
+			self.data = resultOrErr
 			releaseLock(key)
-			return Result.ok(newValue)
+			return Result.ok(resultOrErr)
 		end
 
 		-- One save attempt: floor-gated, token-gated, stamp-checked (§4.2). The RETRY loop
@@ -256,9 +304,13 @@ function SessionStore.new(options: SessionStoreOptions): any
 			end
 			takeWriteToken()
 			local stolen = false
+			-- TODO(verify): a DataStore UpdateAsync transform returning nil ABORTS the write
+			-- without raising. The whole §4.2 write-exclusion rests on it — Tier-2 must confirm.
 			local ok, err = pcall(function()
 				dataStore:UpdateAsync(key, function(stored: any)
-					-- PURE + non-yielding + idempotent (L9).
+					-- PURE + non-yielding + idempotent (L9): the engine may invoke this more
+					-- than once, so BOTH branches set `stolen` (a retry never leaves a stale
+					-- true from an earlier invocation).
 					if stored ~= nil and stored.lockId ~= nil and stored.lockId ~= myId then
 						stolen = true
 						return nil -- §4.2: our lock was lost + re-claimed -> DO NOT WRITE
@@ -286,22 +338,27 @@ function SessionStore.new(options: SessionStoreOptions): any
 			return persist(false)
 		end
 
-		-- §4.3: final save (stamp cleared) + free the liveness lock. Idempotent.
-		function session.release(_self: any): Result<any>
-			if released then
-				return Result.ok(session.data)
-			end
+		-- Terminal teardown: drop the session, stop the heartbeat, free our liveness lock.
+		local function teardown(): ()
 			released = true
-			sessions[key] = nil
+			if sessions[key] ~= nil then
+				sessions[key] = nil
+				liveSessions -= 1
+			end
 			if heartbeatThread ~= nil then
-				task.cancel(heartbeatThread)
+				-- pcall: on a steal the heartbeat loop breaks and the thread COMPLETES, and
+				-- cancelling an already-dead thread is not a behavior we can verify from here.
+				-- An error escaping teardown would propagate out of load()'s L11 path and leave
+				-- a player neither loaded nor kicked.
+				-- TODO(verify): task.cancel on a completed thread is a no-op, not an error.
+				pcall(task.cancel, heartbeatThread)
 				heartbeatThread = nil
 			end
-			local saved = persist(true)
 			-- Free the MemoryStore lock ONLY if still ours — atomically, by re-setting it with
 			-- a 1s TTL (there is no conditional remove; an unconditional RemoveAsync could
 			-- delete a NEW owner's lock). Not ours -> abort, touch nothing. A rejoiner sees at
 			-- most ~1s of residual lock, absorbed by the SessionLocked wait cadence.
+			-- TODO(verify): expiration = 1 is an accepted MemoryStore TTL.
 			pcall(function()
 				lockMap:UpdateAsync(key, function(existing: any)
 					if existing ~= nil and existing.lockId == myId then
@@ -310,39 +367,61 @@ function SessionStore.new(options: SessionStoreOptions): any
 					return nil
 				end, 1)
 			end)
+		end
+
+		-- §4.3: final save (stamp cleared) + free the liveness lock.
+		-- Idempotent on SUCCESS, RETRYABLE on transient failure: a throttled/errored final write
+		-- must leave the session ALIVE so the caller's retry budget can actually reach it. Tearing
+		-- down first would make every retry a silent no-op (the `released` short-circuit returns
+		-- ok) and lose the whole session's delta to one transient error — the most common durable
+		-- write in a live game is this one, on the leave path.
+		function session.release(_self: any): Result<any>
+			if released then
+				return Result.ok(session.data)
+			end
+			local saved = persist(true)
+			if not saved.ok and (saved :: any).code ~= Result.Codes.LockStolen then
+				return saved -- transient: stay live, stay locked, let the caller retry
+			end
+			-- Wrote it, or lost the lock for good (nothing left to write): tear down.
+			teardown()
 			return saved
 		end
 
-		-- §4.4 heartbeat: renew the MemoryStore TTL while held (NOT a DataStore write — it
-		-- never competes with the autosave budget). Finding another owner => zombie, stop.
-		-- A FAILED renewal (throttle/outage) keeps looping: heartbeat = ttl/2 leaves margin,
-		-- and even a fully evaporated lock is fenced by the §4.2 stamp check.
+		-- §4.4 heartbeat: renew the MemoryStore TTL while we hold it (NOT a DataStore write — it
+		-- never competes with the autosave budget).
+		--
+		-- DELIBERATELY ADVISORY, never terminal (deviation from §4.4-as-written, reasoned): the
+		-- DataStore lockId stamp is the AUTHORITATIVE exclusion (§3), so a MemoryStore-only signal
+		-- must not be allowed to kill a session on its own. If it were, this kills the WRONG
+		-- server: after a MemoryStore blip evaporates every entry, whichever server re-claims
+		-- first wins the map — and if that is a stale ghost rather than the true stamp-holder, the
+		-- legitimate owner would see a foreign lock and terminally zombie itself, kicking a player
+		-- who was on the correct server and discarding their delta. So: renew what is ours, never
+		-- steal a live foreign lock, and never die here. `persist`'s stamp check settles ownership
+		-- authoritatively at the next save — the ghost's write is refused, the true owner's
+		-- succeeds. Cost of the deviation: a contended lock stays ambiguous for up to one autosave
+		-- interval instead of being (wrongly) resolved instantly.
 		heartbeatThread = task.spawn(function()
 			while not released and not zombie do
 				task.wait(heartbeatInterval)
 				if released or zombie then
 					break
 				end
-				local renewed = false
-				local ok = pcall(function()
+				pcall(function()
 					lockMap:UpdateAsync(key, function(existing: any)
+						-- PURE + non-yielding (L9). Ours or an expired/unclaimed slot: renew.
 						if existing == nil or existing.lockId == myId then
-							-- Ours (or expired-and-unclaimed): renew the TTL.
-							renewed = true
 							return { lockId = myId }
 						end
-						renewed = false
-						return nil
+						return nil -- a live FOREIGN lock: leave it alone, keep serving
 					end, lockTtl)
 				end)
-				if ok and not renewed then
-					zombie = true -- expired + re-claimed by another server (§4.4)
-					break
-				end
 			end
 		end)
 
 		sessions[key] = session
+		liveSessions += 1
 		return Result.ok(session)
 	end
 
