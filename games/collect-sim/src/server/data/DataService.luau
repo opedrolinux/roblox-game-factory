@@ -284,6 +284,19 @@ function DataService.releaseSession(self: any, session: any): Result<any>
 					code
 				)}`
 			)
+			-- Terminal give-up. The store keeps a session alive across a transient failure so this
+			-- loop can retry it — so someone must tell it when the retries are over. Every caller
+			-- drops its reference right after this returns, so without an explicit abandon the
+			-- session is orphaned with a live heartbeat renewing its lock forever, and the player
+			-- is SessionLocked out of EVERY server. The delta is already lost; the lock must not be.
+			if type(session.abandon) == "function" then
+				local ok, err = pcall(function()
+					session:abandon()
+				end)
+				if not ok then
+					self._logWarn(`DataService.release: abandon errored: {tostring(err)}`)
+				end
+			end
 			return released
 		end
 		backoff(self._clock, self._config.dataStore.retryBaseSeconds * attempt)

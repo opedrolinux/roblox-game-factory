@@ -158,6 +158,8 @@ function MockStore.new(options: MockOptions): any
 		local session = {}
 		session.key = key
 		session.data = backing[key]
+		-- Session-lifecycle state, mirroring SessionStore: set only by teardown.
+		local released = false
 
 		function session.set(self: any, value: any): ()
 			self.data = value
@@ -205,7 +207,10 @@ function MockStore.new(options: MockOptions): any
 			return Result.ok(newValueOrErr)
 		end
 
-		function session.save(self: any): Result<any>
+		-- One durable-write attempt. `bypassFloor` is the release path: the final write must not
+		-- be refused by the per-key throttle floor (skipping it would lose the session's delta) —
+		-- the same split SessionStore.persist makes, so the fixture models the real policy.
+		local function persist(self: any, bypassFloor: boolean): Result<any>
 			-- [B2 D6] stealLockAfter: after N successful saves the session lock has been re-claimed
 			-- by "another server" — every further save is a PERMANENT LockStolen (never retryable),
 			-- exactly the §4.2 write-exclusion outcome, so the terminal reaction is testable.
@@ -231,27 +236,55 @@ function MockStore.new(options: MockOptions): any
 			end
 
 			-- Throttle floor against the INJECTED clock (writeMinIntervalSeconds).
-			local nowMono = clock:mono()
-			local last = lastWriteMono[key]
-			local minInterval = config.dataStore.writeMinIntervalSeconds
-			if last ~= nil and (nowMono - last) < minInterval then
-				return Result.err(Result.Codes.Internal, "MockStore.writeMinInterval")
+			if not bypassFloor then
+				local nowMono = clock:mono()
+				local last = lastWriteMono[key]
+				local minInterval = config.dataStore.writeMinIntervalSeconds
+				if last ~= nil and (nowMono - last) < minInterval then
+					return Result.err(Result.Codes.Internal, "MockStore.writeMinInterval")
+				end
 			end
 
-			lastWriteMono[key] = nowMono
+			lastWriteMono[key] = clock:mono()
 			backing[key] = self.data
 			successfulSaves[key] = (successfulSaves[key] or 0) + 1
 			return Result.ok(self.data)
 		end
 
-		function session.release(self: any): Result<any>
-			-- Final save then release. Idempotent: releasing an already-released key is ok.
-			local saved = session.save(self)
+		function session.save(self: any): Result<any>
+			return persist(self, false)
+		end
+
+		-- Terminal teardown: stop reporting the key as held. Mirrors SessionStore.teardown.
+		local function teardown(): ()
+			released = true
 			heldKeys[key] = nil
-			if not saved.ok then
-				return saved
+		end
+
+		-- Final save + release the session lock.
+		-- Idempotent on SUCCESS, RETRYABLE on transient failure — the SessionStore contract, which
+		-- this fixture MUST model or Tier-1 cannot reach the production failure state: a transient
+		-- final write leaves the session ALIVE and the key HELD so the caller's retry budget can
+		-- reach it, and only a success or a terminal LockStolen tears down. (This previously
+		-- cleared the key unconditionally, the exact inverse of production — which is why an
+		-- orphaned-session regression in SessionStore sat green through the whole suite.)
+		function session.release(self: any): Result<any>
+			if released then
+				return Result.ok(self.data)
 			end
-			return Result.ok(self.data)
+			local saved = persist(self, true)
+			if not saved.ok and (saved :: any).code ~= Result.Codes.LockStolen then
+				return saved -- transient: stay live, stay held, let the caller retry
+			end
+			teardown()
+			return saved
+		end
+
+		-- Terminal give-up without a write: the caller has exhausted its retry budget or is
+		-- replacing this session. Mirrors SessionStore.abandon — without it an exhausted release
+		-- would leave the key held forever.
+		function session.abandon(_self: any): ()
+			teardown()
 		end
 
 		return Result.ok(session)

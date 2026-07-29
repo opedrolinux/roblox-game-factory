@@ -163,6 +163,16 @@ function SessionStore.new(options: SessionStoreOptions): any
 		end
 	end
 
+	-- Give a token back when the path that took it turns out to perform NO DataStore write. The
+	-- bucket meters DataStore writes; charging it for a MemoryStore-only outcome starves it. That
+	-- matters most in exactly the scenario this design exists for — a mass rejoin, where
+	-- liveSessions is ~0 so capacity is at its floor and every contended joiner polls once a
+	-- second for 40s. Unrefunded, those zero-write polls drain the shared bucket and stall the
+	-- real saves and releases of players who DID load.
+	local function refundWriteToken(): ()
+		tokens = math.min(writeCapacity(), tokens + 1)
+	end
+
 	-- Per-key write floor (same policy MockStore models with writeMinIntervalSeconds).
 	local lastWriteMono: { [string]: number } = {}
 
@@ -180,13 +190,12 @@ function SessionStore.new(options: SessionStoreOptions): any
 		local prior = sessions[key]
 		if prior ~= nil then
 			prior:release()
-			-- release() now KEEPS a session alive on a transient write failure so it can be
-			-- retried — but here we are about to install a replacement, and two live sessions on
-			-- one key is precisely the L11 hazard. Force-drop whatever survived.
-			if sessions[key] ~= nil then
-				sessions[key] = nil
-				liveSessions -= 1
-			end
+			-- release() KEEPS a session alive on a transient write failure so it can be retried —
+			-- but here we are about to install a replacement, and two live sessions on one key is
+			-- precisely the L11 hazard. `abandon` is the terminal teardown: it stops the prior
+			-- session's heartbeat and frees its lock. Nil-ing the table entry alone would leave an
+			-- orphan whose heartbeat renews our lock forever.
+			prior:abandon()
 		end
 
 		-- Take the write token BEFORE claiming (the claim→stamp gap must stay SHORT). Taking it
@@ -219,9 +228,11 @@ function SessionStore.new(options: SessionStoreOptions): any
 			end, lockTtl)
 		end)
 		if not claimOk then
+			refundWriteToken() -- no DataStore write happened
 			return Result.err(Result.Codes.Internal, `SessionStore.claim: {tostring(claimErr)}`)
 		end
 		if not claimed then
+			refundWriteToken() -- no DataStore write happened
 			return Result.err(Result.Codes.SessionLocked, "held by another server")
 		end
 
@@ -311,9 +322,9 @@ function SessionStore.new(options: SessionStoreOptions): any
 					-- PURE + non-yielding + idempotent (L9): the engine may invoke this more
 					-- than once, so BOTH branches set `stolen` (a retry never leaves a stale
 					-- true from an earlier invocation).
-					if stored ~= nil and stored.lockId ~= nil and stored.lockId ~= myId then
+					if stored ~= nil and stored.lockId ~= myId then
 						stolen = true
-						return nil -- §4.2: our lock was lost + re-claimed -> DO NOT WRITE
+						return nil -- §4.2: not our record any more -> DO NOT WRITE
 					end
 					stolen = false
 					local rec = stored or { metaVersion = 1 }
@@ -340,8 +351,17 @@ function SessionStore.new(options: SessionStoreOptions): any
 
 		-- Terminal teardown: drop the session, stop the heartbeat, free our liveness lock.
 		local function teardown(): ()
+			if released then
+				return -- idempotent: never double-decrement liveSessions
+			end
 			released = true
-			if sessions[key] ~= nil then
+			-- Identity-guarded: `myId` is per-SERVER, not per-session, so two sessions for one key
+			-- on this server are indistinguishable to the DataStore stamp — the table entry is the
+			-- only discriminator. A stale session tearing down (reachable from a parked retry loop
+			-- or an in-flight autosave snapshot) must never evict the LIVE replacement, miscount
+			-- liveSessions, or drop the live session's lock to the 1s TTL below.
+			local wasLive = sessions[key] == session
+			if wasLive then
 				sessions[key] = nil
 				liveSessions -= 1
 			end
@@ -358,7 +378,13 @@ function SessionStore.new(options: SessionStoreOptions): any
 			-- a 1s TTL (there is no conditional remove; an unconditional RemoveAsync could
 			-- delete a NEW owner's lock). Not ours -> abort, touch nothing. A rejoiner sees at
 			-- most ~1s of residual lock, absorbed by the SessionLocked wait cadence.
+			-- Skipped entirely unless we WERE the live session: the lockId check below matches on
+			-- the per-server id, so a stale same-server session would otherwise expire the LIVE
+			-- session's lock down to 1s and hand a foreign server a window to claim and stamp it.
 			-- TODO(verify): expiration = 1 is an accepted MemoryStore TTL.
+			if not wasLive then
+				return
+			end
 			pcall(function()
 				lockMap:UpdateAsync(key, function(existing: any)
 					if existing ~= nil and existing.lockId == myId then
@@ -367,6 +393,16 @@ function SessionStore.new(options: SessionStoreOptions): any
 					return nil
 				end, 1)
 			end)
+		end
+
+		-- Terminal give-up: tear down WITHOUT attempting a durable write. The caller has exhausted
+		-- its retry budget (the delta is already lost) or is replacing this session — either way
+		-- the lock must not be left held. Without this escape an exhausted release leaves an
+		-- orphan whose heartbeat renews the lock forever, and the player is then SessionLocked out
+		-- of EVERY server until the record is manually cleared — strictly worse than losing the
+		-- delta, and the exact kick-loop B2's TTL lock was designed to eliminate.
+		function session.abandon(_self: any): ()
+			teardown()
 		end
 
 		-- §4.3: final save (stamp cleared) + free the liveness lock.
@@ -410,11 +446,18 @@ function SessionStore.new(options: SessionStoreOptions): any
 				end
 				pcall(function()
 					lockMap:UpdateAsync(key, function(existing: any)
-						-- PURE + non-yielding (L9). Ours or an expired/unclaimed slot: renew.
-						if existing == nil or existing.lockId == myId then
+						-- PURE + non-yielding (L9). RENEW ONLY — never acquire. An absent entry
+						-- means our lock already expired, and re-taking it here would be an
+						-- acquisition by a session that may no longer own the DataStore record:
+						-- a displaced session would pin the lock, the true owner's teardown would
+						-- then see a foreign id and decline to free the lock it legitimately held,
+						-- and neither layer could self-heal. Acquisition belongs to load's claim
+						-- path alone; a live session that loses its entry is still fenced by the
+						-- DataStore stamp.
+						if existing ~= nil and existing.lockId == myId then
 							return { lockId = myId }
 						end
-						return nil -- a live FOREIGN lock: leave it alone, keep serving
+						return nil -- expired, or a live FOREIGN lock: leave it, keep serving
 					end, lockTtl)
 				end)
 			end

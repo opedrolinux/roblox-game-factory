@@ -158,6 +158,20 @@ describe("DataService terminal LockStolen + dead session (H2/D4/D7)", function()
 		end
 	)
 
+	it("markDead hands the session back to the store (isLocked must stop lying)", function()
+		local clock = Mocks.clock(1000)
+		local config = testConfig(4, 10)
+		local store = Mocks.store({ clock = clock, config = config, stealLockAfter = 0 })
+		local service = DataService.new(store, clock, config, Mocks.logWarn)
+		local player = Mocks.player(1)
+		service:loadSession(player)
+		expect(store:isLocked("player_1")):toBe(true)
+		service:save(player) -- LockStolen -> markDead
+		-- Without the store-side teardown the store keeps the entry for the server's lifetime and
+		-- isLocked reports a session this server no longer owns.
+		expect(store:isLocked("player_1")):toBe(false)
+	end)
+
 	it(
 		"onDead fires with the userId + code (the D7 kick seam, injectable so Tier-1-testable)",
 		function()
@@ -210,6 +224,41 @@ describe("DataService terminal LockStolen + dead session (H2/D4/D7)", function()
 end)
 
 describe("DataService durable-write policy (§7 budget · §4.2 retry)", function()
+	it("an EXHAUSTED release still gives the lock back (never orphans the session)", function()
+		local clock = Mocks.clock(1000)
+		local config = testConfig(2, 10)
+		-- failSave: every final-write attempt fails, so the retry budget is exhausted. The delta
+		-- is unavoidably lost at that point — but the LOCK must still be released. Holding it
+		-- would leave a session no one can reach any more (every caller drops its reference right
+		-- after this), whose heartbeat renews the lock forever, SessionLocking that player out of
+		-- EVERY server: strictly worse than losing the delta, and the exact kick-loop B2 exists
+		-- to eliminate.
+		local store = Mocks.store({ clock = clock, config = config, failSave = true })
+		local service = DataService.new(store, clock, config, Mocks.logWarn)
+		local player = Mocks.player(1)
+		service:loadSession(player)
+		expect(store:isLocked("player_1")):toBe(true)
+		expect(service:releaseSession(service._sessions[1])):toBeErr()
+		expect(store:isLocked("player_1")):toBe(false)
+	end)
+
+	it("a session held across a TRANSIENT failure stays held, so the retry can reach it", function()
+		local clock = Mocks.clock(1000)
+		local config = testConfig(5, 10)
+		local store = Mocks.store({ clock = clock, config = config, throttleSaves = 1 })
+		local loaded = store:load("k", function()
+			return { n = 1 }
+		end)
+		local session = (loaded :: any).value
+		-- First release throttles: the key MUST stay held or the retry writes into a released
+		-- session. (The fixture previously cleared it unconditionally — the inverse of
+		-- production, which is what let an orphaned-session regression pass the whole suite.)
+		expect(session:release()):toBeErr()
+		expect(store:isLocked("k")):toBe(true)
+		expect(session:release()):toBeOk()
+		expect(store:isLocked("k")):toBe(false)
+	end)
+
 	it("releaseSession RETRIES a throttled final write instead of losing the delta", function()
 		local clock = Mocks.clock(1000)
 		local config = testConfig(5, 10)
@@ -223,14 +272,15 @@ describe("DataService durable-write policy (§7 budget · §4.2 retry)", functio
 		expect(service:releaseSession(service._sessions[1])):toBeOk()
 	end)
 
-	it("Stop performs ONE durable write per key (release IS the final save)", function()
+	it("Stop performs ONE durable write per key: release only, never save+release", function()
 		local clock = Mocks.clock(1000)
 		local config = testConfig(3, 10)
 		local real = Mocks.store({ clock = clock, config = config })
-		local saveCalls = 0
-		-- Count writes at the session boundary. NOTE MockStore's own release() delegates to
-		-- session.save, so exactly ONE save call means DataService called release alone; the
-		-- pre-fix Stop called saveSession AND release, giving 2 — double the shutdown burst.
+		local saveCalls, releaseCalls = 0, 0
+		-- Count the two durable-write entry points SEPARATELY. `release` IS the final save, so a
+		-- correct Stop calls release exactly once and save not at all; the pre-fix Stop called
+		-- saveSession AND release, doubling every player's shutdown write in the one window the
+		-- global budget exists to protect.
 		local counting = {
 			load = function(_self: any, key: string, default: () -> any): any
 				local loaded = real:load(key, default)
@@ -238,10 +288,14 @@ describe("DataService durable-write policy (§7 budget · §4.2 retry)", functio
 					return loaded
 				end
 				local session = (loaded :: any).value
-				local realSave = session.save
+				local realSave, realRelease = session.save, session.release
 				session.save = function(s: any): any
 					saveCalls += 1
 					return realSave(s)
+				end
+				session.release = function(s: any): any
+					releaseCalls += 1
+					return realRelease(s)
 				end
 				return loaded
 			end,
@@ -252,7 +306,10 @@ describe("DataService durable-write policy (§7 budget · §4.2 retry)", functio
 		local service = DataService.new(counting, clock, config, Mocks.logWarn)
 		service:loadSession(Mocks.player(1))
 		service:Stop({})
-		expect(saveCalls):toBe(1)
+		expect(saveCalls):toBe(0)
+		expect(releaseCalls):toBe(1)
+		-- ...and the lock is actually given back, so a restart can re-acquire the key.
+		expect(real:isLocked("player_1")):toBe(false)
 	end)
 
 	it("Stop flushes EVERY session durably under throttling, not just the first few", function()
@@ -270,12 +327,14 @@ describe("DataService durable-write policy (§7 budget · §4.2 retry)", functio
 			end)
 		end
 		service:Stop({})
-		-- Load-bearing: re-load each key and confirm the value actually reached the backing
-		-- store. A Stop that dropped or truncated flushes would lose these.
+		-- Assert the FLUSH happened, not the value. MockStore.update is write-through, so the
+		-- backing table already holds Stardust = index*10 before Stop ever runs — re-loading and
+		-- checking the value would pass against a Stop that did nothing at all (the repo's own
+		-- named tautological-test failure class, docs/LEARNINGS.md). What only a real flush can
+		-- produce is every key RELEASED despite each one throttling first.
 		for index = 1, 5 do
-			local player = Mocks.player(index)
-			service:loadSession(player)
-			expect((service:get(player) :: any).value.currencies.Stardust):toBe(index * 10)
+			expect(store:isLocked("player_" .. tostring(index))):toBe(false)
+			expect(service:get(Mocks.player(index))):toBeErr(Result.Codes.NoData)
 		end
 	end)
 end)
@@ -318,8 +377,11 @@ describe("MockStore update is exception-safe (the per-key lock must never leak)"
 		end)
 		local session = (loaded :: any).value
 		-- Pre-fix this errored out of update holding the key's lock forever; every later
-		-- update on that key then parked with nothing to resume it.
-		expect(session:update(function(_d)
+		-- update on that key then parked with nothing to resume it. The transform MUTATES before
+		-- throwing, so this also pins that a half-applied transform is discarded rather than
+		-- written back (it runs on a snapshot) — otherwise `n` below would start from 99.
+		expect(session:update(function(d)
+			d.n = 99
 			error("boom")
 		end)):toBeErr(Result.Codes.Internal)
 		local after = session:update(function(d)

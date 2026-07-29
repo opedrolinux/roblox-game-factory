@@ -266,6 +266,18 @@ function MonetizationService.ProcessReceipt(self: any, receiptInfo: any): Result
 
 	local player = playerRef(userId)
 
+	-- [B2 §10] DURABILITY PRECONDITION — refuse BEFORE mutating anything.
+	-- Save-before-ack only means something if a successful save is actually durable. When the boot
+	-- probe could not reach DataStores, this server runs on the in-memory fallback store, whose
+	-- save() always returns ok while persisting nothing — so every receipt would ack against RAM
+	-- and die with the server, which is the unrecoverable real-money loss the rule exists to stop.
+	-- Refusing here (rather than after the transform) also keeps the in-memory ledger clean, so the
+	-- redelivery lands on a healthy server as a genuinely new grant instead of a phantom replay.
+	-- receiptDecision maps this Err to NotProcessedYet, so Roblox simply redelivers later.
+	if self._persistenceDegraded then
+		return Result.err(Result.Codes.Internal, "no durable store: refusing to consume a receipt")
+	end
+
 	-- ----- ONE lock-held transform: idempotency check + ledger write + (pack) grant -----
 	-- Outcomes captured into locals the transform closes over; the transform mutates `d` ONLY when
 	-- the receipt is newly processed, and returns `d` unchanged otherwise (already-processed replay).
@@ -424,6 +436,10 @@ function MonetizationService:Start(context: any): ()
 	-- Build the stateful unit from the injected deps (so the seam can read flags + the clock).
 	local service = MonetizationService.new(context.data, context.clock)
 	service._analytics = context.analytics -- nil-safe at the emit sites
+	-- [B2 §10] Boot-time durability signal. If the store this server got is the in-memory
+	-- fallback, `save()` returns ok while persisting nothing — so save-before-ack would be
+	-- vacuous and we must refuse receipts outright rather than acknowledge them against RAM.
+	service._persistenceDegraded = context.persistenceDegraded == true
 
 	-- Publish the seam: ctx.monetization:stardustMultiplier(userId). Same object identity every
 	-- ActionContext projects, so every request reads the player's persisted boost/flags through it.

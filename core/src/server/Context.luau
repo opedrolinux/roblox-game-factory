@@ -74,8 +74,9 @@ function Context.build(): any
 
 	-- [B2 §6] The real session-locked SessionStore when DataStores are actually usable;
 	-- MockStore otherwise (edit mode / no API access). Same Store interface — a drop-in.
+	local durable = canPersist()
 	local store
-	if canPersist() then
+	if durable then
 		store = SessionStore.new({ clock = clock, config = config })
 	else
 		store = MockStore.new({ clock = clock, config = config })
@@ -90,6 +91,11 @@ function Context.build(): any
 		clock = clock,
 		config = config,
 		data = data,
+		-- [B2 §6/§10] TRUE when this server fell back to the in-memory store, i.e. nothing written
+		-- here survives. Anything that must not acknowledge an irreversible external action
+		-- (notably a receipt handler — real money) has to consult this: a successful save() from
+		-- the fallback store is not durability. Never set on a healthy server.
+		persistenceDegraded = not durable,
 		net = net,
 		gate = gate,
 		-- deferred seams (nil in the spine; populated in B2):
