@@ -159,6 +159,67 @@ describe("monetization: a receipt is never acknowledged before the grant is dura
 		expect(grantOnce(service, player.UserId, 101, "rcpt-durability-2")):toBeErr()
 	end)
 
+	it("a TRANSIENTLY throttled save is retried, and the receipt then acknowledges", function()
+		local clock = Mocks.clock(1000)
+		local cfg = config()
+		-- The whole retry policy exists for this leg: the first two durable writes are throttled,
+		-- the budget absorbs them, and the purchase is honored rather than bounced back to Roblox.
+		local store = Mocks.store({ clock = clock, config = cfg, throttleSaves = 2 })
+		local data = DataService.new(store, clock, cfg, Mocks.logWarn)
+		local player = Mocks.player(1)
+		data:loadSession(player)
+		local service = MonetizationService.new(data, clock)
+		local result = grantOnce(service, player.UserId, 101, "rcpt-throttled")
+		expect(result):toBeOk()
+		expect((result :: any).value.granted):toBe(true)
+	end)
+
+	it("a receipt whose session lock was STOLEN is refused, and the D7 seam fires once", function()
+		local clock = Mocks.clock(1000)
+		local cfg = config()
+		-- stealLockAfter = 0: the durable write returns the terminal LockStolen. §10 requires
+		-- NotProcessedYet (Roblox redelivers on the authoritative server) — never an ack against
+		-- data this server can no longer write.
+		local store = Mocks.store({ clock = clock, config = cfg, stealLockAfter = 0 })
+		local deadCalls = 0
+		local data = DataService.new(store, clock, cfg, Mocks.logWarn, function(_userId, _code)
+			deadCalls += 1
+		end)
+		local player = Mocks.player(1)
+		data:loadSession(player)
+		local service = MonetizationService.new(data, clock)
+		expect(grantOnce(service, player.UserId, 101, "rcpt-stolen")):toBeErr(
+			Result.Codes.LockStolen
+		)
+		expect(deadCalls):toBe(1)
+		expect(service:receiptDecision({
+			PlayerId = player.UserId,
+			ProductId = 101,
+			PurchaseId = "rcpt-stolen",
+		})):toBe("NotProcessedYet")
+	end)
+
+	it(
+		"a server with NO durable store refuses receipts outright (never acks against RAM)",
+		function()
+			local clock = Mocks.clock(1000)
+			local cfg = config()
+			local store = Mocks.store({ clock = clock, config = cfg })
+			local data = DataService.new(store, clock, cfg, Mocks.logWarn)
+			local player = Mocks.player(1)
+			data:loadSession(player)
+			local service = MonetizationService.new(data, clock)
+			-- The boot probe failed, so this server runs on the in-memory fallback: save() would
+			-- return ok having persisted nothing, making save-before-ack vacuous.
+			service._persistenceDegraded = true
+			expect(grantOnce(service, player.UserId, 101, "rcpt-degraded")):toBeErr()
+			-- Refused BEFORE mutating: the ledger must stay clean so the redelivery on a healthy
+			-- server is a genuine new grant, not a phantom replay.
+			local d = (data:get(player) :: any).value
+			expect(d.receipts["rcpt-degraded"]):toBe(nil)
+		end
+	)
+
 	it("once the store accepts writes, the same receipt acknowledges exactly one grant", function()
 		local service, data, player = setup({ seed = seedFor(1, {}) })
 		local before = (data:get(player) :: any).value.currencies.Stardust

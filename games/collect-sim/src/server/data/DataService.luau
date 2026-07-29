@@ -303,6 +303,16 @@ function DataService.releaseSession(self: any, session: any): Result<any>
 	end
 end
 
+-- Retire a player's session slot, but only if it still holds `session` (pass nil to clear
+-- unconditionally). Every teardown path now runs after a multi-second retry loop, during which a
+-- same-server rejoin can install a replacement — clearing blindly would delete the live session
+-- and strand the player with no data.
+function DataService.clearSession(self: any, userId: number, session: any?): ()
+	if session == nil or self._sessions[userId] == session then
+		self._sessions[userId] = nil
+	end
+end
+
 -- [B2 H2/D4/D7] Terminal teardown for a stolen session: the in-memory delta can never persist
 -- (the new owner is authoritative), so stop serving it and notify the D7 seam (runtime default,
 -- set in Start: kick with a "rejoin to sync" message; tests inject a spy). pcall-guarded — a
@@ -313,7 +323,12 @@ end
 -- a stolen session writes NOTHING (the store short-circuits on its own steal flag) — it only
 -- tears down.
 function DataService.markDead(self: any, userId: number, code: string, session: any?): ()
-	self._sessions[userId] = nil
+	-- Identity-guarded (same reasoning as the store's teardown): the save/release paths now retry
+	-- for seconds, and a same-server rejoin inside that window installs a NEW session for this
+	-- userId. A resuming loop that then cleared the slot unconditionally would evict the LIVE
+	-- session, leaving the player in-game with no data at all (every get/update/save returns
+	-- NoData). Only retire the slot if it still holds the session we were working on.
+	self:clearSession(userId, session)
 	self._dead[userId] = true
 	if session ~= nil then
 		local ok, err = pcall(function()
@@ -349,6 +364,11 @@ function DataService.autosaveTick(self: any): { flushed: number, stolen: number 
 
 	local function flushOne(userId: number, session: any): ()
 		local ok, err = pcall(function()
+			-- Stop may have begun while this thread was queued behind the store's write limiter;
+			-- flushing now would burn shutdown budget and re-stamp a record Stop just released.
+			if self._autosaveStopped then
+				return
+			end
 			session.data.timestamps.lastSeenUnix = self._clock:unix()
 			local saved = self:saveSession(session)
 			if saved.ok then
@@ -359,7 +379,12 @@ function DataService.autosaveTick(self: any): { flushed: number, stolen: number 
 			end
 		end)
 		if not ok then
-			self._logWarn(`DataService.autosaveTick: flush errored: {tostring(err)}`)
+			-- pcall'd so `pending` is ALWAYS decremented: the drain loop below has no deadline,
+			-- so a single escaping error (e.g. a throwing injected logWarn) would hang the
+			-- autosave thread forever and silently kill the only periodic durability mechanism.
+			pcall(function()
+				self._logWarn(`DataService.autosaveTick: flush errored: {tostring(err)}`)
+			end)
 		end
 		pending -= 1
 	end
@@ -438,7 +463,9 @@ function DataService.Start(self: any, context: any): ()
 					)}`
 				)
 			end
-			self._sessions[player.UserId] = nil
+			-- Identity-guarded: releaseSession above can retry for seconds, and a fast rejoin
+			-- inside that window installs a new session for this userId.
+			self:clearSession(player.UserId, session)
 		end
 		-- Leaving clears any dead marker (a rejoin starts fresh).
 		self._dead[player.UserId] = nil
@@ -504,10 +531,14 @@ function DataService.Stop(self: any, _context: any): ()
 					return
 				end
 			end
-			self._sessions[userId] = nil
+			self:clearSession(userId, session)
 		end)
 		if not ok then
-			self._logWarn(`DataService.Stop: flush errored: {tostring(err)}`)
+			-- pcall'd for the same reason as autosaveTick: `pending` must always reach 0 or the
+			-- drain loop below holds BindToClose until the engine kills the server.
+			pcall(function()
+				self._logWarn(`DataService.Stop: flush errored: {tostring(err)}`)
+			end)
 		end
 		pending -= 1
 	end

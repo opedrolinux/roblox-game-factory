@@ -11,7 +11,12 @@ export type DataStoreBudget = {
 	-- [B2 SessionStore] session-lock + write-cadence tunables (B2-SESSIONSTORE-DESIGN §8):
 	lockTtlSeconds: number, -- MemoryStore lock TTL (auto-expiry = crash-safe steal; D1/D3)
 	heartbeatIntervalSeconds: number, -- TTL renew cadence (= lockTtl/2, beats the TTL under jitter)
-	autosaveIntervalSeconds: number, -- periodic DataStore flush (0 = save-on-release-only; D5)
+	-- Periodic DataStore flush (D5). 0 disables it — but note this is now LOAD-BEARING beyond
+	-- data loss: the autosave is what makes a displaced server discover, via the lock stamp on its
+	-- next write, that it no longer owns a session. With 0 that discovery is deferred to the
+	-- terminal write (leave/shutdown), so a stolen-from server can serve stale in-memory data for
+	-- a whole session. Keep it non-zero in production.
+	autosaveIntervalSeconds: number,
 	sessionLockedWaitSeconds: number, -- load's SessionLocked-specific wait budget (>= lockTtl; H1)
 	-- Global write budget (D8). Roblox grants a SERVER ~(60 + 10·players) DataStore writes/min, so
 	-- the limiter models BOTH terms — a flat number would throttle a full server to a fraction of

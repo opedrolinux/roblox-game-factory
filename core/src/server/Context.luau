@@ -8,6 +8,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local DataStoreService = game:GetService("DataStoreService")
+local MemoryStoreService = game:GetService("MemoryStoreService")
 
 local Server = ServerScriptService:WaitForChild("Server")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
@@ -43,6 +44,12 @@ local function canPersist(): boolean
 	for attempt = 1, PROBE_ATTEMPTS do
 		local ok, err = pcall(function()
 			DataStoreService:GetDataStore(Config.storeName):GetAsync("__capability_probe")
+			-- ALSO probe MemoryStore: SessionStore needs BOTH services. Probing only DataStores
+			-- would pass on a server whose MemoryStore is unavailable, install SessionStore, and
+			-- then fail every session claim -> Internal -> the load budget exhausts -> EVERY
+			-- player is kicked for the server's lifetime. That is worse than the non-persistent
+			-- fallback this probe exists to avoid, so a missing MemoryStore must fail the probe.
+			MemoryStoreService:GetHashMap(Config.storeName .. "_lock"):GetAsync("__probe")
 		end)
 		if ok then
 			return true
