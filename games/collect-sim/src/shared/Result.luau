@@ -18,6 +18,10 @@ local Result = {}
 -- routing/data: UnknownAction, NoData, Internal
 -- lock contention (returned by the B2 SessionStore; MockStore returns them ONLY under the
 -- D6 test hooks returnSessionLocked/stealLockAfter): SessionLocked, LockStolen
+-- session lifecycle: SessionClosed — this SESSION was torn down (released/abandoned) and may
+--   never write again. Distinct from LockStolen (which means another SERVER owns the record and
+--   triggers a dead-session kick): SessionClosed is normal, expected, and must NOT kick anyone,
+--   because the live replacement session for that player is usually healthy.
 Result.Codes = {
 	BadPayload = "BadPayload",
 	BadType = "BadType",
@@ -32,6 +36,7 @@ Result.Codes = {
 	Rejected = "Rejected",
 	SessionLocked = "SessionLocked",
 	LockStolen = "LockStolen",
+	SessionClosed = "SessionClosed",
 }
 
 function Result.ok<T>(value: T): Ok<T>

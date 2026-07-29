@@ -211,6 +211,15 @@ function MockStore.new(options: MockOptions): any
 		-- be refused by the per-key throttle floor (skipping it would lose the session's delta) —
 		-- the same split SessionStore.persist makes, so the fixture models the real policy.
 		local function persist(self: any, bypassFloor: boolean): Result<any>
+			-- A torn-down session may never write again — mirrors SessionStore.persist. Modelled
+			-- here because the production hazard (a stale session's parked write landing on top of
+			-- its live same-server replacement) is invisible to the DataStore lock stamp, which
+			-- identifies the server rather than the session, so ONLY the fixture can falsify it
+			-- at Tier-1.
+			if released then
+				return Result.err(Result.Codes.SessionClosed, "MockStore.sessionClosed")
+			end
+
 			-- [B2 D6] stealLockAfter: after N successful saves the session lock has been re-claimed
 			-- by "another server" — every further save is a PERMANENT LockStolen (never retryable),
 			-- exactly the §4.2 write-exclusion outcome, so the terminal reaction is testable.
@@ -270,7 +279,9 @@ function MockStore.new(options: MockOptions): any
 		-- orphaned-session regression in SessionStore sat green through the whole suite.)
 		function session.release(self: any): Result<any>
 			if released then
-				return Result.ok(self.data)
+				-- Mirrors SessionStore: a second release wrote nothing, so it must not report a
+				-- successful final save.
+				return Result.err(Result.Codes.SessionClosed, "MockStore.sessionClosed")
 			end
 			local saved = persist(self, true)
 			if not saved.ok and (saved :: any).code ~= Result.Codes.LockStolen then

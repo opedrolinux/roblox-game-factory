@@ -102,6 +102,11 @@ function DataService.new(
 	self._dead = {} :: { [number]: boolean }
 	-- [B2 D5] set by Stop so the periodic autosave loop does not race the shutdown flush.
 	self._autosaveStopped = false
+	-- [B2 B-1] userId -> true between beginJoin and finishJoin. loadSession YIELDS (it can poll a
+	-- contended lock for sessionLockedWaitSeconds), and a player can leave inside that window —
+	-- at which point PlayerRemoving finds an empty session slot and does nothing. This flag is
+	-- how the install boundary learns the player already left.
+	self._joining = {} :: { [number]: boolean }
 	-- optional NetServer for pushing the client-safe view; set during Start, nil in tests.
 	self._net = nil :: any
 	return self
@@ -242,6 +247,12 @@ function DataService.saveSession(self: any, session: any): Result<any>
 			)
 			return saved
 		end
+		if code == Result.Codes.SessionClosed then
+			-- Terminal and NORMAL: this session was torn down while a writer was parked. Not a
+			-- data-loss-risk (whatever replaced it owns the record now), and deliberately NOT
+			-- routed to markDead — that would kick a player whose live session is healthy.
+			return saved
+		end
 		attempt += 1
 		if attempt > maxRetries then
 			-- Data-loss-risk: surface rather than swallow.
@@ -277,6 +288,11 @@ function DataService.releaseSession(self: any, session: any): Result<any>
 			)
 			return released
 		end
+		if code == Result.Codes.SessionClosed then
+			-- Already torn down (typically by an abandon that discarded the delta). Terminal;
+			-- retrying cannot write. The loss, if any, was logged where the abandon happened.
+			return released
+		end
 		attempt += 1
 		if attempt > maxRetries then
 			self._logWarn(
@@ -301,6 +317,51 @@ function DataService.releaseSession(self: any, session: any): Result<any>
 		end
 		backoff(self._clock, self._config.dataStore.retryBaseSeconds * attempt)
 	end
+end
+
+-- [B2 B-1] Join lifecycle. Call beginJoin BEFORE loadSession, noteDeparture as the FIRST thing a
+-- leave does, and finishJoin with the load result. finishJoin returns true when the session is
+-- live and should be served (push the client view); false when the player left mid-load, in which
+-- case it performs the leave work the empty-slot PlayerRemoving skipped.
+--
+-- Without this the session is installed for a player who is already gone and nothing ever releases
+-- it: SessionStore has spawned its heartbeat, which renews the lock for the SERVER'S WHOLE
+-- LIFETIME, so that player is SessionLocked out of every other server (40s budget burn, then
+-- kicked) — the H1 kick-loop reached through a different door. The autosave also re-stamps their
+-- lastSeenUnix every interval, continuously destroying the offline-earnings base, and the stale
+-- liveSessions entry inflates the write budget.
+function DataService.beginJoin(self: any, player: PlayerLike): ()
+	self._joining[player.UserId] = true
+end
+
+function DataService.noteDeparture(self: any, player: PlayerLike): ()
+	self._joining[player.UserId] = nil
+end
+
+function DataService.finishJoin(self: any, player: PlayerLike, loaded: Result<any>): boolean
+	local userId = player.UserId
+	local stillPresent = self._joining[userId] == true
+	self._joining[userId] = nil
+	if not loaded.ok then
+		return false
+	end
+	if stillPresent then
+		return true
+	end
+	-- Left during the load: run the leave path now, on the session that was just installed.
+	local session = (loaded :: any).value
+	session.data.timestamps.lastSeenUnix = self._clock:unix()
+	local released = self:releaseSession(session)
+	if not released.ok then
+		self._logWarn(
+			`DataService.finishJoin: release for departed {player.Name} failed: {tostring(
+				(released :: any).code
+			)}`
+		)
+	end
+	self:clearSession(userId, session)
+	self._dead[userId] = nil
+	return false
 end
 
 -- Retire a player's session slot, but only if it still holds `session` (pass nil to clear
@@ -328,8 +389,13 @@ function DataService.markDead(self: any, userId: number, code: string, session: 
 	-- userId. A resuming loop that then cleared the slot unconditionally would evict the LIVE
 	-- session, leaving the player in-game with no data at all (every get/update/save returns
 	-- NoData). Only retire the slot if it still holds the session we were working on.
+	-- Capture identity BEFORE clearSession nils the slot, then gate EVERY userId-keyed effect on
+	-- it — not just the slot. `_dead` is checked ahead of `_sessions` by get/update/save, so a
+	-- stale session's marker would shadow a live, healthy replacement for its whole life, and the
+	-- onDead default kicks that player. Guarding only the slot (as the first pass did) leaves the
+	-- two more damaging effects unguarded.
+	local isCurrent = session == nil or self._sessions[userId] == session
 	self:clearSession(userId, session)
-	self._dead[userId] = true
 	if session ~= nil then
 		local ok, err = pcall(function()
 			session:release()
@@ -338,6 +404,10 @@ function DataService.markDead(self: any, userId: number, code: string, session: 
 			self._logWarn(`DataService.markDead: store teardown errored: {tostring(err)}`)
 		end
 	end
+	if not isCurrent then
+		return -- a stale session died; the live replacement is unaffected
+	end
+	self._dead[userId] = true
 	if self._onDead ~= nil then
 		local ok, err = pcall(self._onDead, userId, code)
 		if not ok then
@@ -430,12 +500,19 @@ function DataService.Start(self: any, context: any): ()
 	end
 
 	local function onAdded(player: any): ()
+		self:beginJoin(player)
 		local loaded = self:loadSession(player)
 		if not loaded.ok then
+			self:finishJoin(player, loaded)
 			self._logWarn(
 				`DataService: failed to load {player.Name} ({(loaded :: any).code}); kicking`
 			)
 			player:Kick("Could not load your data. Please rejoin.")
+			return
+		end
+		-- loadSession yields, so the player may already be gone; finishJoin releases the session
+		-- in that case rather than leaving an orphan holding the lock forever.
+		if not self:finishJoin(player, loaded) then
 			return
 		end
 		-- Push the client-safe view on load (§4.5).
@@ -450,6 +527,8 @@ function DataService.Start(self: any, context: any): ()
 	Players.PlayerAdded:Connect(onAdded)
 
 	Players.PlayerRemoving:Connect(function(player: any)
+		-- FIRST: record the departure, so a load still in flight installs nothing orphaned.
+		self:noteDeparture(player)
 		local session = self._sessions[player.UserId]
 		if session ~= nil then
 			session.data.timestamps.lastSeenUnix = self._clock:unix()
@@ -466,9 +545,13 @@ function DataService.Start(self: any, context: any): ()
 			-- Identity-guarded: releaseSession above can retry for seconds, and a fast rejoin
 			-- inside that window installs a new session for this userId.
 			self:clearSession(player.UserId, session)
+			-- Leaving clears any dead marker (a rejoin starts fresh) — but ONLY when this leave
+			-- corresponds to the session we just released. Clearing unconditionally could
+			-- un-mark a genuinely dead live replacement and resume serving its stale data.
+			self._dead[player.UserId] = nil
+		elseif self._sessions[player.UserId] == nil then
+			self._dead[player.UserId] = nil
 		end
-		-- Leaving clears any dead marker (a rejoin starts fresh).
-		self._dead[player.UserId] = nil
 	end)
 
 	-- [B2 D5] periodic autosave: bounds ungraceful-crash data-loss to one interval. 0 disables

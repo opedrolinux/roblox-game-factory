@@ -301,6 +301,16 @@ function SessionStore.new(options: SessionStoreOptions): any
 		-- One save attempt: floor-gated, token-gated, stamp-checked (§4.2). The RETRY loop
 		-- lives in DataService.saveSession (same split MockStore models).
 		local function persist(clearStamp: boolean): Result<any>
+			-- A torn-down session must NEVER write again. The DataStore stamp cannot enforce this:
+			-- `myId` identifies the SERVER, so a stale session's write sails past the stamp check
+			-- and lands on top of its own live same-server replacement. That is reachable in
+			-- ordinary operation — autosaveTick holds raw session references across task.spawn,
+			-- and saveSession backs off for seconds — and on the L11 rejoin ordering it can
+			-- durably erase an already-ACKNOWLEDGED receipt ledger entry (real money, and Roblox
+			-- will never redeliver it). Cheap guard, catastrophic without it.
+			if released then
+				return Result.err(Result.Codes.SessionClosed, "SessionStore.sessionClosed")
+			end
 			if zombie then
 				return Result.err(Result.Codes.LockStolen, "SessionStore.heartbeatLost")
 			end
@@ -413,7 +423,11 @@ function SessionStore.new(options: SessionStoreOptions): any
 		-- write in a live game is this one, on the leave path.
 		function session.release(_self: any): Result<any>
 			if released then
-				return Result.ok(session.data)
+				-- NOT ok: this session is already torn down, so nothing was written now. Reporting
+				-- success would launder a discarded delta (abandon's whole purpose) as a clean
+				-- final save and suppress the caller's data-loss-risk warning — the one signal an
+				-- operator would use to notice the loss.
+				return Result.err(Result.Codes.SessionClosed, "SessionStore.sessionClosed")
 			end
 			local saved = persist(true)
 			if not saved.ok and (saved :: any).code ~= Result.Codes.LockStolen then

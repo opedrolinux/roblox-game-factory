@@ -94,13 +94,26 @@ jitter (size `HEARTBEAT_INTERVAL + maxRetries·retryBaseSeconds·… < LOCK_TTL`
 `DataStore:UpdateAsync(key, fn)`:
 ```
 fn(stored):
-  if stored ~= nil and stored.lockId ~= nil and stored.lockId ~= myId then
-       return nil                      -- our lock was lost + re-claimed -> DO NOT WRITE
+  if stored ~= nil and stored.lockId ~= myId then
+       return nil                      -- not our record any more -> DO NOT WRITE
   record       = stored or { metaVersion = 1 }
   record.data  = session.data          -- flush the in-memory (post-transform) value
-  record.lockId = myId                 -- stamp: we are the writer
+  record.lockId = myId                 -- stamp: we are the writer (release clears it)
   return record
 ```
+
+> **AS-BUILT (amended `061acbd`, was `stored.lockId ~= nil and stored.lockId ~= myId`).** The
+> original middle clause made an **unstamped** record writable by anybody — and every normal
+> `release` deliberately leaves the record unstamped (§4.3), so a displaced-but-still-alive server
+> could durably overwrite the next owner's released record. Since `load` always stamps (§4.1), an
+> unstamped record at save time can only mean somebody else took over and finished, which is
+> exactly the case that must be refused. **Do not reintroduce the `~= nil` clause.**
+>
+> **AS-BUILT (added `3c59dd9`+).** `persist` also refuses when this SESSION has been torn down,
+> returning the new `SessionClosed` code. The stamp cannot cover this: `lockId` identifies the
+> *server*, so a stale session's parked write passes the stamp check and lands on top of its own
+> live same-server replacement. `SessionClosed` is terminal but is **not** routed to the
+> dead-session/kick path — the replacement session is healthy.
 - Wrote → ok. This is the real write-exclusion even if the MemoryStore lock briefly lied (§3 TOCTOU).
 - `stored.lockId ~= myId` → **`Err("LockStolen")`, MUST NOT write** (the new owner is authoritative).
   `LockStolen` is **permanent** for this session — the reaction is terminal, not retryable (§9 / H2).

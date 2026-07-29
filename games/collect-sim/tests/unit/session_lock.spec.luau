@@ -316,8 +316,34 @@ describe("DataService durable-write policy (§7 budget · §4.2 retry)", functio
 		local clock = Mocks.clock(1000)
 		local config = testConfig(5, 10)
 		-- throttleSaves is PER KEY: each of the 5 players throttles once, then succeeds.
-		local store = Mocks.store({ clock = clock, config = config, throttleSaves = 1 })
-		local service = DataService.new(store, clock, config, Mocks.logWarn)
+		local real = Mocks.store({ clock = clock, config = config, throttleSaves = 1 })
+		local okReleases = 0
+		-- Count SUCCESSFUL final writes. Asserting isLocked/NoData alone cannot fail: on a store
+		-- that persists nothing, releaseSession exhausts, abandon() clears the held key anyway,
+		-- and Stop clears the slot regardless — so a Stop that flushed nothing looks identical to
+		-- a correct one. Only "five releases actually returned ok" distinguishes them.
+		local counting = {
+			load = function(_self: any, key: string, default: () -> any): any
+				local loaded = real:load(key, default)
+				if not loaded.ok then
+					return loaded
+				end
+				local session = (loaded :: any).value
+				local realRelease = session.release
+				session.release = function(s: any): any
+					local result = realRelease(s)
+					if result.ok then
+						okReleases += 1
+					end
+					return result
+				end
+				return loaded
+			end,
+			isLocked = function(_self: any, key: string): boolean
+				return real:isLocked(key)
+			end,
+		}
+		local service = DataService.new(counting, clock, config, Mocks.logWarn)
 		for index = 1, 5 do
 			local player = Mocks.player(index)
 			service:loadSession(player)
@@ -327,15 +353,94 @@ describe("DataService durable-write policy (§7 budget · §4.2 retry)", functio
 			end)
 		end
 		service:Stop({})
-		-- Assert the FLUSH happened, not the value. MockStore.update is write-through, so the
-		-- backing table already holds Stardust = index*10 before Stop ever runs — re-loading and
-		-- checking the value would pass against a Stop that did nothing at all (the repo's own
-		-- named tautological-test failure class, docs/LEARNINGS.md). What only a real flush can
-		-- produce is every key RELEASED despite each one throttling first.
+		expect(okReleases):toBe(5)
 		for index = 1, 5 do
-			expect(store:isLocked("player_" .. tostring(index))):toBe(false)
+			expect(real:isLocked("player_" .. tostring(index))):toBe(false)
 			expect(service:get(Mocks.player(index))):toBeErr(Result.Codes.NoData)
 		end
+	end)
+end)
+
+describe("a torn-down session can never write again (SessionClosed)", function()
+	it("a dead session's late save must NOT overwrite its live replacement", function()
+		local clock = Mocks.clock(1000)
+		local config = testConfig(3, 10)
+		local store = Mocks.store({ clock = clock, config = config })
+		local fresh = function()
+			return { n = 0 }
+		end
+
+		local sessionA = (store:load("k", fresh) :: any).value
+		expect(sessionA:release()):toBeOk()
+
+		-- The player rejoins the SAME server: a replacement session for the same key.
+		local sessionB = (store:load("k", fresh) :: any).value
+		sessionB:update(function(d)
+			d.n = 42
+			return d
+		end)
+		expect(sessionB:save()):toBeOk()
+
+		-- Now A's parked writer resumes — a real interleaving: autosaveTick holds raw session
+		-- references across task.spawn, and saveSession backs off for seconds. The lock stamp
+		-- cannot catch this because it identifies the SERVER, not the session, so A's stale
+		-- snapshot would be written straight over B's record (up to and including an
+		-- already-acknowledged receipt ledger).
+		expect(sessionA:save()):toBeErr(Result.Codes.SessionClosed)
+
+		local after = (store:load("k", fresh) :: any).value
+		expect(after.data.n):toBe(42)
+	end)
+
+	it("release() after abandon reports SessionClosed, not a phantom successful save", function()
+		local clock = Mocks.clock(1000)
+		local config = testConfig(3, 10)
+		local store = Mocks.store({ clock = clock, config = config })
+		local session = (store:load("k", function()
+			return { n = 1 }
+		end) :: any).value
+		session:abandon() -- delta discarded, nothing written
+		-- Returning ok here would launder a discarded delta as a successful final write, and the
+		-- caller's data-loss-risk warning would never fire.
+		expect(session:release()):toBeErr(Result.Codes.SessionClosed)
+	end)
+end)
+
+describe("a player who leaves DURING the load is not orphaned (B-1)", function()
+	it("finishJoin releases a session whose player already departed", function()
+		local clock = Mocks.clock(1000)
+		local config = testConfig(3, 10)
+		local store = Mocks.store({ clock = clock, config = config })
+		local service = DataService.new(store, clock, config, Mocks.logWarn)
+		local player = Mocks.player(1)
+
+		service:beginJoin(player)
+		local loaded = service:loadSession(player)
+		expect(loaded):toBeOk()
+		-- The player left while loadSession was still yielding (it polls a contended lock for up
+		-- to sessionLockedWaitSeconds). PlayerRemoving saw an empty slot and no-opped.
+		service:noteDeparture(player)
+
+		expect(service:finishJoin(player, loaded)):toBe(false)
+		-- Without this the session is installed with a live heartbeat nobody will ever stop:
+		-- the lock is renewed for the server's lifetime, so the player is SessionLocked out of
+		-- EVERY other server, and each autosave re-stamps their offline-earnings base to now.
+		expect(store:isLocked("player_1")):toBe(false)
+		expect(service:get(player)):toBeErr(Result.Codes.NoData)
+	end)
+
+	it("finishJoin keeps the session when the player is still present", function()
+		local clock = Mocks.clock(1000)
+		local config = testConfig(3, 10)
+		local store = Mocks.store({ clock = clock, config = config })
+		local service = DataService.new(store, clock, config, Mocks.logWarn)
+		local player = Mocks.player(1)
+
+		service:beginJoin(player)
+		local loaded = service:loadSession(player)
+		expect(service:finishJoin(player, loaded)):toBe(true)
+		expect(store:isLocked("player_1")):toBe(true)
+		expect(service:get(player)):toBeOk()
 	end)
 end)
 

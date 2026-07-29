@@ -1,0 +1,523 @@
+<title>Factory Status — where the machine stops</title>
+
+<style>
+  :root {
+    --paper:      #E9EDF2;
+    --panel:      #F5F7FA;
+    --panel-2:    #DFE5EC;
+    --ink:        #0E141C;
+    --ink-soft:   #3A4756;
+    --steel:      #5B6B7F;
+    --rule:       #C3CDD9;
+    --accent:     #1F6C87;
+    --accent-dim: #7FA8B8;
+    --go:         #2F7D52;
+    --work:       #A9740D;
+    --hand:       #A83C63;
+    --go-bg:      #DCEBE2;
+    --work-bg:    #F4E9D2;
+    --hand-bg:    #F3DCE4;
+    --shadow:     0 1px 2px rgba(14,20,28,.06), 0 8px 24px -12px rgba(14,20,28,.18);
+
+    --f-display: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    --f-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:      #0E141C;
+      --panel:      #161E28;
+      --panel-2:    #1E2833;
+      --ink:        #E6ECF3;
+      --ink-soft:   #AFBDCB;
+      --steel:      #8496A8;
+      --rule:       #2A3644;
+      --accent:     #57A8C4;
+      --accent-dim: #2E5A6E;
+      --go:         #5FBF8B;
+      --work:       #E0AC45;
+      --hand:       #E2789F;
+      --go-bg:      #16301F;
+      --work-bg:    #33280F;
+      --hand-bg:    #33161F;
+      --shadow:     0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.7);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper:      #0E141C;
+    --panel:      #161E28;
+    --panel-2:    #1E2833;
+    --ink:        #E6ECF3;
+    --ink-soft:   #AFBDCB;
+    --steel:      #8496A8;
+    --rule:       #2A3644;
+    --accent:     #57A8C4;
+    --accent-dim: #2E5A6E;
+    --go:         #5FBF8B;
+    --work:       #E0AC45;
+    --hand:       #E2789F;
+    --go-bg:      #16301F;
+    --work-bg:    #33280F;
+    --hand-bg:    #33161F;
+    --shadow:     0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.7);
+  }
+
+  :root[data-theme="light"] {
+    --paper:      #E9EDF2;
+    --panel:      #F5F7FA;
+    --panel-2:    #DFE5EC;
+    --ink:        #0E141C;
+    --ink-soft:   #3A4756;
+    --steel:      #5B6B7F;
+    --rule:       #C3CDD9;
+    --accent:     #1F6C87;
+    --accent-dim: #7FA8B8;
+    --go:         #2F7D52;
+    --work:       #A9740D;
+    --hand:       #A83C63;
+    --go-bg:      #DCEBE2;
+    --work-bg:    #F4E9D2;
+    --hand-bg:    #F3DCE4;
+    --shadow:     0 1px 2px rgba(14,20,28,.06), 0 8px 24px -12px rgba(14,20,28,.18);
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--f-display);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 62rem;
+    margin: 0 auto;
+    padding: 3rem 1.5rem 5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 3.5rem;
+  }
+
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: .7rem;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--steel);
+    margin: 0;
+  }
+
+  h1 {
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 800;
+    letter-spacing: -.03em;
+    line-height: 1.05;
+    text-wrap: balance;
+    margin: .5rem 0 0;
+  }
+
+  h2 {
+    font-size: 1.35rem;
+    font-weight: 750;
+    letter-spacing: -.015em;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  h3 {
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: -.01em;
+    margin: 0;
+  }
+
+  p { margin: 0; max-width: 62ch; }
+  .lede { font-size: 1.075rem; color: var(--ink-soft); margin-top: 1rem; }
+
+  section { display: flex; flex-direction: column; gap: 1.25rem; }
+  .sec-head { display: flex; flex-direction: column; gap: .35rem; border-top: 2px solid var(--ink); padding-top: .85rem; }
+
+  /* ---------- verdict readouts ---------- */
+  .verdicts { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 40rem) { .verdicts { grid-template-columns: 1fr; } }
+
+  .verdict {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 1.4rem 1.4rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: .6rem;
+    box-shadow: var(--shadow);
+    position: relative;
+    overflow: hidden;
+  }
+  .verdict::before {
+    content: "";
+    position: absolute; inset: 0 auto 0 0; width: 3px;
+    background: var(--lamp, var(--steel));
+  }
+  .verdict .who { font-family: var(--f-mono); font-size: .7rem; letter-spacing: .16em; text-transform: uppercase; color: var(--steel); }
+  .verdict .state { font-size: 1.5rem; font-weight: 800; letter-spacing: -.02em; color: var(--lamp); line-height: 1.15; }
+  .verdict .said { font-size: .92rem; color: var(--ink-soft); }
+  .verdict .metric {
+    font-family: var(--f-mono); font-size: .78rem; color: var(--steel);
+    font-variant-numeric: tabular-nums; border-top: 1px solid var(--rule); padding-top: .6rem; margin-top: .2rem;
+  }
+  .v-factory { --lamp: var(--work); }
+  .v-game    { --lamp: var(--hand); }
+
+  /* ---------- ladder ---------- */
+  .ladder { display: flex; flex-direction: column; gap: 0; position: relative; }
+
+  .rung {
+    display: grid;
+    grid-template-columns: 4.2rem 1fr auto;
+    align-items: center;
+    gap: 1rem;
+    padding: .85rem 1rem;
+    border: 1px solid var(--rule);
+    border-bottom: none;
+    background: var(--panel);
+  }
+  .rung:first-of-type { border-radius: 3px 3px 0 0; }
+  .rung.last { border-bottom: 1px solid var(--rule); border-radius: 0 0 3px 3px; }
+
+  .rung .tid {
+    font-family: var(--f-mono); font-weight: 700; font-size: .95rem;
+    letter-spacing: -.02em; color: var(--lamp, var(--steel));
+    font-variant-numeric: tabular-nums;
+  }
+  .rung .what { font-size: .95rem; }
+  .rung .what small { display: block; color: var(--steel); font-size: .8rem; font-family: var(--f-mono); }
+
+  .pill {
+    font-family: var(--f-mono); font-size: .68rem; letter-spacing: .1em; text-transform: uppercase;
+    font-weight: 700; padding: .3rem .55rem; border-radius: 2px; white-space: nowrap;
+    background: var(--pill-bg); color: var(--lamp);
+  }
+  .r-pass   { --lamp: var(--go);   --pill-bg: var(--go-bg); }
+  .r-unrun  { --lamp: var(--hand); --pill-bg: var(--hand-bg); }
+  .r-idle   { --lamp: var(--steel); --pill-bg: transparent; }
+  .r-idle .pill { border: 1px dashed var(--rule); }
+
+  /* the fence */
+  .fence {
+    display: grid;
+    grid-template-columns: 4.2rem 1fr;
+    gap: 1rem;
+    align-items: center;
+    padding: .7rem 1rem;
+    background: var(--hand-bg);
+    border: 1px solid var(--hand);
+    border-left-width: 3px;
+    position: relative;
+    z-index: 1;
+  }
+  .fence .mark { font-family: var(--f-mono); font-size: .95rem; font-weight: 700; color: var(--hand); }
+  .fence .txt { font-size: .88rem; color: var(--ink); font-weight: 600; }
+  .fence .txt span { display: block; font-weight: 400; color: var(--ink-soft); font-size: .84rem; }
+
+  /* ---------- phase grid ---------- */
+  .phases { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: .75rem; }
+  .phase {
+    border: 1px solid var(--rule); border-radius: 3px; background: var(--panel);
+    padding: .9rem 1rem; display: flex; flex-direction: column; gap: .4rem;
+    border-top: 3px solid var(--lamp, var(--steel));
+  }
+  .phase .pid { font-family: var(--f-mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--lamp); font-weight: 700; }
+  .phase .pname { font-size: .95rem; font-weight: 650; }
+  .phase .pnote { font-size: .82rem; color: var(--ink-soft); }
+  .p-done { --lamp: var(--go); }
+  .p-work { --lamp: var(--work); }
+  .p-todo { --lamp: var(--steel); }
+
+  /* ---------- two-column split ---------- */
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 46rem) { .split { grid-template-columns: 1fr; } }
+
+  .col {
+    border: 1px solid var(--rule); border-radius: 3px; background: var(--panel);
+    padding: 1.1rem 1.2rem 1.3rem; display: flex; flex-direction: column; gap: .9rem;
+    border-top: 3px solid var(--lamp);
+  }
+  .col-machine { --lamp: var(--accent); }
+  .col-human   { --lamp: var(--hand); }
+  .col .chead { display: flex; flex-direction: column; gap: .15rem; }
+  .col .ctag { font-family: var(--f-mono); font-size: .68rem; letter-spacing: .14em; text-transform: uppercase; color: var(--lamp); font-weight: 700; }
+  .col ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: .7rem; }
+  .col li { display: grid; grid-template-columns: 1.1rem 1fr; gap: .55rem; font-size: .9rem; align-items: start; }
+  .col li .bullet { font-family: var(--f-mono); color: var(--lamp); font-weight: 700; line-height: 1.5; }
+  .col li small { display: block; color: var(--steel); font-size: .81rem; }
+
+  /* ---------- branch table ---------- */
+  .scroller { overflow-x: auto; border: 1px solid var(--rule); border-radius: 3px; background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; font-size: .87rem; min-width: 34rem; }
+  th, td { text-align: left; padding: .65rem .9rem; border-bottom: 1px solid var(--rule); }
+  th {
+    font-family: var(--f-mono); font-size: .68rem; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--steel); font-weight: 700; background: var(--panel-2);
+  }
+  tr:last-child td { border-bottom: none; }
+  td.br { font-family: var(--f-mono); font-size: .84rem; }
+  td.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; text-align: right; color: var(--ink-soft); }
+  .dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 50%; background: var(--lamp); margin-right: .45rem; vertical-align: baseline; }
+  .s-live { --lamp: var(--go); }
+  .s-held { --lamp: var(--work); }
+
+  .note {
+    font-size: .87rem; color: var(--ink-soft); border-left: 2px solid var(--accent-dim);
+    padding-left: .9rem; max-width: 62ch;
+  }
+
+  footer { border-top: 1px solid var(--rule); padding-top: 1.2rem; color: var(--steel); font-size: .8rem; font-family: var(--f-mono); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .rung, .verdict, .phase { animation: rise .5s cubic-bezier(.2,.7,.3,1) backwards; }
+    .rung:nth-child(1) { animation-delay: .04s } .rung:nth-child(2) { animation-delay: .08s }
+    .rung:nth-child(3) { animation-delay: .12s } .rung:nth-child(5) { animation-delay: .2s }
+    .rung:nth-child(6) { animation-delay: .24s }
+    @keyframes rise { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: none } }
+  }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">Roblox Game Factory · status read 29 Jul 2026</p>
+    <h1>The machine is nearly out of moves. What's left is mostly yours.</h1>
+    <p class="lede">
+      The factory works — it took a one-page spec and produced a complete game, gated by its own
+      adversarial reviews. That game passes every check that can be run without opening Roblox.
+      It has never been opened in Roblox.
+    </p>
+  </header>
+
+  <section>
+    <div class="verdicts">
+      <div class="verdict v-factory">
+        <span class="who">The factory</span>
+        <span class="state">Working, hardening</span>
+        <span class="said">
+          Every pipeline stage is built and has been proven end-to-end on a real game. The remaining
+          work is durability and security — making data survive a restart.
+        </span>
+        <span class="metric">4 of 5 build phases done · B2 in flight · 11 pipeline tools</span>
+      </div>
+      <div class="verdict v-game">
+        <span class="who">Collect Sim</span>
+        <span class="state">Complete, unproven</span>
+        <span class="said">
+          Ten features, a full core loop and 326 passing tests — all of it verified by a simulator,
+          none of it by the actual game engine.
+        </span>
+        <span class="metric">326 / 326 tests · T1 verified · engine boot unrun</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">The centre of the question</p>
+      <h2>How far up the ladder we've climbed</h2>
+      <p class="lede" style="font-size:.95rem;margin-top:.15rem">
+        Each rung is a stronger claim than the one below it. The factory can climb the first three by
+        itself. It cannot climb the fourth — and everything you'd recognise as "a working game" lives
+        above that line.
+      </p>
+    </div>
+
+    <div class="ladder">
+      <div class="rung r-pass">
+        <span class="tid">T0</span>
+        <span class="what">Formats, lints and compiles to a place file<small>stylua · selene · rojo build</small></span>
+        <span class="pill">Green</span>
+      </div>
+      <div class="rung r-pass">
+        <span class="tid">T0.5</span>
+        <span class="what">Every <code>require</code> would actually resolve inside Roblox<small>gate-require · 0 fail</small></span>
+        <span class="pill">Green</span>
+      </div>
+      <div class="rung r-pass">
+        <span class="tid">T1</span>
+        <span class="what">Game logic behaves correctly under simulation<small>lune · 326 unit + integration tests</small></span>
+        <span class="pill">Green</span>
+      </div>
+
+      <div class="fence">
+        <span class="mark">━━</span>
+        <span class="txt">
+          The autonomy fence — the machine stops here
+          <span>Opening Studio, publishing, and pushing are human-only by design (FACTORY.md §4). No amount of green below this line implies anything above it.</span>
+        </span>
+      </div>
+
+      <div class="rung r-unrun">
+        <span class="tid">T2</span>
+        <span class="what">The place actually boots and the loop runs in-engine<small>Studio / Open Cloud smoke — evidence: unrun</small></span>
+        <span class="pill">Needs you</span>
+      </div>
+      <div class="rung r-idle last">
+        <span class="tid">T3</span>
+        <span class="what">A person plays it and it's fun<small>human playtest</small></span>
+        <span class="pill">Not reached</span>
+      </div>
+    </div>
+
+    <p class="note">
+      This ladder exists because of a real scar: collect-sim once passed 313 tests and still failed to
+      boot in Roblox — a cross-service <code>require</code> that the simulator resolved and the engine
+      didn't. T0.5 was built to catch exactly that class, and it now passes. But T0.5 proves the
+      requires resolve; only T2 proves the game runs.
+    </p>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Factory build phases</p>
+      <h2>What's been built</h2>
+    </div>
+    <div class="phases">
+      <div class="phase p-done">
+        <span class="pid">Phase A · done</span>
+        <span class="pname">Structure &amp; doctrine</span>
+        <span class="pnote">The rules every generated game is held to.</span>
+      </div>
+      <div class="phase p-done">
+        <span class="pid">B1 · done</span>
+        <span class="pname">Core spine</span>
+        <span class="pnote">Service framework, networking gateway, data layer, test harness.</span>
+      </div>
+      <div class="phase p-done">
+        <span class="pid">B3 · done</span>
+        <span class="pname">The fence</span>
+        <span class="pnote">Blocks the agent from destructive or outward-facing acts. 274-case corpus; caught a live one.</span>
+      </div>
+      <div class="phase p-done">
+        <span class="pid">B4 · done</span>
+        <span class="pname">The pipeline</span>
+        <span class="pnote">Scaffold → decompose → contract → fan-out → integrate → adversarial review. Proven on a real game.</span>
+      </div>
+      <div class="phase p-work">
+        <span class="pid">B2 · in flight</span>
+        <span class="pname">Real persistence</span>
+        <span class="pnote">SessionStore built and ported; four review blockers being fixed right now.</span>
+      </div>
+      <div class="phase p-todo">
+        <span class="pid">B2 · remainder</span>
+        <span class="pname">Security suite &amp; live-ops</span>
+        <span class="pnote">Rate limiting, violation tracking, feature flags. Not started.</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">The gap to a playable game</p>
+      <h2>Four things stand between here and someone playing it</h2>
+    </div>
+    <div class="split">
+      <div class="col col-machine">
+        <div class="chead">
+          <span class="ctag">I can do these</span>
+          <h3>Two, and one is half-done</h3>
+        </div>
+        <ul>
+          <li>
+            <span class="bullet">1</span>
+            <span>
+              Finish the B2 persistence fixes
+              <small>Mid-flight. Until it lands, a server restart wipes every player's progress — and one confirmed bug lets a paid purchase vanish.</small>
+            </span>
+          </li>
+          <li>
+            <span class="bullet">2</span>
+            <span>
+              Merge the world you can actually walk around
+              <small>The greybox islands, HUD and controls are built and reviewed, sitting unmerged on a side branch. Without them the game is logic with nothing to look at.</small>
+            </span>
+          </li>
+        </ul>
+      </div>
+      <div class="col col-human">
+        <div class="chead">
+          <span class="ctag">Only you can do these</span>
+          <h3>Two, and they're the real gate</h3>
+        </div>
+        <ul>
+          <li>
+            <span class="bullet">3</span>
+            <span>
+              Open the place in Studio once
+              <small>The T2 smoke test is written and waiting. It needs a human to open Roblox Studio — the fence forbids the agent from doing it. This is the single highest-value 20 minutes available.</small>
+            </span>
+          </li>
+          <li>
+            <span class="bullet">4</span>
+            <span>
+              Publish it
+              <small>Publishing, and anything touching your account or real money, is permanently human-only.</small>
+            </span>
+          </li>
+        </ul>
+      </div>
+    </div>
+    <p class="note">
+      Honest read: items 1 and 2 are a few hours of machine work. Item 3 is the one that could
+      invalidate assumptions — until the place boots in-engine, "complete" means "complete under
+      simulation", and this project has been burned by that difference before.
+    </p>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">Where the code lives</p>
+      <h2>Branches</h2>
+    </div>
+    <div class="scroller">
+      <table>
+        <thead>
+          <tr><th>Branch</th><th>Holds</th><th class="num">Ahead</th><th>State</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="br">main</td>
+            <td>The game + the whole pipeline</td>
+            <td class="num">—</td>
+            <td><span class="dot s-live"></span>Pushed to GitHub</td>
+          </tr>
+          <tr>
+            <td class="br">feat/b2-sessionstore</td>
+            <td>Persistence — and the ladder beneath it</td>
+            <td class="num">16</td>
+            <td><span class="dot s-held"></span>In flight, uncommitted fixes</td>
+          </tr>
+          <tr>
+            <td class="br">feat/collect-sim-presentation</td>
+            <td>The walkable greybox world + HUD</td>
+            <td class="num">11</td>
+            <td><span class="dot s-held"></span>Built, awaiting merge</td>
+          </tr>
+          <tr>
+            <td class="br">feat/verification-ladder-l2</td>
+            <td>The ladder + grader (also inside B2)</td>
+            <td class="num">11</td>
+            <td><span class="dot s-held"></span>Merges with B2</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      Everything above <code>main</code> is finished, reviewed work that simply hasn't been merged
+      yet — not loose ends. The B2 branch already carries the ladder, so landing B2 lands both.
+    </p>
+  </section>
+
+  <footer>
+    Generated from the live repo — branch counts, tier status and test totals read at 29 Jul 2026.
+    Tier verdict via tier-status.luau: highest green = T1, T2 evidence = unrun.
+  </footer>
+
+</div>
