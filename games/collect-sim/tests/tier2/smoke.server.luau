@@ -289,17 +289,29 @@ pcall(function(): ()
 
 	-- Are the two persistence substrates actually reachable here? If not, every SessionStore claim
 	-- remains unverified regardless of how green the phases above are.
-	local dsOk = pcall(function(): ()
+	-- PlaceId/GameId are the usual reason a probe fails: a place built by `rojo build` is brand new
+	-- and has never been published, so PlaceId is 0 and Roblox refuses DataStore access outright —
+	-- regardless of the API-services setting, which is a per-UNIVERSE toggle.
+	diagnostics.placeId = game.PlaceId
+	diagnostics.gameId = game.GameId
+
+	local dsOk, dsErr = pcall(function(): ()
 		local DataStoreService = game:GetService("DataStoreService")
 		DataStoreService:GetDataStore("Tier2SmokeProbe"):GetAsync("probe")
 	end)
 	diagnostics.dataStoreReachable = dsOk
+	if not dsOk then
+		diagnostics.dataStoreError = tostring(dsErr)
+	end
 
-	local msOk = pcall(function(): ()
+	local msOk, msErr = pcall(function(): ()
 		local MemoryStoreService = game:GetService("MemoryStoreService")
 		MemoryStoreService:GetHashMap("Tier2SmokeProbe"):GetAsync("probe")
 	end)
 	diagnostics.memoryStoreReachable = msOk
+	if not msOk then
+		diagnostics.memoryStoreError = tostring(msErr)
+	end
 end)
 
 -- ══ SUMMARY — the single evidence line, printed LAST (fail-closed) ════════════════════════════════
