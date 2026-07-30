@@ -28,9 +28,16 @@ local Config = require((Shared :: any).Config) :: any
 local Clock = require((Server :: any).data.Clock) :: any
 local SessionStore = require((Server :: any).data.SessionStore) :: any
 
+-- This script deliberately WAITS (past a 1s TTL, and between retry attempts), so a full run takes
+-- ~20-30s. It therefore announces itself up front and prints each finding the moment it lands —
+-- otherwise a silent Output looks identical to "the script never synced", which is the one
+-- ambiguity a diagnostic must not have.
+print("── tier-2 LOCK DIAGNOSTIC starting (takes ~20-30s; findings print as they land) ──")
+
 local findings: { any } = {}
 local function note(name: string, detail: any): ()
 	table.insert(findings, { name = name, detail = detail })
+	print(`  [{#findings}/4] {name}: {HttpService:JSONEncode(detail)}`)
 end
 
 -- One attempt at a raw HashMap update. Returns ok + the error text so a failure is DATA, not a throw.
@@ -148,8 +155,6 @@ note(
 )
 
 -- ── SUMMARY ─────────────────────────────────────────────────────────────────────────────────────
-print("── tier-2 LOCK DIAGNOSTIC ──")
-for _, f in findings do
-	print(`  {f.name}: {HttpService:JSONEncode(f.detail)}`)
-end
+-- Printed last, so its presence is itself the signal that every phase completed.
+print("── tier-2 LOCK DIAGNOSTIC complete ──")
 print(HttpService:JSONEncode({ tier = 2, probe = "lockdiag", findings = findings }))
