@@ -1,4 +1,4 @@
-<title>Factory Status — where the machine stops</title>
+<title>Factory Status — where the machine stands</title>
 
 <style>
   :root {
@@ -286,12 +286,13 @@
 <div class="wrap">
 
   <header>
-    <p class="eyebrow">Roblox Game Factory · status read 29 Jul 2026</p>
-    <h1>The machine is nearly out of moves. What's left is mostly yours.</h1>
+    <p class="eyebrow">Roblox Game Factory · status read 30 Jul 2026</p>
+    <h1>It runs in the engine now. The remaining unknowns need real players.</h1>
     <p class="lede">
-      The factory works — it took a one-page spec and produced a complete game, gated by its own
-      adversarial reviews. That game passes every check that can be run without opening Roblox.
-      It has never been opened in Roblox.
+      The last version of this page said the machine stopped at a line it could not cross, and that
+      nothing green below that line implied anything above it. That line has been crossed. The game
+      boots inside Roblox, the loop runs on the live wire, and player data survives a save and
+      reload against real Roblox storage — all observed, none of it inferred.
     </p>
   </header>
 
@@ -299,21 +300,21 @@
     <div class="verdicts">
       <div class="verdict v-factory">
         <span class="who">The factory</span>
-        <span class="state">Working, hardening</span>
+        <span class="state">Working, engine-connected</span>
         <span class="said">
-          Every pipeline stage is built and has been proven end-to-end on a real game. The remaining
-          work is durability and security — making data survive a restart.
+          Every pipeline stage is built and proven on a real game. The in-engine test rung, designed
+          but parked for weeks awaiting a human, is now automated and runs unattended.
         </span>
-        <span class="metric">4 of 5 build phases done · B2 in flight · 11 pipeline tools</span>
+        <span class="metric">Persistence landed · in-engine lane automated · 12 pipeline tools</span>
       </div>
       <div class="verdict v-game">
         <span class="who">Collect Sim</span>
-        <span class="state">Complete, unproven</span>
+        <span class="state">Engine-verified</span>
         <span class="said">
-          Ten features, a full core loop and 326 passing tests — all of it verified by a simulator,
-          none of it by the actual game engine.
+          Ten features and a full core loop, booted in a real DataModel, with saves proven against
+          real storage across three consecutive write-release-reload cycles.
         </span>
-        <span class="metric">326 / 326 tests · T1 verified · engine boot unrun</span>
+        <span class="metric">344 / 344 tests · T2 green · awaiting human playtest</span>
       </div>
     </div>
   </section>
@@ -323,9 +324,9 @@
       <p class="eyebrow">The centre of the question</p>
       <h2>How far up the ladder we've climbed</h2>
       <p class="lede" style="font-size:.95rem;margin-top:.15rem">
-        Each rung is a stronger claim than the one below it. The factory can climb the first three by
-        itself. It cannot climb the fourth — and everything you'd recognise as "a working game" lives
-        above that line.
+        Each rung is a stronger claim than the one below it. The machine now climbs four of the five
+        by itself. The fence has moved down one rung — and what sits above it now genuinely cannot
+        be automated, rather than merely not having been.
       </p>
     </div>
 
@@ -342,35 +343,36 @@
       </div>
       <div class="rung r-pass">
         <span class="tid">T1</span>
-        <span class="what">Game logic behaves correctly under simulation<small>lune · 326 unit + integration tests</small></span>
+        <span class="what">Game logic behaves correctly under simulation<small>lune · 344 unit + integration tests</small></span>
+        <span class="pill">Green</span>
+      </div>
+      <div class="rung r-pass">
+        <span class="tid">T2</span>
+        <span class="what">The place boots and the loop runs in a real engine<small>run-in-roblox · boot-probe · wire-present · core-loop · assert-no-error</small></span>
         <span class="pill">Green</span>
       </div>
 
       <div class="fence">
         <span class="mark">━━</span>
         <span class="txt">
-          The autonomy fence — the machine stops here
-          <span>Opening Studio, publishing, and pushing are human-only by design (FACTORY.md §4). No amount of green below this line implies anything above it.</span>
+          The fence — and it has moved down a rung
+          <span>T2 used to sit above this line, parked for weeks awaiting a human with Studio open. A pinned tool (run-in-roblox) drives a real DataModel headlessly, so the boot smoke now runs unattended. Publishing, pushing and account actions remain permanently human-only by design (FACTORY.md §4).</span>
         </span>
       </div>
 
-      <div class="rung r-unrun">
-        <span class="tid">T2</span>
-        <span class="what">The place actually boots and the loop runs in-engine<small>Studio / Open Cloud smoke — evidence: unrun</small></span>
-        <span class="pill">Needs you</span>
-      </div>
-      <div class="rung r-idle last">
+      <div class="rung r-unrun last">
         <span class="tid">T3</span>
-        <span class="what">A person plays it and it's fun<small>human playtest</small></span>
-        <span class="pill">Not reached</span>
+        <span class="what">A person plays it and it's fun<small>human playtest — and the only way to test two servers contending over one player</small></span>
+        <span class="pill">Needs you</span>
       </div>
     </div>
 
     <p class="note">
       This ladder exists because of a real scar: collect-sim once passed 313 tests and still failed to
       boot in Roblox — a cross-service <code>require</code> that the simulator resolved and the engine
-      didn't. T0.5 was built to catch exactly that class, and it now passes. But T0.5 proves the
-      requires resolve; only T2 proves the game runs.
+      didn't. T0.5 was built to catch that class statically. As of today it is caught
+      <em>at runtime too</em>: the boot probe executed every one of those requires inside a real
+      DataModel and none of them threw.
     </p>
   </section>
 
@@ -400,74 +402,119 @@
         <span class="pname">The pipeline</span>
         <span class="pnote">Scaffold → decompose → contract → fan-out → integrate → adversarial review. Proven on a real game.</span>
       </div>
-      <div class="phase p-work">
-        <span class="pid">B2 · in flight</span>
+      <div class="phase p-done">
+        <span class="pid">B2 · done</span>
         <span class="pname">Real persistence</span>
-        <span class="pnote">SessionStore built and ported; four review blockers being fixed right now.</span>
+        <span class="pnote">SessionStore merged after three adversarial review rounds, then verified against real Roblox storage.</span>
       </div>
       <div class="phase p-todo">
         <span class="pid">B2 · remainder</span>
         <span class="pname">Security suite &amp; live-ops</span>
-        <span class="pnote">Rate limiting, violation tracking, feature flags. Not started.</span>
+        <span class="pnote">Rate limiting, violation tracking, feature flags. Not started — and the game warns about it on every boot.</span>
       </div>
     </div>
   </section>
 
   <section>
     <div class="sec-head">
+      <p class="eyebrow">What the engine actually said</p>
+      <h2>Five assumptions the code was built on. Four are now facts.</h2>
+      <p class="lede" style="font-size:.95rem;margin-top:.15rem">
+        The persistence layer shipped with five <code>TODO(verify)</code> markers — claims about how
+        Roblox behaves that three rounds of adversarial review could not settle, because no amount of
+        reading code answers them. Running it does.
+      </p>
+    </div>
+    <div class="scroller">
+      <table>
+        <thead>
+          <tr><th>The assumption</th><th>Why it mattered</th><th>Verdict</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Returning "don't write" to Roblox aborts the write, and doesn't raise an error</td>
+            <td>If backwards, the crash-recovery logic silently inverts — and every test still passes green</td>
+            <td><span class="dot s-live"></span>Holds</td>
+          </tr>
+          <tr>
+            <td>The same, for the durable store</td>
+            <td>This is what stops a displaced server overwriting a record it no longer owns</td>
+            <td><span class="dot s-live"></span>Holds</td>
+          </tr>
+          <tr>
+            <td>A 1-second lock expiry is accepted</td>
+            <td>Otherwise a lock lingers 30s instead of 1s on every disconnect</td>
+            <td><span class="dot s-live"></span>Holds</td>
+          </tr>
+          <tr>
+            <td>Cancelling an already-finished task is harmless</td>
+            <td>An error escaping teardown would leave a player neither loaded nor kicked</td>
+            <td><span class="dot s-live"></span>Holds</td>
+          </tr>
+          <tr>
+            <td>The server's unique ID is non-empty and unique</td>
+            <td>It identifies which server owns your save. Empty in every Studio mode, so the fallback ID is what actually runs</td>
+            <td><span class="dot s-held"></span>Needs live players</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      One genuine defect surfaced and turned out not to be ours: writing a lock with a 1-second expiry
+      leaves a roughly one-second window where Roblox refuses to update it. Reproduced with raw engine
+      calls and none of this project's code in the stack. It is intermittent, self-healing via the
+      existing retry, and costs no data — but it is measured rather than assumed, which is the point.
+    </p>
+  </section>
+
+  <section>
+    <div class="sec-head">
       <p class="eyebrow">The gap to a playable game</p>
-      <h2>Four things stand between here and someone playing it</h2>
+      <h2>Three things stand between here and someone playing it</h2>
     </div>
     <div class="split">
       <div class="col col-machine">
         <div class="chead">
           <span class="ctag">I can do these</span>
-          <h3>Two, and one is half-done</h3>
+          <h3>Two, both optional</h3>
         </div>
         <ul>
           <li>
             <span class="bullet">1</span>
             <span>
-              Finish the B2 persistence fixes
-              <small>Mid-flight. Until it lands, a server restart wipes every player's progress — and one confirmed bug lets a paid purchase vanish.</small>
+              Merge the world you can actually walk around
+              <small>The greybox islands, HUD and controls are built and reviewed, sitting six commits back on a side branch. Without them the game is correct logic with nothing to look at.</small>
             </span>
           </li>
           <li>
             <span class="bullet">2</span>
             <span>
-              Merge the world you can actually walk around
-              <small>The greybox islands, HUD and controls are built and reviewed, sitting unmerged on a side branch. Without them the game is logic with nothing to look at.</small>
+              Build the security suite
+              <small>Rate limiting, validators, violation tracking. The game prints a warning about this on every single boot — it is not publish-safe until it lands.</small>
             </span>
           </li>
         </ul>
       </div>
       <div class="col col-human">
         <div class="chead">
-          <span class="ctag">Only you can do these</span>
-          <h3>Two, and they're the real gate</h3>
+          <span class="ctag">Only you can do this</span>
+          <h3>One, and it is the real gate</h3>
         </div>
         <ul>
           <li>
             <span class="bullet">3</span>
             <span>
-              Open the place in Studio once
-              <small>The T2 smoke test is written and waiting. It needs a human to open Roblox Studio — the fence forbids the agent from doing it. This is the single highest-value 20 minutes available.</small>
-            </span>
-          </li>
-          <li>
-            <span class="bullet">4</span>
-            <span>
-              Publish it
-              <small>Publishing, and anything touching your account or real money, is permanently human-only.</small>
+              Play it, with other people
+              <small>Two questions no test can reach: is it any fun, and does the save-lock hold when two real servers contend over one player? A single Studio session cannot contend with itself, by construction.</small>
             </span>
           </li>
         </ul>
       </div>
     </div>
     <p class="note">
-      Honest read: items 1 and 2 are a few hours of machine work. Item 3 is the one that could
-      invalidate assumptions — until the place boots in-engine, "complete" means "complete under
-      simulation", and this project has been burned by that difference before.
+      Honest read: the machine's remaining work is real but no longer blocking. What is blocking is
+      taste — whether the loop is enjoyable — and that has never been something this pipeline could
+      answer.
     </p>
   </section>
 
@@ -484,40 +531,30 @@
         <tbody>
           <tr>
             <td class="br">main</td>
-            <td>The game + the whole pipeline</td>
+            <td>The game, the pipeline, persistence, the ladder and the engine lane</td>
             <td class="num">—</td>
             <td><span class="dot s-live"></span>Pushed to GitHub</td>
           </tr>
           <tr>
-            <td class="br">feat/b2-sessionstore</td>
-            <td>Persistence — and the ladder beneath it</td>
-            <td class="num">16</td>
-            <td><span class="dot s-held"></span>In flight, uncommitted fixes</td>
-          </tr>
-          <tr>
             <td class="br">feat/collect-sim-presentation</td>
             <td>The walkable greybox world + HUD</td>
-            <td class="num">11</td>
+            <td class="num">6</td>
             <td><span class="dot s-held"></span>Built, awaiting merge</td>
-          </tr>
-          <tr>
-            <td class="br">feat/verification-ladder-l2</td>
-            <td>The ladder + grader (also inside B2)</td>
-            <td class="num">11</td>
-            <td><span class="dot s-held"></span>Merges with B2</td>
           </tr>
         </tbody>
       </table>
     </div>
     <p class="note">
-      Everything above <code>main</code> is finished, reviewed work that simply hasn't been merged
-      yet — not loose ends. The B2 branch already carries the ladder, so landing B2 lands both.
+      The B2 and verification-ladder branches are gone from this table because they landed —
+      <code>main</code> now carries both, plus the engine lane built on top of them. What remains
+      unmerged is finished, reviewed work, not a loose end.
     </p>
   </section>
 
   <footer>
-    Generated from the live repo — branch counts, tier status and test totals read at 29 Jul 2026.
-    Tier verdict via tier-status.luau: highest green = T1, T2 evidence = unrun.
+    Generated from the live repo — branch counts, tier status and test totals read at 30 Jul 2026.
+    Tier verdict via tier-status.luau: highest green = T2, "engine-smoked-T2 — ready for human
+    playtest". Engine evidence recorded at games/collect-sim/tests/tier2/.
   </footer>
 
 </div>
