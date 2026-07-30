@@ -37,6 +37,9 @@ local services = {
 	require(Server.services.offline.OfflineService), -- [offline STUB] ClaimOffline
 	require(Server.services.restock.RestockService), -- [restock STUB] FetchRestock + ctx.restock seam
 	require(Server.services.rebirth.RebirthService), -- [rebirth STUB] Rebirth
+	-- presentation: build the greybox world (spawn + island platforms + pads). AFTER IslandsService so
+	-- context.islands:catalog() is populated; Roblox-only (a no-op under Lune), registers no action.
+	require(Server.services.world.WorldService), -- [world] greybox spawn + island platforms + pads
 }
 
 Bootstrap.start(services, context)

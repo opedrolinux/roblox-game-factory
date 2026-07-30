@@ -212,3 +212,107 @@ describe("DataService load-retry loop (SessionLocked contention seam — concern
 		expect(service:loadSession(player)):toBeErr(Result.Codes.NoData)
 	end)
 end)
+
+describe(
+	"DataService.update — pushes the client-safe view after a successful write (§4.5)",
+	function()
+		-- The post-write "data" push keeps every client subscriber (HUD currencies/rebirths/Prisms/streak,
+		-- islands + restock eligibility) in sync; without it the client only ever sees the join push. We
+		-- inject a recording net surrogate and assert update() emits exactly one "data" event carrying
+		-- toView(the NEW data) for the writing player — and that update without a net never crashes (the
+		-- production tests construct DataService with no net, so the push must stay strictly nil-guarded).
+		local function recordingNet(): any
+			local calls: { any } = {}
+			return {
+				calls = calls,
+				fireClient = function(_self: any, player: any, event: string, payload: any): ()
+					table.insert(calls, { player = player, event = event, payload = payload })
+				end,
+			}
+		end
+
+		it(
+			"a successful update fires ONE 'data' push with toView(new data) for that player",
+			function()
+				local clock = Mocks.clock(1000)
+				local config = testConfig(3)
+				local store = Mocks.store({ clock = clock, config = config })
+				local service = DataService.new(store, clock, config, Mocks.logWarn)
+				local net = recordingNet()
+				service._net = net -- production sets this in Start; tests inject it directly
+				local player = Mocks.player(1)
+				service:loadSession(player)
+
+				local updated = service:update(player, function(d)
+					d.currencies.Stardust += 25
+					return d
+				end)
+				expect(updated):toBeOk()
+
+				-- exactly one push, for THIS player, on the "data" channel.
+				expect(#net.calls):toBe(1)
+				expect(net.calls[1].player):toBe(player)
+				expect(net.calls[1].event):toBe("data")
+				-- the payload is the client-safe view of the NEW data (the write is visible in the push)...
+				expect(net.calls[1].payload.currencies.Stardust):toBe(25)
+				-- ...and it is the toView projection, never a server-only ledger like receipts.
+				expect((net.calls[1].payload :: any).receipts):toBe(nil)
+			end
+		)
+
+		it(
+			"update with NO net wired pushes nothing and never crashes (the tests' default world)",
+			function()
+				local clock = Mocks.clock(1000)
+				local config = testConfig(3)
+				local store = Mocks.store({ clock = clock, config = config })
+				local service = DataService.new(store, clock, config, Mocks.logWarn)
+				local player = Mocks.player(1)
+				service:loadSession(player)
+				-- service._net is nil (no Start): update still succeeds and simply skips the push.
+				local updated = service:update(player, function(d)
+					d.currencies.Stardust += 5
+					return d
+				end)
+				expect(updated):toBeOk()
+				expect((service:get(player) :: any).value.currencies.Stardust):toBe(5)
+			end
+		)
+
+		-- [T2 REGRESSION] The push is a NOTIFICATION, not part of the write contract. Tier-1 could
+		-- not see this: the fixture net is a plain table that accepts any `player`, whereas the real
+		-- RemoteEvent:FireClient rejects a non-Player with "Unable to cast value to Object". The
+		-- in-engine smoke caught it — Sell reported Err(Internal) with the Stardust already credited
+		-- and the backpack already emptied. A false negative on a committed write is strictly worse
+		-- than a stale HUD, so a throwing push must be swallowed and warned, never surfaced.
+		it("a THROWING view push must not fail a write that already committed", function()
+			local clock = Mocks.clock(1000)
+			local config = testConfig(3)
+			local store = Mocks.store({ clock = clock, config = config })
+			local warnings = 0
+			local service = DataService.new(store, clock, config, function(_message: any): ()
+				warnings += 1
+			end)
+			local player = Mocks.player(1)
+			service:loadSession(player)
+
+			-- A net whose fireClient throws, exactly as the real one does on a bad player value.
+			service._net = {
+				fireClient = function(_self: any, _p: any, _name: string, _payload: any): ()
+					error("Unable to cast value to Object")
+				end,
+			} :: any
+
+			local updated = service:update(player, function(d)
+				d.currencies.Stardust += 7
+				return d
+			end)
+
+			-- The write COMMITTED, so the caller must see ok — and the data must actually be there.
+			expect(updated):toBeOk()
+			expect((service:get(player) :: any).value.currencies.Stardust):toBe(7)
+			-- ...and the failure must not vanish silently: it is diagnosable.
+			expect(warnings):toBe(1)
+		end)
+	end
+)

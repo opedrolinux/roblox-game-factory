@@ -14,11 +14,14 @@ local context = Context.build() -- builds NetClient (waits for the server's remo
 
 local controllers = {
 	context.net, -- NetClient (resolves the RemoteFunction/RemoteEvent)
+	require(Client.controllers.hud.HudController), -- [hud] mounts the HUD singleton; drives currency/rebirth
 	require(Client.controllers.islands.IslandsController), -- [islands] teleport / unlock UI
 	require(Client.controllers.leaderboard.LeaderboardController), -- [leaderboard] in-world board
 	require(Client.controllers.offline.OfflineController), -- [offline] welcome-back claim popup
 	require(Client.controllers.restock.RestockController), -- [restock] today's rich-vein HUD hint
 	require(Client.controllers.rebirth.RebirthController), -- [rebirth] prestige HUD
+	require(Client.controllers.collection.CollectionController), -- [collection] cosmetic motes + magnet Collect/Sell
+	require(Client.controllers.shop.ShopController), -- [shop] greybox upgrades panel firing BuyUpgrade
 }
 
 Bootstrap.start(controllers, context)

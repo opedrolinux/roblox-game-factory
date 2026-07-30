@@ -641,6 +641,55 @@ describe(
 )
 
 describe(
+	"Islands — the read-only catalog seam (the world generator's source; server-owned)",
+	function()
+		-- ctx.islands:catalog() -> a FRESH { id, order, cost, multiplier, vip } projection in catalog order.
+		-- WorldService reads it to build one greybox platform per island. We assert it AGREES with the
+		-- client-facing FetchIslands projection (the SAME server-owned catalog), never copying the
+		-- implementation table — so the world geometry can never silently diverge from server authority.
+		it(
+			"catalog() agrees with FetchIslands on count, ids, order, cost, multiplier, vip",
+			function()
+				local harness, _data, player = setup()
+				local fetched = fetchIslands(harness, player) -- sorted by order
+				local cat = harness.islands:catalog()
+				table.sort(cat, function(a, b)
+					return a.order < b.order
+				end)
+				expect(#cat):toBe(#fetched)
+				for i = 1, #fetched do
+					expect(cat[i].id):toBe(fetched[i].id)
+					expect(cat[i].order):toBe(fetched[i].order)
+					expect(cat[i].cost):toBe(fetched[i].cost)
+					expect(cat[i].multiplier):toBe(fetched[i].multiplier)
+					expect(cat[i].vip):toBe(fetched[i].vip)
+				end
+				-- the seam carries NO per-player field (it has no player): `unlocked` is FetchIslands-only.
+				expect(cat[1].unlocked):toBe(nil)
+			end
+		)
+
+		it(
+			"catalog() is a PURE read: hands back a fresh table each call and mutates no state",
+			function()
+				local harness, data, player = setup()
+				setStardust(data, player, 4242)
+				local first = harness.islands:catalog()
+				-- mutating the returned projection must not corrupt the server-owned catalog: a later call is clean.
+				first[1].cost = -999
+				first[1].id = 88888
+				local second = harness.islands:catalog()
+				expect(second[1].cost ~= -999):toBe(true)
+				expect(second[1].id ~= 88888):toBe(true)
+				-- and reading the catalog touched no player state.
+				expect(balanceOf(data, player)):toBe(4242)
+				expect(flagOf(data, player, "island.2")):toBe(false)
+			end
+		)
+	end
+)
+
+describe(
 	"Islands — concurrency-safe sink (interleaved + spam-duplicated never double-spend)",
 	function()
 		-- The economy_race technique (REQUIRED): drive interleaved invocations as coroutines against a

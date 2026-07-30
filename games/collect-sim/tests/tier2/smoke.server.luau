@@ -210,8 +210,12 @@ runPhase("core-loop", function(): (boolean, string)
 
 	local sold = invoke(A.Sell, {})
 	if sold == nil or not sold.ok then
+		-- Carry the MESSAGE, not just the code. `Internal` alone says "something threw" and sends
+		-- you guessing; the message names the throw, which is the difference between diagnosing
+		-- this in one run and three.
 		local code = if sold ~= nil then tostring(sold.code) else "nil result"
-		return false, `{A.Sell} failed over the real wire: {code}`
+		local msg = if sold ~= nil then tostring(sold.message) else "-"
+		return false, `{A.Sell} failed over the real wire: {code} — {msg}`
 	end
 
 	local after = context.data:get(player)

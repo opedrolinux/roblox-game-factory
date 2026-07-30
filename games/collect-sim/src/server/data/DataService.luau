@@ -206,7 +206,30 @@ function DataService.update(self: any, player: PlayerLike, transform: (any) -> a
 	if session == nil then
 		return Result.err(Result.Codes.NoData, "session not loaded")
 	end
-	return session:update(transform)
+	local result = session:update(transform)
+	-- §4.5: push the refreshed client-safe view after a SUCCESSFUL write so every "data" subscriber
+	-- (HUD currencies/rebirths/Prisms/streak, islands + restock eligibility) stays in sync without
+	-- each action reply having to carry every field. This is the post-write analog of the on-load push
+	-- in Start (the only other "data" emit). Nil-guarded: tests construct DataService with no net (push
+	-- skipped, behavior unchanged), and a failed write mutated nothing so there is nothing to push.
+	--
+	-- pcall'd: the push is a NOTIFICATION, not part of the write contract, and it must never be able
+	-- to fail a write that already committed. Unguarded, a throw here escapes update(), Net.dispatch
+	-- pcalls it into Err(Internal), and the player is told "Sell failed" with their backpack already
+	-- emptied and the Stardust already credited — a false negative on a durable write, which is
+	-- strictly worse than a stale HUD. (Found at Tier-2: FireClient rejects a non-Player with
+	-- "Unable to cast value to Object", and Tier-1 could not see it because the fixture net is a
+	-- plain table that accepts anything. Same principle as the B2 heartbeat rule: an advisory
+	-- signal never gets to overturn the authoritative one.)
+	if result.ok and self._net ~= nil then
+		local pushed, err = pcall(function(): ()
+			self._net:fireClient(player, "data", Types.toView(result.value))
+		end)
+		if not pushed then
+			self._logWarn(`DataService.update: view push failed (write COMMITTED): {tostring(err)}`)
+		end
+	end
+	return result
 end
 
 -- Force a save (throttled/retried per budget). Normally automatic on release. Retries a

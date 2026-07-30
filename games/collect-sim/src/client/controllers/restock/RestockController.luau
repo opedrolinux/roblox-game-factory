@@ -5,10 +5,14 @@
 -- bonus multiplier is, and renders the authoritative reply. It never derives the day, the vein, or
 -- the multiplier client-side (which would be spoofable); the server is the sole authority.
 --
--- ROBLOX-ONLY (uses the client Net via the bootstrap context). No spec requires it; mirrors the
--- islands controller pattern: fetch the server-derived vein state on start, expose a typed refresh()
--- the HUD reads, and re-fetch whenever the server pushes a fresh data view (a Sell/unlock may change
--- whether THIS player is eligible for today's vein).
+-- ROBLOX-ONLY (uses the client Net via the bootstrap context + the Hud singleton). No spec requires
+-- it; mirrors the islands controller pattern: fetch the server-derived vein state on start, render it
+-- as the HUD's rich-vein hint, and re-fetch whenever the server pushes a fresh data view (a Sell/unlock
+-- may change whether THIS player is eligible for today's vein). Never requires a sibling controller.
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local Client = LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("Client")
+local Hud = require(Client.hud.Hud)
 local Net = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared").Net)
 
 local RestockController = { name = "RestockController" }
@@ -27,6 +31,15 @@ function RestockController:Start(context: any): ()
 		local result = net:call(Net.Actions.FetchRestock, {})
 		if result.ok then
 			self._restock = result.value
+			-- Render the server-derived hint (all values server-owned; the client only displays them).
+			local r = result.value
+			if r.eligible then
+				Hud.setRestockHint(
+					`Rich vein: Island {r.islandId} (x{r.multiplier}) — active for you`
+				)
+			else
+				Hud.setRestockHint(`Rich vein today: Island {r.islandId} (x{r.multiplier})`)
+			end
 		else
 			warn(`[RestockController] fetch failed: {tostring(result.code)}`)
 		end
