@@ -83,20 +83,92 @@ runPhase("boot-probe", function(): (boolean, string)
 	if bootMode == "replicated-bootstrap" then
 		context = Context.build()
 		-- The init.server.luau order, mirrored. Earlier = depended-upon-by-later.
-		local services = {
-			context.net,
-			context.data,
-			context.analytics,
-			require(Server.services.collection.CollectionService),
-			require(Server.services.shop.UpgradesShopService),
-			require(Server.services.daily.DailyStreakService),
-			require(Server.services.islands.IslandsService),
-			require(Server.services.leaderboard.LeaderboardService),
-			require(Server.services.monetization.MonetizationService),
-			require(Server.services.offline.OfflineService),
-			require(Server.services.restock.RestockService),
-			require(Server.services.rebirth.RebirthService),
+		-- WARNING: this list is HAND-COPIED, and hand-copied lists drift. It already did —
+		-- WorldService was missing here for the whole life of this file, so every "T2 green" before
+		-- 2026-07-30 was recorded against a Workspace with ZERO parts in it. The parity check below
+		-- turns that from a silent blindness into a loud failure; do not delete it.
+		local serviceModules: { [string]: any } = {
+			CollectionService = require(Server.services.collection.CollectionService),
+			UpgradesShopService = require(Server.services.shop.UpgradesShopService),
+			DailyStreakService = require(Server.services.daily.DailyStreakService),
+			IslandsService = require(Server.services.islands.IslandsService),
+			LeaderboardService = require(Server.services.leaderboard.LeaderboardService),
+			MonetizationService = require(Server.services.monetization.MonetizationService),
+			OfflineService = require(Server.services.offline.OfflineService),
+			RestockService = require(Server.services.restock.RestockService),
+			RebirthService = require(Server.services.rebirth.RebirthService),
+			-- presentation: builds the greybox world (spawn + island platforms + pads). AFTER
+			-- IslandsService so context.islands:catalog() is populated.
+			WorldService = require(Server.services.world.WorldService),
 		}
+		local order = {
+			"CollectionService",
+			"UpgradesShopService",
+			"DailyStreakService",
+			"IslandsService",
+			"LeaderboardService",
+			"MonetizationService",
+			"OfflineService",
+			"RestockService",
+			"RebirthService",
+			"WorldService",
+		}
+
+		-- BOOTSTRAP PARITY: read the REAL init.server.luau source and assert our mirrored list is
+		-- set-equal to the services it actually requires. Fixing the missing WorldService alone
+		-- would repair this instance and leave the CLASS — the next service added or removed there
+		-- would diverge here silently, and every world assertion downstream would run against a
+		-- stale world while reporting green. `.Source` is readable at plugin security.
+		local sourceOk, source = pcall(function(): string
+			return (Server :: any).Source
+		end)
+		if sourceOk and type(source) == "string" then
+			local declared: { [string]: boolean } = {}
+			for name in string.gmatch(source, "require%(Server%.services%.[%w_]+%.([%w_]+)%)") do
+				declared[name] = true
+			end
+			local missing: { string } = {}
+			for name in declared do
+				if serviceModules[name] == nil then
+					table.insert(missing, name)
+				end
+			end
+			local extra: { string } = {}
+			for name in serviceModules do
+				if not declared[name] then
+					table.insert(extra, name)
+				end
+			end
+			table.sort(missing)
+			table.sort(extra)
+			diagnostics.bootstrapParity = {
+				declaredInInitServer = (function(): number
+					local n = 0
+					for _ in declared do
+						n += 1
+					end
+					return n
+				end)(),
+				mirrored = #order,
+				missingFromMirror = missing,
+				extraInMirror = extra,
+			}
+			if #missing > 0 or #extra > 0 then
+				return false,
+					`BOOTSTRAP PARITY DRIFT — this mirror no longer matches init.server.luau. missing here: [{table.concat(
+						missing,
+						", "
+					)}]; not in init.server: [{table.concat(extra, ", ")}]`
+			end
+		else
+			diagnostics.bootstrapParity =
+				"UNCHECKED: Server.Source unreadable at this security level"
+		end
+
+		local services = { context.net, context.data, context.analytics }
+		for _, name in order do
+			table.insert(services, serviceModules[name])
+		end
 		Bootstrap.start(services, context)
 	else
 		-- Run mode: the real Script booted. We only need a handle on its context, which NetServer
