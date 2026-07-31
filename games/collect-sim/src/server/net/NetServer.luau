@@ -71,6 +71,7 @@ function NetServer.actionContext(self: any, player: any): Net.ActionContext
 		-- every handler's ActionContext from then on (the consolidated Sell formula consumes these).
 		islands = ctx.islands,
 		restock = ctx.restock,
+		upgrades = ctx.upgrades, -- purchased-upgrade EFFECT seam (see Net.ActionContext)
 	}
 end
 

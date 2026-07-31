@@ -174,10 +174,77 @@ local function makeBuyUpgradeAction(): Net.Action<
 	}
 end
 
--- Start: register the single BuyUpgrade action on the gateway. No closed-over mutable feature
--- state — the catalog is constant and all mutation lives in the persisted data layer.
+-- ----- THE EFFECT SEAM (ctx.upgrades) -----
+-- This is the half that was missing. BuyUpgrade persisted `d.upgrades[id]` and NOTHING in the game
+-- ever read it back: capacity was a constant in CollectionService, magnet range and collect period
+-- were constants in the CLIENT controller, and walk-speed had no implementation at all. A player
+-- could spend 9,625 Stardust maxing all four upgrades and the game played identically.
+--
+-- The rule that failure taught: a value the player PAYS for must be read by the code that GOVERNS
+-- play, through a named seam, and the test must assert the READ, not the write.
+--
+-- Every reader below is a PURE function of the lock-held snapshot `d`, and every one returns its
+-- pre-upgrade constant when `d` (or the level) is absent — so an un-upgraded player, and every
+-- existing test that passes no data, sees exactly the old numbers. Level 0 == the old behavior.
+local BASE_CAPACITY = 50 -- motes; CollectionService's former `CAPACITY` constant
+local CAPACITY_PER_LEVEL = 10
+local BASE_MAGNET_RADIUS = 6 -- studs; CollectionController's former `ABSORB_RADIUS`
+local MAGNET_RADIUS_PER_LEVEL = 1.5
+local BASE_COLLECT_PERIOD = 0.06 -- seconds between absorbs; the former client `TICK`
+local COLLECT_PERIOD_FLOOR = 0.02 -- never faster than this, whatever the level
+local COLLECT_PERIOD_PER_LEVEL = 0.004
+local BASE_WALK_SPEED = 16 -- studs/s; Roblox's Humanoid default
+local WALK_SPEED_PER_LEVEL = 1.4
+
+-- Read one persisted level, clamped to the catalog's max. Nil-safe at every step: absent data,
+-- absent `upgrades` table, absent key, or a non-number all collapse to level 0.
+local function levelOf(d: any, upgradeId: string): number
+	if d == nil or type(d) ~= "table" then
+		return 0
+	end
+	local upgrades = (d :: any).upgrades
+	if type(upgrades) ~= "table" then
+		return 0
+	end
+	local level = upgrades[upgradeId]
+	if type(level) ~= "number" or level ~= level or level < 0 then
+		return 0 -- also rejects NaN, which would poison every arithmetic reader below
+	end
+	local entry = CATALOG[upgradeId]
+	local cap = if entry ~= nil then entry.maxLevel else MAX_LEVEL
+	return math.min(math.floor(level), cap)
+end
+
+local UpgradesSeam = {}
+
+-- Levels are exposed so a caller can assert the READ moved, not just the stored number.
+function UpgradesSeam.levelOf(_self: any, d: any, upgradeId: string): number
+	return levelOf(d, upgradeId)
+end
+
+function UpgradesSeam.capacityFor(_self: any, d: any): number
+	return BASE_CAPACITY + levelOf(d, "backpack") * CAPACITY_PER_LEVEL
+end
+
+function UpgradesSeam.magnetRadiusFor(_self: any, d: any): number
+	return BASE_MAGNET_RADIUS + levelOf(d, "magnet") * MAGNET_RADIUS_PER_LEVEL
+end
+
+function UpgradesSeam.collectPeriodFor(_self: any, d: any): number
+	local period = BASE_COLLECT_PERIOD - levelOf(d, "collect-speed") * COLLECT_PERIOD_PER_LEVEL
+	return math.max(COLLECT_PERIOD_FLOOR, period)
+end
+
+function UpgradesSeam.walkSpeedFor(_self: any, d: any): number
+	return BASE_WALK_SPEED + levelOf(d, "walk-speed") * WALK_SPEED_PER_LEVEL
+end
+
+-- Start: register the single BuyUpgrade action on the gateway, and publish the effect seam onto the
+-- shared context so every handler's ActionContext (built per-request by NetServer) can read what the
+-- player actually bought. Mirrors IslandsService's ctx.islands publication exactly.
 function UpgradesShopService:Start(context: any): ()
 	context.net:register(makeBuyUpgradeAction())
+	context.upgrades = UpgradesSeam
 end
 
 return UpgradesShopService

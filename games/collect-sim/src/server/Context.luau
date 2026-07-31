@@ -119,6 +119,7 @@ function Context.build(): any
 		-- contract pass (v4) feature seams (nil in the spine; populated by stub/feature services):
 		islands = nil,
 		restock = nil,
+		upgrades = nil, -- populated by UpgradesShopService:Start (purchased-upgrade effect seam)
 	}
 
 	-- Let NetServer close over the full context so it can build each handler's ActionContext.

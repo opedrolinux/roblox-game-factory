@@ -37,6 +37,7 @@ local SPEC_PATHS = {
 	"./unit/restock.spec",
 	"./unit/shop.spec",
 	"./unit/selene_guard.spec",
+	"./unit/upgrade_effects.spec",
 	"./unit/session_lock.spec",
 	"./unit/validation.spec",
 }

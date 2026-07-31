@@ -80,6 +80,16 @@ function Mocks.net(context: any): any
 	end
 
 	function harness.invoke(name: string, player: any, payload: any): any
+		-- Read the feature seams off `context` AT INVOKE TIME, not at construction: a service's
+		-- Start publishes them (context.islands = seam, context.upgrades = seam), which happens
+		-- AFTER Mocks.net is built. Late-reading is what lets a spec pass one shared table to both
+		-- Mocks.net and Start, and then exercise a handler through the seam its sibling published.
+		--
+		-- These three were MISSING, and their absence hid a whole class of defect: every seam was
+		-- unit-tested in isolation (islands.spec reads startCtx.islands directly) while the
+		-- COMPOSITION — a handler consuming the seam through ctx — was never exercised by anything.
+		-- That is precisely how a shop that persisted upgrade levels no gameplay code read shipped
+		-- with a green suite.
 		local ctx = {
 			player = player,
 			clock = clock,
@@ -88,6 +98,9 @@ function Mocks.net(context: any): any
 			flags = context.flags,
 			analytics = context.analytics,
 			monetization = context.monetization,
+			islands = context.islands,
+			restock = context.restock,
+			upgrades = context.upgrades,
 		}
 		return Net.dispatch(registry, gate, ctx, name, payload)
 	end

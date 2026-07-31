@@ -23,9 +23,13 @@ else
 	Result = require((Shared :: any).Result)
 end
 
--- Feature constants (NOT persisted/upgradeable yet — a later feature reads these from PlayerData
--- upgrades). Backpack holds at most CAPACITY motes; each mote sells for MOTE_VALUE Stardust.
-local CAPACITY = 50
+-- BASE_CAPACITY is the LEVEL-0 backpack size, not the capacity. The real capacity is read per
+-- request from ctx.upgrades:capacityFor(d) so a purchased `backpack` level actually changes play.
+-- This constant used to BE the capacity, and that was the game's defining bug: the shop persisted
+-- the level and nothing read it, so all ten levels (2,200 Stardust) did nothing. It survives only
+-- as the nil-safe default for when the seam is absent (the spine, and every Tier-1 test that wires
+-- no shop service) — at level 0 the two are equal, so old behavior is preserved exactly.
+local BASE_CAPACITY = 50
 local MOTE_VALUE = 3
 
 -- Server-owned rebirth step: each rebirth adds REBIRTH_STEP to the Sell multiplier
@@ -52,13 +56,13 @@ local AUTO_COLLECT_FLAG = "gamepass.autoCollect"
 -- backpack count, returns how many motes to grant (clamped so the backpack never exceeds CAPACITY)
 -- and the leftover sub-interval time to carry forward (so fractional progress is never lost and the
 -- grant can never run ahead of real elapsed time). Deterministic; no side effects.
-local function autoCollectGrant(elapsed: number, count: number): (number, number)
+local function autoCollectGrant(elapsed: number, count: number, capacity: number): (number, number)
 	if elapsed < AUTO_COLLECT_INTERVAL then
 		return 0, elapsed -- not a full interval yet: grant nothing, carry the whole remainder
 	end
 	local earnedMotes = math.floor(elapsed / AUTO_COLLECT_INTERVAL)
 	local carry = elapsed - earnedMotes * AUTO_COLLECT_INTERVAL -- sub-interval remainder, never lost
-	local room = CAPACITY - count
+	local room = capacity - count
 	if room < 0 then
 		room = 0
 	end
@@ -75,6 +79,30 @@ local function seamMultiplier(value: number?): number
 		return 1
 	end
 	return value
+end
+
+-- THE capacity read. Nil-safe in the same spirit as seamMultiplier: when ctx.upgrades is absent
+-- (the spine, and every Tier-1 test that wires no shop service) this returns BASE_CAPACITY, which
+-- is what the old constant held — so behavior is unchanged wherever the seam is not wired.
+--
+-- It reads the player's CURRENT persisted snapshot via ctx.data:get, which is a synchronous
+-- in-memory session lookup (DataService.get:187-196) — no yield, safe on the hot Collect path.
+-- A session that is not loaded yet simply falls back to the base, never errors: a join-race must
+-- not make the backpack look infinite.
+local function capacityFor(ctx: any): number
+	local seam = ctx.upgrades
+	if seam == nil or type(seam.capacityFor) ~= "function" then
+		return BASE_CAPACITY
+	end
+	local got = ctx.data:get(ctx.player)
+	if got == nil or not got.ok then
+		return BASE_CAPACITY
+	end
+	local value = seam:capacityFor(got.value)
+	if type(value) ~= "number" or value ~= value or value < 1 then
+		return BASE_CAPACITY -- defensive: a broken seam must never uncap the backpack
+	end
+	return math.floor(value)
 end
 
 local CollectionService = { name = "CollectionService" }
@@ -104,13 +132,17 @@ local function makeCollectAction(
 		): Result.Result<{ count: number, capacity: number, full: boolean }>
 			local userId = ctx.player.UserId
 			local count = backpacks[userId] or 0
-			if count >= CAPACITY then
+			-- ONE capacity read, used for BOTH the enforcing check and the number reported to the
+			-- client. Deliberate: the two drifting apart is exactly the class of bug this fix
+			-- exists to kill (the HUD said "50" while the shop sold levels nothing enforced).
+			local capacity = capacityFor(ctx)
+			if count >= capacity then
 				-- Backpack full: refuse to over-fill. OutOfRange = "no room" (range = capacity).
 				return Result.err(Result.Codes.OutOfRange, "backpack full")
 			end
 			count += 1
 			backpacks[userId] = count
-			return Result.ok({ count = count, capacity = CAPACITY, full = count >= CAPACITY })
+			return Result.ok({ count = count, capacity = capacity, full = count >= capacity })
 		end,
 	}
 end
@@ -212,11 +244,14 @@ local function makeSellAction(
 			if not updated.ok then
 				-- 4. The grant FAILED: restore the captured count so the player keeps their motes.
 				-- (Add back rather than overwrite, in case other motes auto-collected during the
-				-- yield window — those must not be lost either.) CLAMP to CAPACITY: if the backpack
-				-- refilled to capacity during the yield, the restore must not push it OVER the cap
-				-- (that would let the player later sell more than a backpack can hold). Overflow motes
-				-- past capacity are dropped — the holding-cap invariant wins over never-lose-a-mote.
-				backpacks[userId] = math.min(CAPACITY, (backpacks[userId] or 0) + count)
+				-- yield window — those must not be lost either.) CLAMP to the player's CURRENT
+				-- capacity: if the backpack refilled during the yield, the restore must not push it
+				-- OVER the cap (that would let the player later sell more than a backpack can hold).
+				-- Overflow motes past capacity are dropped — the holding-cap invariant wins over
+				-- never-lose-a-mote. Re-read the seam here rather than reusing a value captured
+				-- before the yield: a BuyUpgrade could have landed in between, and clamping to the
+				-- stale smaller number would destroy motes the player now has room for.
+				backpacks[userId] = math.min(capacityFor(ctx), (backpacks[userId] or 0) + count)
 				return updated
 			end
 
@@ -273,8 +308,20 @@ local function makeAutoCollectTicker(backpacks: { [number]: number })
 			return 0
 		end
 
+		-- Capacity for THIS ticked player. Deliberately not capacityFor(ctx): the ticker walks every
+		-- live player, so ctx.player is not necessarily `player` — using the helper here would clamp
+		-- everyone's auto-collect to one player's backpack. `got` is already this player's snapshot.
+		local capacity = BASE_CAPACITY
+		local upgradesSeam = ctx.upgrades
+		if got.ok and upgradesSeam ~= nil and type(upgradesSeam.capacityFor) == "function" then
+			local value = upgradesSeam:capacityFor(got.value)
+			if type(value) == "number" and value == value and value >= 1 then
+				capacity = math.floor(value)
+			end
+		end
+
 		local count = backpacks[userId] or 0
-		local granted, carry = autoCollectGrant(elapsed, count)
+		local granted, carry = autoCollectGrant(elapsed, count, capacity)
 		-- Advance the anchor by the CONSUMED time only (now - carry), so the unspent sub-interval
 		-- remainder is preserved for the next tick — fractional progress is never silently dropped.
 		lastMono[userId] = now - carry

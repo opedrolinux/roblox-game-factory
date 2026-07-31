@@ -64,6 +64,11 @@ export type ActionContext = {
 	-- --- contract pass (v4) feature seams: nil in the spine, populated by stub/feature services ---
 	islands: any?, -- ctx.islands:multiplierFor(d) -> 1 (identity default)
 	restock: any?, -- ctx.restock:multiplierFor(d, now) -> 1 (identity default)
+	-- ctx.upgrades: the EFFECT seam for purchased upgrade levels. capacityFor(d)/magnetRadiusFor(d)/
+	-- collectPeriodFor(d)/walkSpeedFor(d), each returning the pre-upgrade constant at level 0. Exists
+	-- because the shop persisted `d.upgrades[id]` and no gameplay code ever read it back — the whole
+	-- Stardust sink was inert. A purchased value MUST be readable by the code that governs play.
+	upgrades: any?,
 }
 
 export type Handler<TIn, TOut> = (ctx: ActionContext, payload: TIn) -> Result<TOut>
