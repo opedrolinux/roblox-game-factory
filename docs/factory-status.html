@@ -250,6 +250,8 @@
   .col ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: .7rem; }
   .col li { display: grid; grid-template-columns: 1.1rem 1fr; gap: .55rem; font-size: .9rem; align-items: start; }
   .col li .bullet { font-family: var(--f-mono); color: var(--lamp); font-weight: 700; line-height: 1.5; }
+  .col li.done .bullet { color: var(--ok, #4ea672); }
+  .col li.done > span:last-child > strong { color: var(--ok, #4ea672); }
   .col li small { display: block; color: var(--steel); font-size: .81rem; }
 
   /* ---------- branch table ---------- */
@@ -314,7 +316,7 @@
           Ten features and a walkable world, booted in a real DataModel, saves proven against real
           storage, and a machine playtest confirming the scene is not obviously broken.
         </span>
-        <span class="metric">353 / 353 tests · T2.5 green · 2 known defects · awaiting human playtest</span>
+        <span class="metric">361 / 361 tests · T2.5 green · 1 known defect · 1 fixed &amp; proven in-engine · awaiting human playtest</span>
       </div>
     </div>
   </section>
@@ -379,6 +381,19 @@
       so nothing time-gated or jumpable can be asserted. A green here means "not obviously broken",
       not "ready to play". The rung re-asserts those limits every run and goes <em>red when one
       lifts</em>, so the day the engine starts stepping physics, somebody gets interrupted.
+    </p>
+
+    <p class="note">
+      <strong>And that blindspot immediately cost something real.</strong> A client audit found the
+      offline-earnings claim firing before the save finished loading — it failed, nothing retried, and
+      autosave erased the away-window within 60 seconds, so the grant was lost <em>permanently</em>,
+      worst for exactly the players it exists to serve. Every rung was green throughout. The fix
+      (<code>JoinRetry.once</code>) could only be proven the way the missing rung would have: by
+      driving Studio directly. Same published place, same build, minutes apart — the pre-fix run
+      logged <code>claim failed: NoData</code> and stopped; the post-fix run recovered
+      <strong>54 Stardust</strong> on the data push, retrying exactly once even though the recovered
+      claim itself triggers another push. That last part matters: the obvious one-line fix is an
+      infinite remote loop here.
     </p>
 
     <p class="note">
@@ -490,14 +505,14 @@
       <div class="col col-machine">
         <div class="chead">
           <span class="ctag">I can do these</span>
-          <h3>Two known defects and a missing suite</h3>
+          <h3>One known defect, one fixed, and a missing suite</h3>
         </div>
         <ul>
-          <li>
-            <span class="bullet">1</span>
+          <li class="done">
+            <span class="bullet">✓</span>
             <span>
-              The offline-earnings claim is lost on join
-              <small>Observed in 2 of 2 real Play sessions. The client asks before the save has loaded, gets "no data", warns once and never retries — so a returning player is silently not paid. Invisible to every automated rung, because all three are blind to the client.</small>
+              The offline-earnings claim was lost on join — <strong>fixed and proven</strong>
+              <small>Observed in 3 of 3 real Play sessions: the client asked before the save had loaded, got "no data", warned once and never retried. Worse than it looked — autosave rewrites the away-window within 60s, so the grant was lost <em>permanently</em>, not merely deferred. Fixed by a retry that fires exactly once on the load push (the obvious version loops forever, because the claim itself writes and every write pushes). Proven by driving Studio: same place, same build, minutes apart — before, it stopped at the failure; after, it recovered 54 Stardust.</small>
             </span>
           </li>
           <li>
@@ -533,10 +548,11 @@
       </div>
     </div>
     <p class="note">
-      Honest read: the two defects above are both <em>client-side or economy-side</em>, and both were
-      found by looking at a real session rather than by any test. That is the shape of what is left —
-      the machine has verified the parts it can reach, and the parts it cannot reach are where the
-      remaining bugs live.
+      Honest read: both defects above are <em>client-side or economy-side</em>, and both were found by
+      looking at a real session rather than by any test. That is the shape of what is left — the
+      machine has verified the parts it can reach, and the parts it cannot reach are where the
+      remaining bugs live. The offline fix is the proof of that in both directions: no rung could see
+      it, and no rung could confirm the repair either — that took a real Play session.
     </p>
   </section>
 

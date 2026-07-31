@@ -78,3 +78,38 @@ tried. Picking a value without measuring it would be exactly the guessing this l
 
 See `RUNBOOK.md`. The persistence and lock probes need a **published** place; the boot smoke does
 not and runs fully automated via `run-in-roblox`.
+
+## The join race — measured RED, then GREEN, in the same place
+
+`JoinRetry` (`src/client/framework/JoinRetry.luau`) is Tier-1 proven, but its **adoption** by
+`OfflineController` is invisible to every automated rung: Lune cannot require a controller, the T2
+smoke drives only the server, and T2.5 runs in edit mode with no LocalPlayer. So it was verified the
+only way it can be — a real Play session, driven through the Studio bridge.
+
+Both runs used the **same published place, same build, minutes apart**, with `Tier2LockDiag` left
+mounted in both so the storage load on `loadSession` was identical. The only variable changed
+between them was the presence of `JoinRetry` and the controller's adoption of it.
+
+| Run | Console |
+|---|---|
+| **Before** (bare `claim()`) | `[OfflineController] claim failed: NoData` — and nothing after it |
+| **After** (`JoinRetry.once`) | `claim failed: NoData` → `[JoinRetry] OfflineController.claim: session was not loaded at join; re-issued on the data push` → **`[OfflineController] claimed 54 offline Stardust (balance 54)`** |
+
+**54 Stardust that the previous run lost.** The race itself is unchanged — the join-time call still
+loses, exactly as before. What changed is that the loss is now recovered instead of permanent.
+
+Two things this establishes that no Tier-1 test could:
+
+- **Exactly-once holds in the real engine.** The recovered claim *writes*, and `DataService` pushes
+  the view on every successful write with no dirty check — the self-feeding loop that makes the
+  obvious `net:on("data", claim)` fix unsafe here. Exactly **one** `[JoinRetry]` line appeared.
+- **`IslandsController` is genuinely fine.** `[IslandsController] fetch failed: NoData` still
+  appears in both runs and still recovers on its own push, with no `[JoinRetry]` line — matching the
+  audit's `isDefect=false` verdict rather than merely assuming it.
+
+**Caveat on the method:** the fix was injected into the place through the Studio bridge, because the
+place is a stale snapshot and the Rojo plugin was not live-connected. The injected `JoinRetry` is
+logically byte-identical to the committed module with the comment block stripped; the controller was
+replaced with the committed HEAD version. **The place is now a hybrid** — current on those two
+scripts, stale everywhere else — and should be re-synced from `default.project.json` before it is
+used for anything else.
