@@ -13,6 +13,7 @@ local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local Client = LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("Client")
 local Hud = require(Client.hud.Hud)
+local JoinRetry = require(Client.framework.JoinRetry)
 local Net = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared").Net)
 
 local OfflineController = { name = "OfflineController" }
@@ -37,6 +38,11 @@ function OfflineController:Start(context: any): ()
 					`[OfflineController] claimed {tostring(result.value.granted)} offline Stardust `
 						.. `(balance {tostring(result.value.balance)})`
 				)
+				-- Rendered HERE rather than after the join-time call, so the JoinRetry path renders
+				-- too: for a player whose session was still loading, the RETRY is the claim that
+				-- grants, and a popup wired to the join attempt alone would never fire for them.
+				Hud.setStardust(result.value.balance) -- reflect the grant in the persistent readout
+				Hud.showWelcomeBack(result.value.granted, result.value.balance)
 			end
 		else
 			warn(`[OfflineController] claim failed: {tostring(result.code)}`)
@@ -45,16 +51,13 @@ function OfflineController:Start(context: any): ()
 	end
 	self.claim = claim
 
-	-- Claim-on-join: fire once when the controller starts so a returning player sees their accrued
-	-- earnings immediately. The server caps + advances the base, so this is the only claim that grants.
-	claim()
-
-	-- Show the welcome-back popup with the SERVER-reported grant (only when something was actually
-	-- accrued). All numbers are authoritative — we only display what the server granted.
-	if self._lastClaim ~= nil and (self._lastClaim.granted or 0) > 0 then
-		Hud.setStardust(self._lastClaim.balance) -- reflect the grant in the persistent readout now
-		Hud.showWelcomeBack(self._lastClaim.granted, self._lastClaim.balance)
-	end
+	-- Claim-on-join, race-safely. loadSession YIELDS, so this call can land before the session is
+	-- installed and come back Err(NoData) — observed in 2 of 2 real Play sessions. That used to be
+	-- terminal: nothing retried, and autosave rewrites lastSeenUnix within 60s, so the away-window
+	-- was erased and the grant lost for good. JoinRetry re-issues EXACTLY ONCE on the server's
+	-- on-load "data" push, and never again — a plain net:on("data", claim) would self-feed forever
+	-- here, because this action always writes and every write pushes. See JoinRetry.luau.
+	JoinRetry.once(net, "OfflineController.claim", claim)
 end
 
 return OfflineController

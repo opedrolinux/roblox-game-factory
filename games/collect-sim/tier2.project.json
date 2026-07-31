@@ -7,7 +7,7 @@
     },
     "ServerScriptService": {
       "Server": { "$path": "src/server" },
-      "Tier2LockDiag": { "$path": "tests/tier2/lockdiag.server.luau" }
+      "Tier2Persistence": { "$path": "tests/tier2/persistence.server.luau" }
     },
     "StarterPlayer": {
       "StarterPlayerScripts": {

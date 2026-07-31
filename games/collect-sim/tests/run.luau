@@ -27,6 +27,7 @@ local SPEC_PATHS = {
 	"./unit/economy_race.spec",
 	"./unit/framework.spec",
 	"./unit/islands.spec",
+	"./unit/joinretry.spec",
 	"./unit/leaderboard.spec",
 	"./unit/migration.spec",
 	"./unit/monetization.spec",
