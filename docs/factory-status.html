@@ -305,16 +305,16 @@
           Every pipeline stage is built and proven on a real game. The in-engine test rung, designed
           but parked for weeks awaiting a human, is now automated and runs unattended.
         </span>
-        <span class="metric">Persistence landed · in-engine lane automated · 12 pipeline tools</span>
+        <span class="metric">Persistence landed · two engine rungs automated · 13 pipeline tools</span>
       </div>
       <div class="verdict v-game">
         <span class="who">Collect Sim</span>
-        <span class="state">Engine-verified</span>
+        <span class="state">Scene-verified</span>
         <span class="said">
-          Ten features and a full core loop, booted in a real DataModel, with saves proven against
-          real storage across three consecutive write-release-reload cycles.
+          Ten features and a walkable world, booted in a real DataModel, saves proven against real
+          storage, and a machine playtest confirming the scene is not obviously broken.
         </span>
-        <span class="metric">344 / 344 tests · T2 green · awaiting human playtest</span>
+        <span class="metric">353 / 353 tests · T2.5 green · 2 known defects · awaiting human playtest</span>
       </div>
     </div>
   </section>
@@ -351,21 +351,35 @@
         <span class="what">The place boots and the loop runs in a real engine<small>run-in-roblox · boot-probe · wire-present · core-loop · assert-no-error</small></span>
         <span class="pill">Green</span>
       </div>
+      <div class="rung r-pass">
+        <span class="tid">T2.5</span>
+        <span class="what">The scene is not obviously broken — a machine playtest<small>world-contract · spawn-safety · traversal · no-log-errors · affordance-wiring · client-load · lane-limits</small></span>
+        <span class="pill">Green</span>
+      </div>
 
       <div class="fence">
         <span class="mark">━━</span>
         <span class="txt">
-          The fence — and it has moved down a rung
-          <span>T2 used to sit above this line, parked for weeks awaiting a human with Studio open. A pinned tool (run-in-roblox) drives a real DataModel headlessly, so the boot smoke now runs unattended. Publishing, pushing and account actions remain permanently human-only by design (FACTORY.md §4).</span>
+          The fence — and it has moved down two rungs
+          <span>T2 and T2.5 both used to sit above this line. A pinned tool (run-in-roblox) drives a real DataModel headlessly, so the boot smoke and the machine playtest now run unattended. Publishing, pushing and account actions remain permanently human-only by design (FACTORY.md §4).</span>
         </span>
       </div>
 
       <div class="rung r-unrun last">
         <span class="tid">T3</span>
-        <span class="what">A person plays it and it's fun<small>human playtest — and the only way to test two servers contending over one player</small></span>
+        <span class="what">A person plays it and it's fun<small>human playtest — and the only rung that can reach the client, physics, or two servers contending over one player</small></span>
         <span class="pill">Needs you</span>
       </div>
     </div>
+
+    <p class="note" style="margin-top:.9rem">
+      <strong>What T2.5 cannot see, stated by the rung itself:</strong> it runs in edit mode with no
+      LocalPlayer, so the entire client — HUD, motes, leaderboard, the client bootstrap, whether a
+      prompt is even reachable — is unverified. Physics does not step and the server clock is frozen,
+      so nothing time-gated or jumpable can be asserted. A green here means "not obviously broken",
+      not "ready to play". The rung re-asserts those limits every run and goes <em>red when one
+      lifts</em>, so the day the engine starts stepping physics, somebody gets interrupted.
+    </p>
 
     <p class="note">
       This ladder exists because of a real scar: collect-sim once passed 313 tests and still failed to
@@ -470,24 +484,31 @@
   <section>
     <div class="sec-head">
       <p class="eyebrow">The gap to a playable game</p>
-      <h2>Three things stand between here and someone playing it</h2>
+      <h2>Four things stand between here and someone enjoying it</h2>
     </div>
     <div class="split">
       <div class="col col-machine">
         <div class="chead">
           <span class="ctag">I can do these</span>
-          <h3>Two, both optional</h3>
+          <h3>Two known defects and a missing suite</h3>
         </div>
         <ul>
           <li>
             <span class="bullet">1</span>
             <span>
-              Merge the world you can actually walk around
-              <small>The greybox islands, HUD and controls are built and reviewed, sitting six commits back on a side branch. Without them the game is correct logic with nothing to look at.</small>
+              The offline-earnings claim is lost on join
+              <small>Observed in 2 of 2 real Play sessions. The client asks before the save has loaded, gets "no data", warns once and never retries — so a returning player is silently not paid. Invisible to every automated rung, because all three are blind to the client.</small>
             </span>
           </li>
           <li>
             <span class="bullet">2</span>
+            <span>
+              Buying the backpack upgrade does nothing
+              <small>Known-red in the T2.5 playtest, reported deliberately outside the pass/fail so it cannot become routine. Stardust is deducted and capacity stays at 50 — the constant is never reconciled against the purchased level.</small>
+            </span>
+          </li>
+          <li>
+            <span class="bullet">3</span>
             <span>
               Build the security suite
               <small>Rate limiting, validators, violation tracking. The game prints a warning about this on every single boot — it is not publish-safe until it lands.</small>
@@ -502,19 +523,20 @@
         </div>
         <ul>
           <li>
-            <span class="bullet">3</span>
+            <span class="bullet">4</span>
             <span>
               Play it, with other people
-              <small>Two questions no test can reach: is it any fun, and does the save-lock hold when two real servers contend over one player? A single Studio session cannot contend with itself, by construction.</small>
+              <small>Three questions no automated rung can reach: is it any fun, does the client actually work with a real player in it, and does the save-lock hold when two real servers contend over one player? A single Studio session cannot contend with itself, by construction.</small>
             </span>
           </li>
         </ul>
       </div>
     </div>
     <p class="note">
-      Honest read: the machine's remaining work is real but no longer blocking. What is blocking is
-      taste — whether the loop is enjoyable — and that has never been something this pipeline could
-      answer.
+      Honest read: the two defects above are both <em>client-side or economy-side</em>, and both were
+      found by looking at a real session rather than by any test. That is the shape of what is left —
+      the machine has verified the parts it can reach, and the parts it cannot reach are where the
+      remaining bugs live.
     </p>
   </section>
 
@@ -538,23 +560,25 @@
           <tr>
             <td class="br">feat/collect-sim-presentation</td>
             <td>The walkable greybox world + HUD</td>
-            <td class="num">6</td>
-            <td><span class="dot s-held"></span>Built, awaiting merge</td>
+            <td class="num">0</td>
+            <td><span class="dot s-live"></span>Merged into main (12252e0)</td>
           </tr>
         </tbody>
       </table>
     </div>
     <p class="note">
-      The B2 and verification-ladder branches are gone from this table because they landed —
-      <code>main</code> now carries both, plus the engine lane built on top of them. What remains
-      unmerged is finished, reviewed work, not a loose end.
+      Every side branch has landed. <code>main</code> carries the game, the pipeline, persistence, the
+      ladder, the walkable world and both engine rungs. Worth recording how the last merge went: git
+      auto-merged it clean despite the branch predating B2 by 21 commits — and then the
+      <em>engine</em> disagreed, going red on a committed Sell that 352 passing tests called fine.
+      The third time this ladder has caught something nothing else could.
     </p>
   </section>
 
   <footer>
-    Generated from the live repo — branch counts, tier status and test totals read at 30 Jul 2026.
-    Tier verdict via tier-status.luau: highest green = T2, "engine-smoked-T2 — ready for human
-    playtest". Engine evidence recorded at games/collect-sim/tests/tier2/.
+    Generated from the live repo — tier status and test totals read at 30 Jul 2026: 353/353 game,
+    105/105 core. Tier verdict via tier-status.luau: "scene-verified-T2.5", with both T2 and T2.5
+    evidence green. Engine evidence recorded at games/collect-sim/tests/tier2/.
   </footer>
 
 </div>
