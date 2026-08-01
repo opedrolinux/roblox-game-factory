@@ -120,6 +120,8 @@ function Context.build(): any
 		islands = nil,
 		restock = nil,
 		upgrades = nil, -- populated by UpgradesShopService:Start (purchased-upgrade effect seam)
+		world = nil, -- populated by WorldService:Start (position seam: islandOf / applyAccess)
+		rebirth = nil, -- populated by RebirthService:Start (prestige threshold / preview reads)
 	}
 
 	-- Let NetServer close over the full context so it can build each handler's ActionContext.

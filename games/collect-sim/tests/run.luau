@@ -40,6 +40,7 @@ local SPEC_PATHS = {
 	"./unit/upgrade_effects.spec",
 	"./unit/session_lock.spec",
 	"./unit/validation.spec",
+	"./unit/world.spec",
 }
 table.sort(SPEC_PATHS) -- belt-and-suspenders determinism (concern 10)
 

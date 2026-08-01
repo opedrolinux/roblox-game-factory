@@ -53,6 +53,62 @@ function Mocks.gate(clock: any): any
 	return Gate.new(clock or Mocks.clock(1000))
 end
 
+-- A fake POSITION seam (ctx.world). `islandOf` answers with whatever island the test has placed
+-- the player on, so a spec can drive the positional multiplier — "richer motes on higher islands"
+-- — without an engine, a character, or physics. `standOn(userId, islandId)` moves them; a userId
+-- with no entry answers nil, which is how "over the void / no character" is expressed.
+--
+-- This exists because the position gate is the one thing that decides how much a mote is worth,
+-- and a seam that only ever exists in Roblox would put that decision permanently out of reach of
+-- Tier-1 — which is exactly how the global-multiplier defect survived 361 green tests.
+function Mocks.world(): any
+	local standing: { [number]: number } = {}
+	local world = {}
+	function world.standOn(_self: any, userId: number, islandId: number?): ()
+		standing[userId] = islandId
+	end
+	function world.islandOf(_self: any, player: any): number?
+		if player == nil then
+			return nil
+		end
+		return standing[player.UserId]
+	end
+	function world.applyAccess(_self: any, _player: any, _level: number): ()
+		-- No physics under Lune; the ACCESS assertion belongs to the world-plan spec, which reads
+		-- the pure layout instead. Present so callers can invoke it nil-safely.
+	end
+	return world
+end
+
+-- Drive `motes` collects the way a player does: by letting SERVER TIME pass between them. Collect
+-- is clock-gated (floor(elapsed / collectPeriod) motes per call), so a loop of bare invokes now
+-- grants nothing after the first — which is the point, and is exactly what stops a scripted client
+-- minting ~70x a walking player's income. Returns the total granted.
+function Mocks.collect(
+	harness: any,
+	clock: any,
+	player: any,
+	motes: number,
+	period: number?
+): number
+	local step = period or 0.06
+	local granted = 0
+	local guard = 0
+	while granted < motes and guard < motes * 4 + 50 do
+		guard += 1
+		clock:advance(step * math.min(20, motes - granted))
+		local result = harness.invoke(Net.Actions.Collect, player, {})
+		if not result.ok then
+			break -- backpack full, or refused: the caller asserts on the count it got
+		end
+		granted += result.value.granted
+		if result.value.granted == 0 and result.value.full then
+			break
+		end
+	end
+	return granted
+end
+
 -- A NetServer-EQUIVALENT harness that calls the SAME pure Net.dispatch production uses
 -- (concern 19), so the mock pipeline CANNOT drift from NetServer. Register actions, then
 -- invoke(name, player, payload) runs lookup -> [panic] -> [rate via Gate] -> [ownership] ->
@@ -101,6 +157,8 @@ function Mocks.net(context: any): any
 			islands = context.islands,
 			restock = context.restock,
 			upgrades = context.upgrades,
+			world = context.world,
+			rebirth = context.rebirth,
 		}
 		return Net.dispatch(registry, gate, ctx, name, payload)
 	end

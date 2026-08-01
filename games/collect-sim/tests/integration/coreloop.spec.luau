@@ -102,6 +102,8 @@ type Game = {
 	registry: any,
 	invoke: (action: string, player: any, payload: any) -> any,
 	invokeCo: (action: string, player: any, payload: any, sink: (any) -> ()) -> thread,
+	-- Collect `n` motes the way a player does: by letting SERVER TIME pass between requests.
+	collect: (player: any, n: number) -> number,
 	-- join/leave are METHODS (called g:join(p) / g:leave(p)) so `self` is the Game table.
 	join: (self: any, player: any) -> any,
 	leave: (self: any, player: any) -> (),
@@ -148,6 +150,10 @@ local function buildGame(opts: any?): Game
 		monetization = nil,
 		islands = nil,
 		restock = nil,
+		-- The POSITION seam. Opt-in per test: with no world wired, position is simply not a factor
+		-- (which is what a Lune harness sees). A test that wires one must place the player, exactly
+		-- as the runtime requires a character standing somewhere.
+		world = if o.world then Mocks.world() else nil,
 	}
 
 	-- BOOTSTRAP ORDER (mirrors init.server.luau service order, minus the Roblox-only net/data Start
@@ -177,6 +183,13 @@ local function buildGame(opts: any?): Game
 			monetization = context.monetization,
 			islands = context.islands,
 			restock = context.restock,
+			-- These three were MISSING from this mirror while NetServer projected them, so the
+			-- integration gate — the one place that is supposed to see the COMPOSITION — was blind
+			-- to every seam added after it was written. A projection that drifts from NetServer is
+			-- the same defect as a mock that never projected the seams at all.
+			upgrades = context.upgrades,
+			world = context.world,
+			rebirth = context.rebirth,
 		}
 	end
 
@@ -184,6 +197,28 @@ local function buildGame(opts: any?): Game
 		-- gate = nil: the integration gate isolates from rate-shedding (the per-feature gates already
 		-- prove the rate limits); we test the COMPOSITION, not the buckets.
 		return Net.dispatch(registry, nil, actionContext(player), action, payload)
+	end
+
+	-- Collect `n` motes the way a player does. Collect is CLOCK-GATED (the anti-exploit that
+	-- replaced "one mote per request"), so a bare loop of invokes grants exactly one mote however
+	-- many times it runs — which is the point, and is why every call site here goes through this.
+	local function collect(player: any, n: number): number
+		local got = 0
+		local guard = 0
+		while got < n do
+			guard += 1
+			if guard > n * 4 + 200 then
+				error(`collect did not converge (wanted {n}, got {got})`)
+			end
+			clock:advance(0.06 * math.min(n - got, 10))
+			local r = invoke(A.Collect, player, {})
+			expect(r):toBeOk()
+			got += (r :: any).value.granted
+			if (r :: any).value.full then
+				break
+			end
+		end
+		return got
 	end
 
 	-- A coroutine-wrapped invoke for the interleave/race tests: parks inside the yielding store's
@@ -225,6 +260,7 @@ local function buildGame(opts: any?): Game
 		registry = registry,
 		invoke = invoke,
 		invokeCo = invokeCo,
+		collect = collect,
 		join = join,
 		leave = leave,
 	}
@@ -247,6 +283,21 @@ local function lifetimeOf(g: Game, player: any): number
 end
 local function rebirthsOf(g: Game, player: any): number
 	return (dataOf(g, player).rebirths or 0)
+end
+
+-- Collect roughly `n` motes and sell them; return the Stardust earned PER MOTE.
+--
+-- Per-mote, not total, is deliberately the unit: the collect grant is CLOCK-derived and capped per
+-- call, so "collect exactly 30" is not a property the server owes anyone — what the economy owes is
+-- that a mote is worth what the multipliers say. Comparing totals across two runs of a loop that
+-- may land on 30 or 31 would make an economy assertion hostage to a rounding step.
+local function earnPerMote(g: Game, p: any, n: number): number
+	local got = g.collect(p, n)
+	expect(got > 0):toBe(true)
+	local r = g.invoke(A.Sell, p, {})
+	expect(r):toBeOk()
+	expect((r :: any).value.sold):toBe(got) -- the sale reports exactly what was collected
+	return (r :: any).value.earned / got
 end
 
 -- Drive a balance to a target via the canonical write path (drained for the yielding store). Used to
@@ -303,9 +354,7 @@ describe(
 				expect(stardustOf(g, p)):toBe(0)
 
 				-- 1) COLLECT: gather motes into the backpack (server adds one mote per Collect).
-				for _ = 1, 50 do
-					expect(g.invoke(A.Collect, p, {})):toBeOk()
-				end
+				g.collect(p, 50)
 				-- collecting does NOT mint Stardust (it only fills the in-memory backpack).
 				expect(stardustOf(g, p)):toBe(0)
 
@@ -359,7 +408,11 @@ describe(
 				expect(rebirthsOf(g, p)):toBe(1) -- count bumped
 				expect(prismsOf(g, p)):toBe((rb :: any).value.prismsEarned) -- Prisms granted
 				expect(stardustOf(g, p)):toBe(0) -- prestige zeroed Stardust
-				expect(dataOf(g, p).flags["island.2"]):toBe(nil) -- island flags cleared by rebirth
+				-- ISLANDS SURVIVE THE REBIRTH. They used to be cleared, and that single deletion is
+				-- what made prestige a PAY CUT: it removed a multiplicative bonus worth up to 16x
+				-- in exchange for an additive +0.1x, so a player who rebirthed earned up to 93%
+				-- LESS per mote afterwards. Islands are earned progression, not a run resource.
+				expect(dataOf(g, p).flags["island.2"]):toBe(true)
 				expect(dataOf(g, p).upgrades["collect-speed"]):toBe(nil) -- upgrades reset by rebirth
 				expect(lifetimeOf(g, p)):toBe(lifeBeforeRebirth) -- lifetime SURVIVES the rebirth (never reset)
 
@@ -376,9 +429,7 @@ describe(
 describe("Multipliers compose into the consolidated Sell formula", function()
 	-- Helper: collect `n` motes then sell, returning the earned amount.
 	local function collectAndSell(g: Game, p: any, n: number): number
-		for _ = 1, n do
-			expect(g.invoke(A.Collect, p, {})):toBeOk()
-		end
+		g.collect(p, n)
 		local r = g.invoke(A.Sell, p, {})
 		expect(r):toBeOk()
 		return (r :: any).value.earned
@@ -479,9 +530,7 @@ describe("lifetimeStardust rises on every EARN, never on a spend or a reset", fu
 			expect(lifetimeOf(g, p)):toBe(0)
 
 			-- EARN 1: sell.
-			for _ = 1, 50 do
-				expect(g.invoke(A.Collect, p, {})):toBeOk()
-			end
+			g.collect(p, 50)
 			local sell = g.invoke(A.Sell, p, {})
 			expect(sell):toBeOk()
 			local l1 = lifetimeOf(g, p)
@@ -532,9 +581,7 @@ describe("lifetimeStardust rises on every EARN, never on a spend or a reset", fu
 			setStardust(g, p, 50000) -- plenty for a buy + unlock + rebirth
 
 			-- accrue a real lifetime via an honest earn so we can prove a spend/reset never moves it.
-			for _ = 1, 50 do
-				expect(g.invoke(A.Collect, p, {})):toBeOk()
-			end
+			g.collect(p, 50)
 			expect(g.invoke(A.Sell, p, {})):toBeOk()
 			local lifeAfterEarn = lifetimeOf(g, p)
 			expect(lifeAfterEarn > 0):toBe(true)
@@ -576,17 +623,13 @@ describe(
 			g.analytics:emit("session_start", { userId = p.UserId, name = p.Name })
 
 			-- Fill the backpack to 50 (each Collect is synchronous on the in-memory backpack — no store yield).
-			for _ = 1, 50 do
-				expect(g.invoke(A.Collect, p, {})):toBeOk()
-			end
+			g.collect(p, 50)
 
 			-- Probe what ONE sell of a full backpack pays (clean, isolated, identity multipliers).
 			local gp = buildGame()
 			local pp = Mocks.player(3030)
 			gp:join(pp)
-			for _ = 1, 50 do
-				expect(gp.invoke(A.Collect, pp, {})):toBeOk()
-			end
+			gp.collect(pp, 50)
 			local single = (gp.invoke(A.Sell, pp, {}) :: any).value.earned
 			expect(single > 0):toBe(true)
 
@@ -729,9 +772,7 @@ describe(
 				local p = Mocks.player(40, "Returner")
 				g:join(p)
 				-- earn a bit while present so leaving has meaning (not required, but realistic).
-				for _ = 1, 10 do
-					expect(g.invoke(A.Collect, p, {})):toBeOk()
-				end
+				g.collect(p, 10)
 				expect(g.invoke(A.Sell, p, {})):toBeOk()
 				local balanceAtLeave = stardustOf(g, p)
 
@@ -774,9 +815,7 @@ describe(
 				g:join(p) -- session_start
 
 				-- currency_earned (sell).
-				for _ = 1, 50 do
-					expect(g.invoke(A.Collect, p, {})):toBeOk()
-				end
+				g.collect(p, 50)
 				expect(g.invoke(A.Sell, p, {})):toBeOk()
 
 				setStardust(g, p, 50000)
@@ -883,9 +922,7 @@ describe("Monetization wired + idempotent through the live monetization seam", f
 			local mon = g.context.monetization
 
 			-- baseline sell with no boost.
-			for _ = 1, 50 do
-				expect(g.invoke(A.Collect, p, {})):toBeOk()
-			end
+			g.collect(p, 50)
 			local base = (g.invoke(A.Sell, p, {}) :: any).value.earned
 			expect(base > 0):toBe(true)
 
@@ -895,9 +932,7 @@ describe("Monetization wired + idempotent through the live monetization seam", f
 			):toBeOk()
 
 			-- a subsequent sell pays double (the boost multiplier reached Sell via the monetization seam).
-			for _ = 1, 50 do
-				expect(g.invoke(A.Collect, p, {})):toBeOk()
-			end
+			g.collect(p, 50)
 			local boosted = (g.invoke(A.Sell, p, {}) :: any).value.earned
 			expect(boosted):toBe(base * 2)
 
@@ -929,6 +964,222 @@ describe("Monetization wired + idempotent through the live monetization seam", f
 	end)
 end)
 
+-- =====================================================================================================
+-- THE PRESTIGE LOOP MUST PAY. Rebirth used to CLEAR the island unlock flags, which made it a PAY CUT:
+-- it deleted a multiplicative bonus worth up to 16x and handed back an additive +0.1x, so a player who
+-- prestiged earned up to 93% LESS per mote afterwards. And the Prisms it granted were persisted,
+-- displayed, and decremented by NOTHING — there was no Prism shop, pad or action in the codebase.
+--
+-- The existing rebirth gate asserted only that the RETURNED multiplier rose. That assertion is exactly
+-- what let this ship: the multiplier did rise, and the player's income still collapsed. The unit of
+-- assertion has to be earn-per-mote measured through an actual sale, before and after.
+-- =====================================================================================================
+describe("Rebirth is an UPGRADE, not a pay cut, and Prisms are spendable", function()
+	it("earn-per-mote is strictly HIGHER after a rebirth than before it", function()
+		-- Isolate the restock vein onto an island this player never unlocks (day 12 -> vein island 3).
+		local SECONDS_PER_DAY = 86400
+		local g = buildGame({ startUnix = 12 * SECONDS_PER_DAY + 100 })
+		local p = Mocks.player(90, "Prestiger")
+		g:join(p)
+
+		-- Earn the island-2 unlock, so there IS progression for a rebirth to destroy.
+		setStardust(g, p, 5000)
+		expect(g.invoke(A.UnlockIsland, p, { islandId = 2 })):toBeOk()
+		local before = earnPerMote(g, p, 30)
+		expect(before > 0):toBe(true)
+
+		local rb = g.invoke(A.Rebirth, p, {})
+		expect(rb):toBeOk()
+		expect(rebirthsOf(g, p)):toBe(1)
+		expect(prismsOf(g, p)):toBe((rb :: any).value.prismsEarned)
+
+		-- The SAME motes on the SAME island after the reset. On the old build this collapsed from
+		-- 6/mote to 3.3/mote, because the island flag was wiped; now it rises with the multiplier.
+		local after = earnPerMote(g, p, 30)
+		expect(after > before):toBe(true)
+	end)
+
+	it("Prisms BUY something: a purchase decreases the balance and raises mote value", function()
+		local SECONDS_PER_DAY = 86400
+		local g = buildGame({ startUnix = 12 * SECONDS_PER_DAY + 100 })
+		local p = Mocks.player(91, "Attuner")
+		g:join(p)
+
+		-- Rebirth to earn Prisms, then measure the baseline with those Prisms UNSPENT.
+		setStardust(g, p, 50000)
+		expect(g.invoke(A.Rebirth, p, {})):toBeOk()
+		local prismsBefore = prismsOf(g, p)
+		expect(prismsBefore > 0):toBe(true)
+		local before = earnPerMote(g, p, 30)
+
+		-- Spend them. THIS is the assertion that did not exist: some registered action must
+		-- DECREASE d.currencies.Prisms. Nothing in the entire codebase ever did.
+		local buy = g.invoke(A.BuyUpgrade, p, { upgradeId = "prism-yield" })
+		expect(buy):toBeOk()
+		expect((buy :: any).value.currency):toBe("Prisms")
+		expect(prismsOf(g, p)):toBe(prismsBefore - (buy :: any).value.cost)
+		expect(prismsOf(g, p) < prismsBefore):toBe(true)
+
+		-- And the permanent upgrade actually governs play: the same motes are worth more.
+		local after = earnPerMote(g, p, 30)
+		expect(after > before):toBe(true)
+	end)
+
+	it("a `prism-` upgrade SURVIVES the next rebirth; a Stardust upgrade does not", function()
+		local g = buildGame()
+		local p = Mocks.player(92, "Keeper")
+		g:join(p)
+		setStardust(g, p, 50000)
+		expect(g.invoke(A.Rebirth, p, {})):toBeOk() -- earn Prisms
+		expect(g.invoke(A.BuyUpgrade, p, { upgradeId = "prism-yield" })):toBeOk()
+		setStardust(g, p, 50000)
+		expect(g.invoke(A.BuyUpgrade, p, { upgradeId = "backpack" })):toBeOk()
+
+		setStardust(g, p, 500000) -- clear the risen threshold for rebirth #2
+		expect(g.invoke(A.Rebirth, p, {})):toBeOk()
+		local d = dataOf(g, p)
+		expect(d.upgrades["prism-yield"]):toBe(1) -- bought with the prestige currency: permanent
+		expect(d.upgrades["backpack"]):toBe(nil) -- bought with run currency: spent by the reset
+	end)
+end)
+
+-- =====================================================================================================
+-- THE SHOP MUST STATE ITS PRICES. Before FetchUpgrades the shop rendered "Backpack — Lv 0" and nothing
+-- else: no cost, no currency, no affordability, no max-level state, and no description of what the
+-- level does. You discovered prices by being charged.
+-- =====================================================================================================
+describe("FetchUpgrades projects every number the player needs BEFORE committing", function()
+	it("every catalog row carries a cost, a currency, affordability, and its effect", function()
+		local g = buildGame()
+		local p = Mocks.player(93, "Browser")
+		g:join(p)
+		setStardust(g, p, 100)
+
+		local fetch = g.invoke(A.FetchUpgrades, p, {})
+		expect(fetch):toBeOk()
+		local v = (fetch :: any).value
+		expect(#v.entries > 0):toBe(true)
+		for _, entry in v.entries do
+			expect(type(entry.id)):toBe("string")
+			expect(type(entry.label)):toBe("string")
+			expect(entry.label ~= ""):toBe(true)
+			expect(type(entry.currency)):toBe("string")
+			expect(type(entry.level)):toBe("number")
+			expect(type(entry.maxLevel)):toBe("number")
+			expect(type(entry.cost)):toBe("number")
+			expect(type(entry.affordable)):toBe("boolean")
+			-- The row states what the level DOES, derived from the same curve the game runs on —
+			-- so a shop row can never advertise an effect the gameplay code does not produce.
+			expect(type(entry.effectNow)):toBe("number")
+			expect(type(entry.effectNext)):toBe("number")
+			expect(entry.effectNext ~= entry.effectNow):toBe(true)
+		end
+		-- The derived tuning rides along, so the client never holds its own copy of these numbers.
+		expect(type(v.tuning.capacity)):toBe("number")
+		expect(type(v.tuning.magnetRadius)):toBe("number")
+		expect(type(v.tuning.collectPeriod)):toBe("number")
+		expect(type(v.tuning.walkSpeed)):toBe("number")
+		-- And the prestige altar's price, which had no way to be stated at all before.
+		expect(type(v.rebirth.threshold)):toBe("number")
+		expect(v.rebirth.threshold > 0):toBe(true)
+		expect(type(v.rebirth.ready)):toBe("boolean")
+	end)
+
+	it("affordability tracks the real balance, and a maxed row stops asking for money", function()
+		local g = buildGame()
+		local p = Mocks.player(94, "Maxer")
+		g:join(p)
+
+		local function rowFor(id: string): any
+			local fetch = g.invoke(A.FetchUpgrades, p, {})
+			expect(fetch):toBeOk()
+			for _, entry in (fetch :: any).value.entries do
+				if entry.id == id then
+					return entry
+				end
+			end
+			error(`no shop row for {id}`)
+		end
+
+		setStardust(g, p, 0)
+		expect(rowFor("backpack").affordable):toBe(false)
+		setStardust(g, p, 1000000)
+		local row = rowFor("backpack")
+		expect(row.affordable):toBe(true)
+		expect(row.cost > 0):toBe(true)
+
+		-- Buy every level; the row must then report maxed and stop quoting a price.
+		for _ = 1, row.maxLevel do
+			expect(g.invoke(A.BuyUpgrade, p, { upgradeId = "backpack" })):toBeOk()
+		end
+		local maxed = rowFor("backpack")
+		expect(maxed.maxed):toBe(true)
+		expect(maxed.level):toBe(maxed.maxLevel)
+		expect(maxed.affordable):toBe(false)
+		expect(g.invoke(A.BuyUpgrade, p, { upgradeId = "backpack" })):toBeErr(
+			Result.Codes.OutOfRange
+		)
+	end)
+end)
+
+-- =====================================================================================================
+-- POSITION, END-TO-END. "Richer motes on higher islands" is a spec promise the game had no expression
+-- for: the multiplier was keyed off the highest island OWNED and applied globally, so a player standing
+-- on island 1 next to the refiner was paid the island-5 rate. This drives the whole game with the
+-- position seam wired, which is the composition no per-feature gate can see.
+-- =====================================================================================================
+describe("Where you STAND decides what a mote is worth, end-to-end", function()
+	it(
+		"the same motes pay more on island 3 than on island 1, with everything else equal",
+		function()
+			local SECONDS_PER_DAY = 86400
+			local g = buildGame({ startUnix = 12 * SECONDS_PER_DAY + 100, world = true })
+			local p = Mocks.player(95, "Wanderer")
+			g:join(p)
+			setStardust(g, p, 100000)
+			for _, id in { 2, 3 } do
+				expect(g.invoke(A.UnlockIsland, p, { islandId = id })):toBeOk()
+			end
+
+			g.context.world:standOn(p.UserId, 1)
+			local low = earnPerMote(g, p, 20)
+
+			g.context.world:standOn(p.UserId, 3)
+			local high = earnPerMote(g, p, 20)
+
+			expect(high > low):toBe(true)
+			-- The catalog ratio between island 3 (x4) and island 1 (x1) — the promise, measured.
+			expect(high / low):toBe(4)
+		end
+	)
+
+	it("selling is location-independent: value is banked when the mote is COLLECTED", function()
+		-- Every island has its own refiner, and mote value is banked at collect time, so walking
+		-- home to sell can never be a free multiplier choice — nor a tax for selling where you are.
+		local SECONDS_PER_DAY = 86400
+		local g = buildGame({ startUnix = 12 * SECONDS_PER_DAY + 100, world = true })
+		local p = Mocks.player(96, "Hauler")
+		g:join(p)
+		setStardust(g, p, 100000)
+		for _, id in { 2, 3 } do
+			expect(g.invoke(A.UnlockIsland, p, { islandId = id })):toBeOk()
+		end
+
+		g.context.world:standOn(p.UserId, 3)
+		local collected = g.collect(p, 20)
+		g.context.world:standOn(p.UserId, 1) -- walk all the way home before selling
+		local atHome = (g.invoke(A.Sell, p, {}) :: any).value
+		expect(atHome.sold):toBe(collected)
+
+		g.context.world:standOn(p.UserId, 3)
+		local collectedAgain = g.collect(p, 20)
+		local onSite = (g.invoke(A.Sell, p, {}) :: any).value
+		expect(onSite.sold):toBe(collectedAgain)
+
+		expect(atHome.earned / atHome.sold):toBe(onSite.earned / onSite.sold)
+	end)
+end)
+
 -- A small migration/round-trip sanity at the WHOLE-game level: a seeded LEGACY (v1) blob loaded through
 -- the real DataService migrates to the current schema and is immediately playable (sell works), proving
 -- the migration + the live seams compose on a returning player's data.
@@ -955,9 +1206,7 @@ describe("A legacy (v1) seeded player migrates and is immediately playable end-t
 			expect(d.currencies.Stardust):toBe(100)
 
 			-- immediately playable: collect + sell raises the balance and lifetime.
-			for _ = 1, 50 do
-				expect(g.invoke(A.Collect, p, {})):toBeOk()
-			end
+			g.collect(p, 50)
 			local sell = g.invoke(A.Sell, p, {})
 			expect(sell):toBeOk()
 			local earned = (sell :: any).value.earned
@@ -1037,9 +1286,7 @@ describe("Restock: the daily rich vein RESETS at the server day boundary, end-to
 
 	-- Helper: collect n motes then sell, returning earned (mirrors the multiplier-suite helper).
 	local function collectAndSell(g: Game, p: any, n: number): number
-		for _ = 1, n do
-			expect(g.invoke(A.Collect, p, {})):toBeOk()
-		end
+		g.collect(p, n)
 		local r = g.invoke(A.Sell, p, {})
 		expect(r):toBeOk()
 		return (r :: any).value.earned
@@ -1163,9 +1410,7 @@ describe(
 		local SECONDS_PER_DAY = 86400
 
 		local function collectAndSell(g: Game, p: any, n: number): number
-			for _ = 1, n do
-				expect(g.invoke(A.Collect, p, {})):toBeOk()
-			end
+			g.collect(p, n)
 			local r = g.invoke(A.Sell, p, {})
 			expect(r):toBeOk()
 			return (r :: any).value.earned
@@ -1234,9 +1479,7 @@ describe(
 		local TWO_X_GAMEPASS_ID = 1001 -- catalog: 1001 -> 'gamepass.2xStardust'
 
 		local function collectAndSell(g: Game, p: any, n: number): number
-			for _ = 1, n do
-				expect(g.invoke(A.Collect, p, {})):toBeOk()
-			end
+			g.collect(p, n)
 			local r = g.invoke(A.Sell, p, {})
 			expect(r):toBeOk()
 			return (r :: any).value.earned

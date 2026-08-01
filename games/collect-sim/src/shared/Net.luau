@@ -69,6 +69,18 @@ export type ActionContext = {
 	-- because the shop persisted `d.upgrades[id]` and no gameplay code ever read it back — the whole
 	-- Stardust sink was inert. A purchased value MUST be readable by the code that governs play.
 	upgrades: any?,
+	-- ctx.world: the POSITION seam. `world:islandOf(player) -> number?` answers "which island is this
+	-- player standing on", derived SERVER-SIDE from the character's position against the built
+	-- geometry — never from a client-supplied payload. Exists because "richer motes on higher
+	-- islands" was implemented as a global multiplier keyed off the highest island you OWN, so
+	-- standing on island 1 paid the island-5 rate and the islands were decoration. nil under Lune
+	-- (no world is built) and nil-safe at every reader: an absent seam means "island 1".
+	world: any?,
+	-- ctx.rebirth: pure READ seam over the prestige curve (thresholdFor / multiplierFor /
+	-- previewFor). Published so the shop panel and the altar can state the price and the reward
+	-- BEFORE the player commits — the most destructive action in the game used to fire on one
+	-- keypress with no on-screen cost or confirmation anywhere.
+	rebirth: any?,
 }
 
 export type Handler<TIn, TOut> = (ctx: ActionContext, payload: TIn) -> Result<TOut>
@@ -98,6 +110,11 @@ Net.Actions = {
 	Collect = "collect.gather", -- [collection-core] gather a nearby mote into the backpack
 	Sell = "collect.sell", -- [collection-core] sell the backpack at the refiner for Stardust
 	BuyUpgrade = "shop.buy", -- [upgrades-shop] spend Stardust to level a collect/backpack/magnet/speed upgrade
+	-- [upgrades-shop] read the catalog + this player's levels + the DERIVED tuning (capacity, magnet
+	-- radius, collect period, walk speed). Two jobs, deliberately one action: the shop UI needs the
+	-- prices BEFORE the player commits (they were never shown), and the client needs the tuning
+	-- numbers it used to hold as its own constants. Both are server-owned, so both ship together.
+	FetchUpgrades = "shop.fetch",
 	Daily = "daily.claim", -- [daily-streak] claim the once-per-day reward; server-clock gated, streak persisted
 	-- --- contract pass (v4) feature actions ---
 	UnlockIsland = "islands.unlock", -- [islands] spend currency to unlock an island; server-derived cost

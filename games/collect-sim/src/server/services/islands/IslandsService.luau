@@ -112,16 +112,53 @@ end
 -- default 1 (the current Sell caller passes nil, so this keeps that path a no-op multiplier).
 
 local IslandsSeam = {}
-function IslandsSeam.multiplierFor(_self: any, d: any): number
+
+-- The highest island this player has unlocked, as a plain id. Used for two things: the
+-- no-position fallback below, and the per-player collision-group access level that decides which
+-- barriers a character walks through (WorldService.applyAccess). A fresh player is 1 — the
+-- starting island is always unlocked and carries no flag.
+local function highestUnlockedIndex(d: any): number
+	for index = #CATALOG, 1, -1 do
+		if isUnlocked(d, index) then
+			return index
+		end
+	end
+	return STARTING_INDEX
+end
+
+function IslandsSeam.accessLevelFor(_self: any, d: any): number
+	if d == nil then
+		return CATALOG[STARTING_INDEX].id
+	end
+	return CATALOG[highestUnlockedIndex(d)].id
+end
+
+-- ----- THE MULTIPLIER, NOW POSITIONAL -----
+-- `islandId` is WHERE THE PLAYER IS STANDING, derived server-side by WorldService's position seam
+-- from the character's own position — never from a client payload. This parameter is the whole
+-- point: without it the multiplier was keyed off the highest island you OWN and applied globally,
+-- so a player standing on island 1 next to the only refiner earned the island-5 rate. The islands
+-- were decoration, and "richer motes on higher islands" had no expression anywhere in the game.
+--
+-- An UNKNOWN or UNOWNED island earns the starting rate — you can never be paid for ground you have
+-- not bought, even if a caller somehow supplies it. `islandId == nil` means "no position applies"
+-- (offline earnings, a player with no character yet) and falls back to the highest island owned,
+-- which is the correct reading for a reward that is not tied to a place.
+function IslandsSeam.multiplierFor(_self: any, d: any, islandId: number?): number
 	if d == nil then
 		return 1
 	end
-	for index = #CATALOG, 1, -1 do
-		if isUnlocked(d, index) then
-			return CATALOG[index].multiplier
-		end
+	if islandId == nil then
+		return CATALOG[highestUnlockedIndex(d)].multiplier
 	end
-	return 1 -- defensive: the starting island always matches above, so this is unreachable
+	local island, index = findIsland(islandId)
+	if island == nil or index == nil then
+		return CATALOG[STARTING_INDEX].multiplier
+	end
+	if not isUnlocked(d, index) then
+		return CATALOG[STARTING_INDEX].multiplier
+	end
+	return island.multiplier
 end
 
 -- One catalog row projected for the SERVER-side world generator: the same server-owned numbers
@@ -162,7 +199,7 @@ local IslandsService = { name = "IslandsService" }
 -- else from the catalog + the player's PERSISTED flags/balance.
 local function makeUnlockIslandAction(): Net.Action<
 	{ islandId: number },
-	{ islandId: number, cost: number, balance: number, multiplier: number }
+	{ islandId: number, cost: number, balance: number, multiplier: number, accessLevel: number }
 >
 	return {
 		name = Net.Actions.UnlockIsland, -- "islands.unlock"
@@ -191,7 +228,7 @@ local function makeUnlockIslandAction(): Net.Action<
 		handler = function(
 			ctx,
 			payload
-		): Result.Result<{ islandId: number, cost: number, balance: number, multiplier: number }>
+		): Result.Result<{ islandId: number, cost: number, balance: number, multiplier: number, accessLevel: number }>
 			local islandId = payload.islandId
 			local island, index = findIsland(islandId)
 			if island == nil or index == nil then
@@ -216,6 +253,7 @@ local function makeUnlockIslandAction(): Net.Action<
 			local rejectMessage: string? = nil
 			local outCost = 0
 			local outBalance = 0
+			local outAccessLevel = CATALOG[STARTING_INDEX].id
 
 			local updated = ctx.data:update(ctx.player, function(d)
 				-- VIP gate: a vip island ALSO needs the gamepass.vipIsland ownership flag. Re-read from
@@ -265,6 +303,9 @@ local function makeUnlockIslandAction(): Net.Action<
 
 				outCost = cost
 				outBalance = newBalance
+				-- Read the new access level off the POST-write snapshot, INSIDE the lock, so the
+				-- collision-group update below can never be computed from a stale unlock set.
+				outAccessLevel = CATALOG[highestUnlockedIndex(d)].id
 				return d
 			end)
 
@@ -278,6 +319,18 @@ local function makeUnlockIslandAction(): Net.Action<
 			-- happened, so balance and flags are unchanged and persisted as-is.
 			if rejectCode ~= nil then
 				return Result.err(rejectCode :: string, rejectMessage)
+			end
+
+			-- ----- THE UNLOCK NOW CHANGES THE WORLD, NOT JUST A NUMBER -----
+			-- Re-assign the character's access collision group so the barrier gating this island
+			-- stops colliding with THIS player (and nobody else). Before this, the world had no
+			-- barriers at all: a player with 0 Stardust could walk onto islands 2-5 in the first
+			-- minute, so the unlock sold access the player already had. NIL-SAFE: ctx.world is
+			-- absent under Lune and in focused tests, where the call is a no-op.
+			if ctx.world ~= nil and type((ctx.world :: any).applyAccess) == "function" then
+				pcall(function()
+					(ctx.world :: any):applyAccess(ctx.player, outAccessLevel)
+				end)
 			end
 
 			-- Emit AFTER a successful unlock. Two events THROUGH ctx.analytics (NIL-SAFE — a no-op when
@@ -305,6 +358,9 @@ local function makeUnlockIslandAction(): Net.Action<
 				cost = outCost,
 				balance = outBalance,
 				multiplier = island.multiplier,
+				-- The highest island this player may now ENTER. The client renders the barrier drop
+				-- off this, and a test can assert access changed without stepping physics.
+				accessLevel = outAccessLevel,
 			})
 		end,
 	}

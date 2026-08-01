@@ -4,21 +4,24 @@
 -- guarantees (NOT the implementation's branch logic):
 --   Success criteria (specs/collect-sim.md): the collect->sell economy loop; "Economy is
 --   concurrency-safe — interleaved / spam-duplicated sell ... never double-spend Stardust"; and
---   "No open exploit" (mote-value spoof / overflow). CLAUDE.md §3 (validate type+range+rate),
---   §4 (concurrency-safe economy: no double-spend/dupes).
+--   "No open exploit". CLAUDE.md §3 (validate type+range+rate), §4 (concurrency-safe economy).
 --
--- The feature registers its Collect/Sell actions INSIDE CollectionService:Start(context) as
--- closures over a private per-player backpack table. We drive them the SAME way production does:
--- call Start({ net = harness }) so the actions register onto a Mocks.net harness, then invoke them
--- through the REAL Net.dispatch (Mocks.net), with a real DataService over a MockStore as ctx.data.
--- Stardust is read back through DataService:get — the persisted, lock-queued balance — so a mint
--- or a lost grant is observable.
+-- ----- THE CONTRACT CHANGED, AND THIS FILE CHANGED WITH IT -----
+-- Collect used to add EXACTLY ONE MOTE PER REQUEST with no position, proximity or timing check.
+-- That made the economy a function of how fast a client could call, not of how a player played: a
+-- scripted client minted ~70x a walking player's income, and every price in the game is calibrated
+-- against the walker. "No open exploit" was a success criterion no assertion in this suite ever
+-- touched — and these tests, by driving a bare loop of invokes and asserting `count == 2`, were
+-- shaped exactly like the exploit.
 --
--- Constants are DISCOVERED through the API where practical (collect until full=true to learn
--- capacity; observe earned/sold to learn mote value) rather than copied from the implementation.
+-- Collect is now governed by the SERVER MONOTONIC CLOCK: a call is granted
+-- floor(credit + elapsed/collectPeriod) motes, capped, and the credit is spent. So a test must let
+-- time pass to collect, which is what a player does. The new gates at the bottom assert the
+-- property directly: a flood with a frozen clock mints nothing beyond one mote.
 local testkit = require("../lib/testkit")
 local Mocks = require("../lib/mocks")
 local CollectionService = require("../../src/server/services/collection/CollectionService")
+local IslandsService = require("../../src/server/services/islands/IslandsService")
 local DataService = require("../../src/server/data/DataService")
 local Net = require("../../src/shared/Net")
 local Result = require("../../src/shared/Result")
@@ -29,6 +32,10 @@ local expect = testkit.expect
 
 local COLLECT = Net.Actions.Collect -- "collect.gather"
 local SELL = Net.Actions.Sell -- "collect.sell"
+
+-- One mote's worth of server time at level 0. Discovered through the API (the Collect reply
+-- reports `collectPeriod`) rather than copied from the implementation — see periodOf below.
+local DEFAULT_PERIOD = 0.06
 
 local function config(): any
 	return {
@@ -41,9 +48,9 @@ local function config(): any
 end
 
 -- Build a CollectionService wired onto a fresh Mocks.net harness over a DataService with one
--- loaded player. Returns (harness, service, player, clock). `opts` flows to the mock store
+-- loaded player. Returns (harness, data, player, clock, shared). `opts` flows to the mock store
 -- (e.g. yieldOnUpdate) and to the harness (e.g. gate = false / a real gate).
-local function setup(opts: any?): (any, any, any, any)
+local function setup(opts: any?): (any, any, any, any, any)
 	local o = opts or {}
 	local clock = Mocks.clock(1000)
 	local cfg = config()
@@ -52,19 +59,23 @@ local function setup(opts: any?): (any, any, any, any)
 	local player = Mocks.player(o.userId or 1)
 	data:loadSession(player)
 
-	local harnessOpts: any = { clock = clock, data = data }
+	local shared: any = { clock = clock, data = data }
 	if o.gate ~= nil then
-		harnessOpts.gate = o.gate
+		shared.gate = o.gate
 	else
-		harnessOpts.gate = false -- default: isolate behavior from rate-limiting
+		shared.gate = false -- default: isolate behavior from rate-limiting
 	end
-	local harness = Mocks.net(harnessOpts)
-	-- Register the feature's actions exactly as the runtime does: the service calls
-	-- context.net:register(action) (colon syntax). harness.registry IS the real Net registry whose
-	-- register(self, action) honors that colon call, so the actions land on the same registry
-	-- Net.dispatch reads via harness.invoke.
+	local harness = Mocks.net(shared)
+	shared.net = harness.registry
+	if o.islands then
+		IslandsService:Start(shared)
+	end
+	if o.world then
+		shared.world = Mocks.world()
+	end
+	-- Register the feature's actions exactly as the runtime does.
 	CollectionService:Start({ net = harness.registry })
-	return harness, data, player, clock
+	return harness, data, player, clock, shared
 end
 
 local function balanceOf(data: any, player: any): number
@@ -73,23 +84,46 @@ local function balanceOf(data: any, player: any): number
 	return (got :: any).value.currencies.Stardust or 0
 end
 
--- Collect once and return the unwrapped {count, capacity, full}.
-local function collectOnce(harness: any, player: any): any
+-- Let one mote's worth of server time pass, then collect. Returns the unwrapped reply.
+local function collectOnce(harness: any, clock: any, player: any): any
+	clock:advance(DEFAULT_PERIOD * 2)
 	local r = harness.invoke(COLLECT, player, {})
 	expect(r):toBeOk()
 	return (r :: any).value
 end
 
+-- Collect exactly `n` motes, however many calls that takes. Asserts convergence rather than
+-- assuming a motes-per-call ratio, so the test survives a retune of the curve.
+local function collectExactly(harness: any, clock: any, player: any, n: number): number
+	local got = 0
+	local guard = 0
+	while got < n do
+		guard += 1
+		if guard > n * 4 + 200 then
+			error(`collectExactly did not converge (wanted {n}, got {got})`)
+		end
+		-- Advance only what is still needed, so the last call cannot overshoot past `n`.
+		clock:advance(DEFAULT_PERIOD * math.min(n - got, 10))
+		local r = harness.invoke(COLLECT, player, {})
+		expect(r):toBeOk()
+		got += (r :: any).value.granted
+		if (r :: any).value.full then
+			break
+		end
+	end
+	return got
+end
+
 -- Discover capacity by collecting until full=true; returns the capacity (== final count).
-local function fillToCapacity(harness: any, player: any): number
+local function fillToCapacity(harness: any, clock: any, player: any): number
 	local guard = 0
 	local last
 	while true do
 		guard += 1
-		if guard > 10000 then
+		if guard > 5000 then
 			error("fillToCapacity did not converge (capacity unexpectedly huge)")
 		end
-		last = collectOnce(harness, player)
+		last = collectOnce(harness, clock, player)
 		if last.full then
 			return last.count
 		end
@@ -97,35 +131,46 @@ local function fillToCapacity(harness: any, player: any): number
 end
 
 describe("Collection core — Collect behavior", function()
-	it("Collect adds exactly one mote and returns {count, capacity, full}", function()
-		local harness, _, player = setup()
-		local first = collectOnce(harness, player)
-		expect(first.count):toBe(1)
-		-- the shape is exactly the three documented fields
+	it("Collect grants motes and returns {count, capacity, full, granted}", function()
+		local harness, _, player, clock = setup()
+		local first = collectOnce(harness, clock, player)
+		expect(first.count >= 1):toBe(true)
 		expect(type(first.capacity)):toBe("number")
 		expect(type(first.full)):toBe("boolean")
-		local second = collectOnce(harness, player)
-		expect(second.count):toBe(2) -- increments by exactly one each call
+		expect(type(first.granted)):toBe("number")
+		expect(first.granted >= 1):toBe(true)
+		local second = collectOnce(harness, clock, player)
+		expect(second.count > first.count):toBe(true) -- the count strictly rises with elapsed time
 		expect(second.capacity):toBe(first.capacity) -- capacity is stable
 	end)
 
+	it("the reply echoes the SERVER's tuning, so the client holds no copy of it", function()
+		-- magnetRadius and collectPeriod were CLIENT module constants sitting beside the persisted
+		-- levels that were supposed to control them. They are server-owned numbers now, and the
+		-- Collect reply is how the client learns them.
+		local harness, _, player, clock = setup()
+		local reply = collectOnce(harness, clock, player)
+		expect(type(reply.magnetRadius)):toBe("number")
+		expect(reply.magnetRadius > 0):toBe(true)
+		expect(type(reply.collectPeriod)):toBe("number")
+		expect(reply.collectPeriod > 0):toBe(true)
+	end)
+
 	it("full is false below capacity and true exactly at capacity", function()
-		local harness, _, player = setup()
-		local first = collectOnce(harness, player)
-		expect(first.full):toBe(false) -- one mote, well below capacity
-		local capacity = fillToCapacity(harness, player)
+		local harness, _, player, clock = setup()
+		local first = collectOnce(harness, clock, player)
+		expect(first.full):toBe(false) -- a mote or two, well below capacity
+		local capacity = fillToCapacity(harness, clock, player)
 		expect(capacity):toBe(first.capacity)
-		-- The collect that reached capacity reported full=true (fillToCapacity stops on it).
-		-- Re-query state via one more collect attempt below (capacity case) covers the boundary.
 	end)
 
 	it("Collect at capacity -> Err(OutOfRange); backpack never exceeds capacity", function()
-		local harness, _, player = setup()
-		local capacity = fillToCapacity(harness, player)
-		-- One more collect must be refused (no overflow past capacity).
+		local harness, _, player, clock = setup()
+		local capacity = fillToCapacity(harness, clock, player)
+		clock:advance(5) -- plenty of accrued time: the refusal must be about ROOM, not timing
 		local overflow = harness.invoke(COLLECT, player, {})
 		expect(overflow):toBeErr(Result.Codes.OutOfRange)
-		-- Selling now must convert EXACTLY `capacity` motes — proves the backpack held capacity, no more.
+		-- Selling now converts EXACTLY `capacity` motes — proving the backpack held capacity, no more.
 		local sell = harness.invoke(SELL, player, {})
 		expect(sell):toBeOk()
 		expect((sell :: any).value.sold):toBe(capacity)
@@ -136,12 +181,9 @@ describe("Collection core — Sell economy", function()
 	it(
 		"Sell converts the WHOLE backpack: earned == N*value, sold == N, balance += earned",
 		function()
-			local harness, data, player = setup()
-			-- Collect a known N (well below capacity).
-			local N = 5
-			for _ = 1, N do
-				collectOnce(harness, player)
-			end
+			local harness, data, player, clock = setup()
+			local N = collectExactly(harness, clock, player, 5)
+			expect(N):toBe(5)
 			local before = balanceOf(data, player)
 			local sell = harness.invoke(SELL, player, {})
 			expect(sell):toBeOk()
@@ -160,21 +202,18 @@ describe("Collection core — Sell economy", function()
 	)
 
 	it("Sell empties the backpack: an immediate 2nd Sell -> sold==0, earned==0", function()
-		local harness, data, player = setup()
-		for _ = 1, 4 do
-			collectOnce(harness, player)
-		end
+		local harness, data, player, clock = setup()
+		local N = collectExactly(harness, clock, player, 4)
 		local first = harness.invoke(SELL, player, {})
 		expect(first):toBeOk()
-		expect((first :: any).value.sold):toBe(4)
+		expect((first :: any).value.sold):toBe(N)
 		local balanceAfterFirst = balanceOf(data, player)
 
 		local second = harness.invoke(SELL, player, {})
 		expect(second):toBeOk()
 		expect((second :: any).value.sold):toBe(0) -- backpack already emptied
 		expect((second :: any).value.earned):toBe(0)
-		-- No further currency minted by the empty second sell.
-		expect(balanceOf(data, player)):toBe(balanceAfterFirst)
+		expect(balanceOf(data, player)):toBe(balanceAfterFirst) -- nothing minted
 	end)
 
 	it("Empty Sell: sold==0, earned==0, balance unchanged, NO error, NO currency minted", function()
@@ -192,43 +231,35 @@ end)
 
 describe("Collection core — negative / abuse", function()
 	it("malformed (non-table) payload to Collect -> Err(BadPayload), handler never runs", function()
-		local harness, _, player = setup()
+		local harness, _, player, clock = setup()
 		expect(harness.invoke(COLLECT, player, 7)):toBeErr(Result.Codes.BadPayload)
 		expect(harness.invoke(COLLECT, player, "gather")):toBeErr(Result.Codes.BadPayload)
 		expect(harness.invoke(COLLECT, player, true)):toBeErr(Result.Codes.BadPayload)
 		expect(harness.invoke(COLLECT, player, nil)):toBeErr(Result.Codes.BadPayload)
-		-- The rejected calls minted/changed nothing: a real collect still starts at count 1.
-		expect(collectOnce(harness, player).count):toBe(1)
+		-- The rejected calls minted/changed nothing: a real collect still starts from an empty pack.
+		expect(collectOnce(harness, clock, player).count >= 1):toBe(true)
+		expect((harness.invoke(SELL, player, {}) :: any).value.sold >= 1):toBe(true)
 	end)
 
 	it("malformed (non-table) payload to Sell -> Err(BadPayload), no currency minted", function()
-		local harness, data, player = setup()
-		for _ = 1, 3 do
-			collectOnce(harness, player)
-		end
+		local harness, data, player, clock = setup()
+		local N = collectExactly(harness, clock, player, 3)
 		local before = balanceOf(data, player)
 		expect(harness.invoke(SELL, player, 99)):toBeErr(Result.Codes.BadPayload)
 		expect(harness.invoke(SELL, player, "sell")):toBeErr(Result.Codes.BadPayload)
 		expect(harness.invoke(SELL, player, nil)):toBeErr(Result.Codes.BadPayload)
 		-- Rejected at validate -> backpack untouched, balance untouched.
 		expect(balanceOf(data, player)):toBe(before)
-		-- A real sell still finds all 3 motes (the bad payloads did not empty the backpack).
-		expect((harness.invoke(SELL, player, {}) :: any).value.sold):toBe(3)
+		expect((harness.invoke(SELL, player, {}) :: any).value.sold):toBe(N)
 	end)
 
 	it(
 		"rate limit: exceeding the Sell rate window -> Err(RateLimited); a fresh window allows again",
 		function()
-			-- Use a REAL gate + injected clock (like net.spec) so the action's own RatePolicy is enforced.
 			local clock = Mocks.clock(1000)
 			local gate = Mocks.gate(clock)
 			local harness, _, player = setup({ gate = gate })
-			-- (setup built its own clock/gate? No — we passed our gate; but setup's data clock differs.
-			--  Rate is keyed off the harness clock/gate we supplied, which is what we trip below.)
 
-			-- Discover the Sell window empirically: spam Sell on an empty backpack (each is a valid
-			-- Ok sale of 0) until the gate sheds one as RateLimited. Selling empty mints nothing, so
-			-- this isolates the rate gate from the economy.
 			local hitRateLimit = false
 			local allowed = 0
 			for _ = 1, 50 do
@@ -243,9 +274,132 @@ describe("Collection core — negative / abuse", function()
 			expect(hitRateLimit):toBe(true) -- the bucket DID shed once exhausted
 			expect(allowed > 0):toBe(true) -- but allowed at least one through first
 
-			-- Advance well past any reasonable window: the bucket refills, a fresh Sell is allowed.
 			clock:advance(60)
 			expect(harness.invoke(SELL, player, {})):toBeOk()
+		end
+	)
+end)
+
+-- -------------------------------------------------------------------------------------------------
+-- THE ANTI-EXPLOIT GATE. The spec names "No open exploit" as a success criterion and, before this
+-- block, NOTHING in any lane exercised it. `collect.gather` accepted an empty payload with no
+-- position and no timing check; its only defence was a 20/s rate bucket, so a scripted client
+-- minted roughly 3,600 Stardust a minute against a walking player's ~150 per few minutes.
+--
+-- The property asserted here is deliberately about the CEILING, not the pacing: with the clock
+-- frozen the credit never refills, so what one player can extract from an unlimited flood is a
+-- deterministic number — and it must be one mote.
+-- -------------------------------------------------------------------------------------------------
+describe(
+	"Collection core — the collect economy is governed by the CLOCK, not the call count",
+	function()
+		it("100 dispatches with the server clock FROZEN grant at most one mote", function()
+			local harness, _, player = setup() -- clock never advanced
+			local total = 0
+			for _ = 1, 100 do
+				local r = harness.invoke(COLLECT, player, {})
+				expect(r):toBeOk() -- a call that mints nothing is Ok, not an error
+				total += (r :: any).value.granted
+			end
+			expect(total):toBe(1) -- the opening grant, and nothing else, ever
+			expect((harness.invoke(SELL, player, {}) :: any).value.sold):toBe(1)
+		end)
+
+		it("grants scale with ELAPSED TIME, not with how often the client asks", function()
+			-- Two identical players. One calls 40 times across 1 second of server time; the other calls
+			-- twice across the same second. They must end with the SAME number of motes.
+			local floodHarness, _fd, flooder, floodClock = setup({ userId = 501 })
+			local calmHarness, _cd, calm, calmClock = setup({ userId = 502 })
+
+			-- Prime both, so the measured window starts from the same anchored ledger. (The very
+			-- first collect of a session is deliberately instant — arriving somewhere should feel
+			-- responsive — and that opening grant is not part of what is being compared here.)
+			expect(floodHarness.invoke(COLLECT, flooder, {})):toBeOk()
+			expect(calmHarness.invoke(COLLECT, calm, {})):toBeOk()
+
+			for _ = 1, 40 do
+				floodClock:advance(1 / 40)
+				expect(floodHarness.invoke(COLLECT, flooder, {})):toBeOk()
+			end
+			for _ = 1, 2 do
+				calmClock:advance(0.5)
+				expect(calmHarness.invoke(COLLECT, calm, {})):toBeOk()
+			end
+
+			local flooded = (floodHarness.invoke(SELL, flooder, {}) :: any).value.sold
+			local calmed = (calmHarness.invoke(SELL, calm, {}) :: any).value.sold
+			expect(flooded):toBe(calmed)
+		end)
+
+		it("idling does not BANK motes — a long absence cashes in a bounded amount", function()
+			local harness, _, player, clock = setup()
+			clock:advance(600) -- ten minutes of standing still
+			local reply = collectOnce(harness, clock, player)
+			-- Ten minutes at the base period would be 10,000 motes. The ceiling must be far smaller,
+			-- and in particular must not exceed one backpack.
+			expect(reply.granted <= reply.capacity):toBe(true)
+			expect(reply.granted <= 25):toBe(true)
+		end)
+	end
+)
+
+-- -------------------------------------------------------------------------------------------------
+-- THE POSITION GATE + POSITIONAL VALUE. "Richer motes on higher islands" is a spec promise that
+-- had no expression anywhere in the game: the island multiplier was keyed off the highest island
+-- you OWNED and applied globally at sell time, so standing on island 1 paid the island-5 rate and
+-- the islands were decoration. Mote value is now banked at COLLECT time against the island the
+-- player is standing on, read server-side through ctx.world.
+-- -------------------------------------------------------------------------------------------------
+describe("Collection core — collecting is POSITIONAL", function()
+	local function unlockAll(data: any, player: any): ()
+		local r = data:update(player, function(d: any): any
+			d.flags = d.flags or {}
+			for id = 2, 5 do
+				d.flags["island." .. tostring(id)] = true
+			end
+			return d
+		end)
+		expect(r):toBeOk()
+	end
+
+	it("a player who is on no island at all cannot collect", function()
+		local harness, _, player, clock = setup({ world = true })
+		clock:advance(5)
+		-- The fake world has not been told where this player is: they are over the void.
+		expect(harness.invoke(COLLECT, player, {})):toBeErr(Result.Codes.Rejected)
+	end)
+
+	it("the SAME motes are worth MORE when collected on a richer island", function()
+		local harness, data, player, clock, shared = setup({ world = true, islands = true })
+		unlockAll(data, player)
+
+		shared.world:standOn(player.UserId, 1)
+		local n1 = collectExactly(harness, clock, player, 10)
+		local low = (harness.invoke(SELL, player, {}) :: any).value.earned
+
+		shared.world:standOn(player.UserId, 3)
+		local n3 = collectExactly(harness, clock, player, 10)
+		local high = (harness.invoke(SELL, player, {}) :: any).value.earned
+
+		expect(n1):toBe(n3) -- identical mote counts...
+		expect(high > low):toBe(true) -- ...worth strictly more on island 3
+	end)
+
+	it(
+		"standing on an island you have NOT unlocked pays the starting rate, never its own",
+		function()
+			-- Defence in depth behind the physical barrier: even if a player reaches island 4 some other
+			-- way, they are paid island-1 rates until they buy it.
+			local harness, data, player, clock, shared = setup({ world = true, islands = true })
+			shared.world:standOn(player.UserId, 1)
+			collectExactly(harness, clock, player, 10)
+			local baseline = (harness.invoke(SELL, player, {}) :: any).value.earned
+
+			shared.world:standOn(player.UserId, 4) -- reached without unlocking
+			collectExactly(harness, clock, player, 10)
+			local trespass = (harness.invoke(SELL, player, {}) :: any).value.earned
+			expect(trespass):toBe(baseline)
+			expect(balanceOf(data, player) > 0):toBe(true)
 		end
 	)
 end)
@@ -253,7 +407,6 @@ end)
 describe("Collection core — concurrency / economy (double-spend defense)", function()
 	-- The economy_race technique: drive interleaved invocations as coroutines against a yielding
 	-- store so the second Sell arrives WHILE the first is parked inside the lock-held update.
-	-- Round-robin driver: resume every suspended coroutine until all are dead.
 	local function drain(cos: { thread }): ()
 		local live: { thread } = {}
 		for _, co in cos do
@@ -284,14 +437,8 @@ describe("Collection core — concurrency / economy (double-spend defense)", fun
 	it(
 		"DOUBLE-SPEND: two interleaved Sells for the SAME backpack credit Stardust AT MOST ONCE",
 		function()
-			-- yieldOnUpdate forces the first Sell to park inside the lock-held data:update, so the
-			-- second Sell runs against the SAME backpack during that yield. The economy guarantee:
-			-- total Stardust minted == ONE backpack's value, never two.
-			local harness, data, player = setup({ yieldOnUpdate = true })
-			local N = 6
-			for _ = 1, N do
-				collectOnce(harness, player)
-			end
+			local harness, data, player, clock = setup({ yieldOnUpdate = true })
+			local N = collectExactly(harness, clock, player, 6)
 			local before = balanceOf(data, player)
 
 			local results: { any } = {}
@@ -311,7 +458,6 @@ describe("Collection core — concurrency / economy (double-spend defense)", fun
 			local soldA = (results.a :: any).value.sold
 			local soldB = (results.b :: any).value.sold
 			expect(soldA + soldB):toBe(N) -- the backpack was sold exactly ONCE in total
-			-- And the minted Stardust equals exactly one backpack's value (no double-spend).
 			local earnedA = (results.a :: any).value.earned
 			local earnedB = (results.b :: any).value.earned
 			local value = (earnedA + earnedB) // N
@@ -323,11 +469,8 @@ describe("Collection core — concurrency / economy (double-spend defense)", fun
 	it(
 		"SPAM-DUPLICATED: four interleaved Sells mint exactly ONE backpack's value (anti-dupe)",
 		function()
-			local harness, data, player = setup({ yieldOnUpdate = true })
-			local N = 9
-			for _ = 1, N do
-				collectOnce(harness, player)
-			end
+			local harness, data, player, clock = setup({ yieldOnUpdate = true })
+			local N = collectExactly(harness, clock, player, 9)
 			local before = balanceOf(data, player)
 
 			local results: { any } = {}
@@ -350,10 +493,10 @@ describe("Collection core — concurrency / economy (double-spend defense)", fun
 				totalSold += (results[i] :: any).value.sold
 				totalEarned += (results[i] :: any).value.earned
 			end
-			expect(totalSold):toBe(N) -- the backpack was sold exactly once across 4 spam requests
+			expect(totalSold):toBe(N) -- sold exactly once across 4 spam requests
 			local value = totalEarned // N
 			expect(value > 0):toBe(true)
-			expect(totalEarned):toBe(N * value) -- earnings reported once
+			expect(totalEarned):toBe(N * value)
 			expect(balanceOf(data, player) - before):toBe(N * value) -- minted exactly once
 		end
 	)
@@ -361,23 +504,17 @@ describe("Collection core — concurrency / economy (double-spend defense)", fun
 	it(
 		"CONSERVATION: collecting M motes then selling mints exactly M*value (even with an interleaved 2nd sell)",
 		function()
-			-- Economy conservation: no mint, no loss. We collect M, then race two sells; the persisted
-			-- balance delta must equal M*value EXACTLY — proving the data:update yield window cannot be
-			-- exploited to mint extra or silently drop the grant.
-			local harness, data, player = setup({ yieldOnUpdate = true })
-			local M = 12
-			for _ = 1, M do
-				collectOnce(harness, player)
-			end
+			local harness, data, player, clock = setup({ yieldOnUpdate = true })
+			local M = collectExactly(harness, clock, player, 12)
 			local before = balanceOf(data, player)
 
-			-- Establish value independently from a SEPARATE clean player/sell (no race), so the
-			-- conservation assertion is anchored to a known per-mote value, not the raced result itself.
-			local harness2, data2, player2 = setup() -- fresh, no yield
-			collectOnce(harness2, player2)
+			-- Establish value independently from a SEPARATE clean player/sell (no race).
+			local harness2, data2, player2, clock2 = setup({ userId = 2 })
+			collectExactly(harness2, clock2, player2, 1)
 			local probe = harness2.invoke(SELL, player2, {})
 			expect(probe):toBeOk()
-			local value = (probe :: any).value.earned -- earned for exactly 1 mote == the per-mote value
+			expect((probe :: any).value.sold):toBe(1)
+			local value = (probe :: any).value.earned -- earned for exactly 1 mote
 			expect(value > 0):toBe(true)
 			expect((data2 :: any) ~= nil):toBe(true)
 
@@ -390,7 +527,6 @@ describe("Collection core — concurrency / economy (double-spend defense)", fun
 				end),
 			}
 			drain(cos)
-			-- Exactly M*value minted: conservation holds across the interleaved sell.
 			expect(balanceOf(data, player) - before):toBe(M * value)
 		end
 	)
@@ -398,10 +534,10 @@ end)
 
 describe("Collection core — boundary: repeated full cycles accumulate", function()
 	it("two full collect->sell cycles accumulate the balance correctly", function()
-		local harness, data, player = setup()
+		local harness, data, player, clock = setup()
 		local before = balanceOf(data, player)
 
-		local cap1 = fillToCapacity(harness, player)
+		local cap1 = fillToCapacity(harness, clock, player)
 		local sell1 = harness.invoke(SELL, player, {})
 		expect(sell1):toBeOk()
 		local earned1 = (sell1 :: any).value.earned
@@ -409,40 +545,26 @@ describe("Collection core — boundary: repeated full cycles accumulate", functi
 		expect(balanceOf(data, player)):toBe(before + earned1)
 
 		-- Backpack emptied by the sell -> a second full cycle is possible.
-		local cap2 = fillToCapacity(harness, player)
+		local cap2 = fillToCapacity(harness, clock, player)
 		expect(cap2):toBe(cap1) -- capacity is constant across cycles
 		local sell2 = harness.invoke(SELL, player, {})
 		expect(sell2):toBeOk()
 		local earned2 = (sell2 :: any).value.earned
 		expect(earned2):toBe(earned1) -- same motes sold -> same earnings
 
-		-- Final balance is the SUM of both cycles — no loss, no double-credit between cycles.
 		expect(balanceOf(data, player)):toBe(before + earned1 + earned2)
 	end)
 end)
 
 -- -------------------------------------------------------------------------------------------------
--- RED-TEAM REGRESSION (independent economy red-team, test gate 2026-06-19): CAPACITY-cap bypass via
--- the Sell failure-restore path. When a Sell's ctx.data:update FAILS, the handler restores the
--- captured motes by ADDING them back to the backpack. The Store/DataService `update` contract may
--- return Err (the restore branch exists precisely for that), and if motes were auto-collected DURING
--- the update's yield window, an UNCLAMPED restore pushes the backpack PAST CAPACITY — a "No open
--- exploit" / range-invariant (CLAUDE.md rule 3; the capacity cap is the range) violation: the player
--- can then sell more than a backpack should ever hold.
---
--- The current spine MockStore never fails `update` (only `save` can fail), so this path is LATENT
--- there; B2's real session-locked store, behind the same Store interface, can fail an update
--- mid-yield. We drive the contract-permitted outcome with a controllable inline fake `ctx.data` that
--- yields-then-fails `update` (the same inline-fake technique economy_race.spec uses for its
--- counter-case). FALSIFIABLE: on the unclamped code the observing sell reports capacity+k (> cap);
--- the clamp (math.min(CAPACITY, ...)) makes it exactly capacity.
+-- RED-TEAM REGRESSION: CAPACITY-cap bypass via the Sell failure-restore path. When a Sell's
+-- ctx.data:update FAILS, the handler restores the captured motes by ADDING them back. If motes were
+-- collected DURING the update's yield window, an UNCLAMPED restore pushes the backpack PAST
+-- CAPACITY — the player could then sell more than a backpack should ever hold.
 -- -------------------------------------------------------------------------------------------------
 describe(
 	"Collection core — capacity invariant on a failed-sell restore (red-team regression)",
 	function()
-		-- A ctx.data whose `update` first PARKS (so an interleaving Collect can refill the backpack) then
-		-- returns Err; after `mode` is flipped to "succeed" it applies the transform and persists, so a
-		-- follow-up sell can OBSERVE how many motes the restore left in the backpack.
 		local function controllableData(): any
 			local d: any = { stardust = 0, mode = "failYield" }
 			function d.get(self: any, _player: any): any
@@ -450,7 +572,7 @@ describe(
 			end
 			function d.update(self: any, _player: any, transform: (any) -> any): any
 				if self.mode == "failYield" then
-					coroutine.yield() -- park inside "update" so an interleaving Collect refills the backpack
+					coroutine.yield() -- park inside "update" so an interleaving Collect refills
 					return Result.err(Result.Codes.Internal, "forced update failure")
 				end
 				local snapshot = { currencies = { Stardust = self.stardust } }
@@ -470,13 +592,10 @@ describe(
 				local player = Mocks.player(1)
 				CollectionService:Start({ net = harness.registry })
 
-				-- Collect a small k; this is the amount the failed sell will try to restore.
-				local k = 3
-				for _ = 1, k do
-					expect(harness.invoke(COLLECT, player, {})):toBeOk()
-				end
+				local k = collectExactly(harness, clock, player, 3)
+				expect(k):toBe(3)
 
-				-- Fire a Sell that parks inside the failing update (captures k, zeroes the backpack, yields).
+				-- Fire a Sell that parks inside the failing update (captures k, zeroes the pack).
 				local sellResult: any
 				local sellCo = coroutine.create(function()
 					sellResult = harness.invoke(SELL, player, {})
@@ -484,14 +603,15 @@ describe(
 				expect((coroutine.resume(sellCo))):toBe(true)
 				expect(coroutine.status(sellCo)):toBe("suspended") -- parked mid-"update"
 
-				-- While the sell is parked, auto-Collect refills the backpack all the way to capacity.
+				-- While the sell is parked, collects refill the backpack all the way to capacity.
 				local capacity = 0
 				local guard = 0
 				while true do
 					guard += 1
-					if guard > 10000 then
+					if guard > 5000 then
 						error("refill did not converge")
 					end
+					clock:advance(DEFAULT_PERIOD * 20)
 					local r = harness.invoke(COLLECT, player, {})
 					expect(r):toBeOk()
 					if (r :: any).value.full then
@@ -503,10 +623,10 @@ describe(
 				-- Resume the sell: update returns Err -> the restore branch runs (adds k back).
 				expect((coroutine.resume(sellCo))):toBe(true)
 				expect(coroutine.status(sellCo)):toBe("dead")
-				expect(sellResult):toBeErr(Result.Codes.Internal) -- the sale itself failed: no currency granted
+				expect(sellResult):toBeErr(Result.Codes.Internal) -- the sale failed: nothing granted
 
-				-- Observe the backpack via a now-succeeding sell. The cap invariant: the backpack can NEVER
-				-- hold more than capacity, so this must sell AT MOST capacity. Unclamped restore -> capacity+k.
+				-- Observe the backpack via a now-succeeding sell. The cap invariant: the backpack can
+				-- NEVER hold more than capacity. Unclamped restore -> capacity+k.
 				fakeData.mode = "succeed"
 				local observe = harness.invoke(SELL, player, {})
 				expect(observe):toBeOk()
@@ -518,15 +638,8 @@ describe(
 )
 
 describe("Collection core — auto-collect ticker (gamepass-gated, server-clock driven)", function()
-	-- The auto-collect ticker (CollectionService.tickAutoCollect, fed at runtime by the guarded
-	-- driver) grants a pass-holder one mote per AUTO_COLLECT_INTERVAL of elapsed SERVER MONOTONIC
-	-- time, into the SAME backpack Collect/Sell share — so auto-collected motes sell normally.
-	-- Authored from the spec's gamepass-gated auto-collect guarantee, driven through the injected
-	-- fake clock (deterministic; no task.wait). We grab the ticker AFTER the setup whose backpack we
-	-- then Sell from (Start sets CollectionService.tickAutoCollect over that setup's backpack).
-	local AUTO_FLAG = "gamepass.autoCollect" -- the spec's auto-collect gamepass ownership flag
+	local AUTO_FLAG = "gamepass.autoCollect"
 
-	-- Round-robin coroutine driver so a write works whether or not the store yields.
 	local function drainOne(thunk: () -> ()): ()
 		local co = coroutine.create(thunk)
 		local guard = 0
@@ -542,7 +655,6 @@ describe("Collection core — auto-collect ticker (gamepass-gated, server-clock 
 		end
 	end
 
-	-- Grant a persisted flag (the auto-collect gamepass) through the canonical write path.
 	local function setFlag(data: any, player: any, key: string): ()
 		local r: any = nil
 		drainOne(function()
@@ -593,9 +705,8 @@ describe("Collection core — auto-collect ticker (gamepass-gated, server-clock 
 	end)
 
 	it("the grant is clamped to capacity (never overfills the backpack)", function()
-		-- Discover capacity on a clean probe (never copy the implementation constant).
-		local ph, _pd, pp = setup({ userId = 4242 })
-		local capacity = fillToCapacity(ph, pp)
+		local ph, _pd, pp, pc = setup({ userId = 4242 })
+		local capacity = fillToCapacity(ph, pc, pp)
 
 		local harness, data, player, clock = setup({ userId = 77 })
 		setFlag(data, player, AUTO_FLAG)
@@ -607,5 +718,25 @@ describe("Collection core — auto-collect ticker (gamepass-gated, server-clock 
 		clock:advance(capacity * 10)
 		expect(tick(ctx, player)):toBe(0) -- already full -> no further grant
 		expect((harness.invoke(SELL, player, {}) :: any).value.sold):toBe(capacity)
+	end)
+end)
+
+-- -------------------------------------------------------------------------------------------------
+-- SESSION LIFECYCLE. The in-memory backpack and collect ledger used to grow one entry per unique
+-- visitor for the server's lifetime, and a rejoining player inherited a server-side backpack their
+-- HUD knew nothing about — the HUD read "Backpack: 0" over a server holding 50, then immediately
+-- latched "backpack full" on the next collect.
+-- -------------------------------------------------------------------------------------------------
+describe("Collection core — leaving clears the session backpack", function()
+	it("forgetPlayer empties the backpack and resets the collect credit", function()
+		local harness, _, player, clock = setup()
+		collectExactly(harness, clock, player, 5)
+		expect(CollectionService:backpackOf(player.UserId).count):toBe(5)
+
+		CollectionService:forgetPlayer(player.UserId)
+		expect(CollectionService:backpackOf(player.UserId).count):toBe(0)
+		expect(CollectionService:backpackOf(player.UserId).value):toBe(0)
+		-- A rejoin starts clean: an immediate sell finds nothing, not a phantom 5.
+		expect((harness.invoke(SELL, player, {}) :: any).value.sold):toBe(0)
 	end)
 end)

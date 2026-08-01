@@ -50,7 +50,7 @@ end
 -- Wire the shop and collection onto ONE shared context, exactly as the runtime does: both services
 -- publish onto / read from the same table, and the harness projects that table's seams into every
 -- ActionContext. This composition is the thing that was never tested.
-local function setup(startingStardust: number?): (any, any, any, any)
+local function setup(startingStardust: number?): (any, any, any, any, any)
 	local clock = Mocks.clock(1000)
 	local cfg = config()
 	local store = Mocks.store({ clock = clock, config = cfg })
@@ -72,7 +72,7 @@ local function setup(startingStardust: number?): (any, any, any, any)
 		end)
 		expect(updated):toBeOk()
 	end
-	return harness, data, player, shared
+	return harness, data, player, shared, clock
 end
 
 -- The capacity the SERVER enforces and REPORTS, read through the public Collect reply — the same
@@ -83,6 +83,24 @@ local function reportedCapacity(harness: any, player: any): number
 	local res = harness.invoke(COLLECT, player, {})
 	expect(res):toBeOk()
 	return (res :: any).value.capacity
+end
+
+-- Collect is CLOCK-GATED, so filling a backpack means letting server time pass — a bare loop of
+-- invokes grants exactly one mote however long it runs. Returns how many motes were accepted
+-- before the backpack refused.
+local function fillUntilRefused(harness: any, clock: any, player: any): number
+	local accepted = 0
+	local guard = 0
+	while guard < 2000 do
+		guard += 1
+		clock:advance(0.06 * 10)
+		local res = harness.invoke(COLLECT, player, {})
+		if not res.ok then
+			return accepted -- OutOfRange: the backpack refused, so enforcement stopped here
+		end
+		accepted += (res :: any).value.granted
+	end
+	error("fillUntilRefused did not converge")
 end
 
 local function buy(harness: any, player: any, upgradeId: string): any
@@ -114,22 +132,12 @@ describe("upgrade effects — a bought level must be READ by the code governing 
 		-- The reported number is what the HUD draws; the enforced number is where Collect starts
 		-- refusing. If they drift, the bar fills to "62/70" and sticks, or claims room that is not
 		-- there. Buy several levels first so this is not merely re-checking the level-0 default.
-		local harness, _data, player = setup(100000)
+		local harness, _data, player, _shared, clock = setup(100000)
 		for _ = 1, 3 do
 			expect(buy(harness, player, "backpack")):toBeOk()
 		end
 		local capacity = reportedCapacity(harness, player) -- this call already banked mote #1
-
-		local accepted = 1
-		local guard = 0
-		while guard < 1000 do
-			guard += 1
-			local res = harness.invoke(COLLECT, player, {})
-			if not res.ok then
-				break -- OutOfRange: the backpack refused, so enforcement stopped here
-			end
-			accepted += 1
-		end
+		local accepted = 1 + fillUntilRefused(harness, clock, player)
 		expect(accepted):toBe(capacity)
 	end)
 

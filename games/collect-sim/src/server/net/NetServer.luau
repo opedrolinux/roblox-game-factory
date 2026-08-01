@@ -72,6 +72,8 @@ function NetServer.actionContext(self: any, player: any): Net.ActionContext
 		islands = ctx.islands,
 		restock = ctx.restock,
 		upgrades = ctx.upgrades, -- purchased-upgrade EFFECT seam (see Net.ActionContext)
+		world = ctx.world, -- POSITION seam: which island the player is standing on (server-derived)
+		rebirth = ctx.rebirth, -- prestige READ seam (threshold / multiplier / pre-commit preview)
 	}
 end
 

@@ -1,13 +1,36 @@
 --!strict
 -- games/collect-sim/src/server/services/collection/CollectionService.luau   [collection-core]
--- Feature: motes auto-collect into a per-player backpack; selling at the refiner converts the
--- whole backpack to Stardust (count x mote value) and empties it.
+-- Feature: motes accrue into a per-player backpack; selling at a refiner converts the whole
+-- backpack to Stardust and empties it.
 --
--- The backpack is FEATURE-OWNED SESSION STATE: an in-memory map keyed by player.UserId, NOT
--- persisted (persisted/upgradeable capacity arrives with a later feature). Because it lives in
--- service state (not PlayerData), the Collect/Sell actions are built INSIDE Start() as closures
--- over the backpack table, then registered on the gateway. Stardust is the persisted economy
--- and is mutated ONLY through ctx.data:update (the single-writer, lock-queued path).
+-- ----- WHAT CHANGED, AND WHY (three defects, one file) -----
+--
+-- 1. CAPACITY WAS A CONSTANT. `CAPACITY = 50` sat beside the persisted backpack level nothing read,
+--    so ten levels of backpack (2,200 Stardust) did nothing. Capacity now comes from
+--    ctx.upgrades:capacityFor(d) — the purchased value governs play.
+--
+-- 2. THE GRANT WAS PER-CALL, SO THE ECONOMY WAS PER-CALL. `collect.gather` added exactly one mote
+--    per request with no position, proximity or timing check; the only defence was a 20/s rate
+--    bucket. A scripted client minted ~3,600 Stardust/minute against a walking player's ~150 per
+--    few minutes — about 70x — and every price in the game is calibrated against the walker.
+--    Now the grant is derived from the SERVER MONOTONIC CLOCK: a call is granted
+--    floor(elapsed / collectPeriod) motes since that player's last grant, capped, and the consumed
+--    time is deducted. Calling 100 times in the same instant grants what one call grants. The rate
+--    bucket stays as defence in depth, no longer as the only defence. This ALSO makes the
+--    collect-speed upgrade real: the period comes from ctx.upgrades:collectPeriodFor(d), and a
+--    faster period yields more motes per call rather than requiring more calls (which the rate
+--    bucket would have shed, capping the upgrade at ~1.2x however many levels were bought).
+--
+-- 3. THE ISLAND MULTIPLIER WAS GLOBAL, SO ISLANDS WERE DECORATION. It was keyed off the highest
+--    island you OWNED and applied at SELL time, so standing on island 1 paid the island-5 rate.
+--    Mote value is now banked AT COLLECT TIME using the island the player is physically standing
+--    on (ctx.world:islandOf — server-derived from the character, never client-supplied). The
+--    backpack therefore carries a COUNT and a VALUE: "richer motes on higher islands" is finally a
+--    real, observable property. Banking at collect (not at sell) is also what lets every island
+--    have its own refiner without making the sell location a free multiplier choice.
+--
+-- The backpack is FEATURE-OWNED SESSION STATE keyed by player.UserId. Stardust is the persisted
+-- economy and is mutated ONLY through ctx.data:update (the single-writer, lock-queued path).
 --
 -- Dual-runtime require [D1 shim]: under Lune (script == nil) these resolve via the filesystem and
 -- touch no Roblox global, so a spec drives the actions through Mocks.net -> Net.dispatch. In Roblox,
@@ -23,140 +46,270 @@ else
 	Result = require((Shared :: any).Result)
 end
 
--- BASE_CAPACITY is the LEVEL-0 backpack size, not the capacity. The real capacity is read per
--- request from ctx.upgrades:capacityFor(d) so a purchased `backpack` level actually changes play.
--- This constant used to BE the capacity, and that was the game's defining bug: the shop persisted
--- the level and nothing read it, so all ten levels (2,200 Stardust) did nothing. It survives only
--- as the nil-safe default for when the seam is absent (the spine, and every Tier-1 test that wires
--- no shop service) — at level 0 the two are equal, so old behavior is preserved exactly.
+-- BASE_* are the LEVEL-0 values, not the values. The real ones are read per request from the
+-- ctx.upgrades seam so a purchased level actually changes play. These survive only as the nil-safe
+-- defaults for when the seam is absent (the spine, and every Tier-1 test that wires no shop
+-- service) — at level 0 the two are equal, so old behavior is preserved exactly.
 local BASE_CAPACITY = 50
+local BASE_COLLECT_PERIOD = 0.06 -- seconds of server time per mote at level 0
+local BASE_MAGNET_RADIUS = 6 -- studs; reported to the client, which used to hold its own constant
 local MOTE_VALUE = 3
 
--- Server-owned rebirth step: each rebirth adds REBIRTH_STEP to the Sell multiplier
--- (rebirth multiplier = 1 + rebirths*REBIRTH_STEP). Defined HERE because this is where the
--- consolidated Sell formula reads it. With rebirths = 0 the multiplier is exactly 1.
+-- Server-owned rebirth step: each rebirth adds REBIRTH_STEP to the Sell multiplier.
 local REBIRTH_STEP = 0.1
 
+-- ----- THE CLOCK GATE -----
+-- The most time a single call may ever cash in, so standing still for ten minutes does not bank
+-- ten minutes of motes and dump them in one request. Small on purpose: the player collects by
+-- BEING somewhere, not by waiting somewhere.
+local MAX_BANKED_MOTES = 20
+-- Hard ceiling on motes granted by one request, independent of the clock. Belt to the braces.
+local MAX_GRANT_PER_CALL = 25
+
 -- ----- AUTO-COLLECT (gamepass-gated, clock-driven, deterministic) -----
--- A pass-holder's backpack fills automatically: one mote per AUTO_COLLECT_INTERVAL seconds of
--- elapsed SERVER MONOTONIC time (ctx.clock:mono(), never wall/real time). The grant is a pure
--- function of (elapsed time, current count, capacity) so it is fully deterministic and Tier-1
--- testable through the injected fake clock — no task.wait, no scheduler, no real-time dependency.
 local AUTO_COLLECT_INTERVAL = 1 -- seconds of elapsed mono time per auto-granted mote (pass-holders)
-
--- How often the RUNTIME driver (Roblox-only) ticks every live player. Coarse on purpose: the ticker
--- carries the sub-interval remainder, so a 1s loop never grants ahead of real elapsed mono time.
-local AUTO_COLLECT_DRIVE_INTERVAL = 1
-
--- The gamepass flag key checked on PlayerData.flags. Only players whose flags[AUTO_COLLECT_FLAG]
--- is truthy receive auto-collected motes; everyone else is a strict no-op.
+local AUTO_COLLECT_DRIVE_INTERVAL = 1 -- how often the runtime driver ticks every live player
 local AUTO_COLLECT_FLAG = "gamepass.autoCollect"
 
+-- A backpack holds a COUNT (what the capacity caps, what the HUD bar shows) and a VALUE (the
+-- Stardust those motes are worth, already multiplied by the island they were collected on).
+export type Backpack = { count: number, value: number }
+
+local function emptyBackpack(): Backpack
+	return { count = 0, value = 0 }
+end
+
 -- Pure auto-collect math: given the mono seconds elapsed since the last tick and the current
--- backpack count, returns how many motes to grant (clamped so the backpack never exceeds CAPACITY)
--- and the leftover sub-interval time to carry forward (so fractional progress is never lost and the
--- grant can never run ahead of real elapsed time). Deterministic; no side effects.
+-- backpack count, returns how many motes to grant (clamped so the backpack never exceeds capacity)
+-- and the leftover sub-interval time to carry forward. Deterministic; no side effects.
 local function autoCollectGrant(elapsed: number, count: number, capacity: number): (number, number)
 	if elapsed < AUTO_COLLECT_INTERVAL then
 		return 0, elapsed -- not a full interval yet: grant nothing, carry the whole remainder
 	end
 	local earnedMotes = math.floor(elapsed / AUTO_COLLECT_INTERVAL)
-	local carry = elapsed - earnedMotes * AUTO_COLLECT_INTERVAL -- sub-interval remainder, never lost
+	local carry = elapsed - earnedMotes * AUTO_COLLECT_INTERVAL -- remainder, never lost
 	local room = capacity - count
 	if room < 0 then
 		room = 0
 	end
-	local granted = math.min(earnedMotes, room) -- clamp to capacity (never overfill)
-	return granted, carry
+	return math.min(earnedMotes, room), carry
 end
 
--- Nil-safe seam reader: a feature/stub service may populate ctx.islands / ctx.restock /
--- ctx.monetization later; in the spine they are nil. Every multiplier DEFAULTS TO 1 when its seam
--- (or its method, or the value) is absent, so the consolidated Sell is behavior-identical to the
--- pre-retrofit `count * MOTE_VALUE` whenever no feature seam is wired (the existing tests' world).
+-- Nil-safe seam reader: every multiplier DEFAULTS TO 1 when its seam (or its method, or the value)
+-- is absent, so the consolidated Sell is behavior-identical to the pre-retrofit `count * MOTE_VALUE`
+-- whenever no feature seam is wired (the existing tests' world).
 local function seamMultiplier(value: number?): number
-	if type(value) ~= "number" then
+	if type(value) ~= "number" or value ~= value then
 		return 1
 	end
 	return value
 end
 
--- THE capacity read. Nil-safe in the same spirit as seamMultiplier: when ctx.upgrades is absent
--- (the spine, and every Tier-1 test that wires no shop service) this returns BASE_CAPACITY, which
--- is what the old constant held — so behavior is unchanged wherever the seam is not wired.
---
--- It reads the player's CURRENT persisted snapshot via ctx.data:get, which is a synchronous
--- in-memory session lookup (DataService.get:187-196) — no yield, safe on the hot Collect path.
--- A session that is not loaded yet simply falls back to the base, never errors: a join-race must
--- not make the backpack look infinite.
-local function capacityFor(ctx: any): number
+-- Read one tuning number off the ctx.upgrades seam over a snapshot, with a hard fallback. Shared by
+-- capacity / period / magnet so the defensive shape is written once: a broken or absent seam must
+-- never uncap the backpack, never make the period zero (an infinite grant), and never throw on the
+-- hot Collect path.
+local function tuningFrom(
+	ctx: any,
+	d: any,
+	method: string,
+	fallback: number,
+	minimum: number
+): number
 	local seam = ctx.upgrades
-	if seam == nil or type(seam.capacityFor) ~= "function" then
-		return BASE_CAPACITY
+	if seam == nil or type(seam[method]) ~= "function" or d == nil then
+		return fallback
 	end
-	local got = ctx.data:get(ctx.player)
+	local ok, value = pcall(seam[method], seam, d)
+	if not ok or type(value) ~= "number" or value ~= value or value < minimum then
+		return fallback
+	end
+	return value
+end
+
+local function capacityFrom(ctx: any, d: any): number
+	return math.floor(tuningFrom(ctx, d, "capacityFor", BASE_CAPACITY, 1))
+end
+
+local function collectPeriodFrom(ctx: any, d: any): number
+	-- A minimum of 0.001s: a zero or negative period would make floor(elapsed/period) infinite.
+	return tuningFrom(ctx, d, "collectPeriodFor", BASE_COLLECT_PERIOD, 0.001)
+end
+
+local function magnetRadiusFrom(ctx: any, d: any): number
+	return tuningFrom(ctx, d, "magnetRadiusFor", BASE_MAGNET_RADIUS, 0.1)
+end
+
+-- The player's current snapshot, or nil. ctx.data:get is a synchronous in-memory session lookup
+-- (no yield), so it is safe on the hot Collect path. A session that is not loaded yet returns nil
+-- and every reader falls back to its base — a join race must never look like an infinite backpack.
+local function snapshotOf(ctx: any, player: any): any
+	local got = ctx.data:get(player)
 	if got == nil or not got.ok then
-		return BASE_CAPACITY
+		return nil
 	end
-	local value = seam:capacityFor(got.value)
-	if type(value) ~= "number" or value ~= value or value < 1 then
-		return BASE_CAPACITY -- defensive: a broken seam must never uncap the backpack
+	return got.value
+end
+
+-- WHERE the player is standing, server-derived. nil means "unknown / not on an island".
+local function islandOf(ctx: any, player: any): number?
+	local world = ctx.world
+	if world == nil or type(world.islandOf) ~= "function" then
+		return nil -- no world wired (Lune, focused tests): position is simply not a factor
 	end
-	return math.floor(value)
+	local ok, islandId = pcall(world.islandOf, world, player)
+	if not ok or type(islandId) ~= "number" then
+		return nil
+	end
+	return islandId
+end
+
+-- The per-mote value at the player's CURRENT position. Positional: the island multiplier is read
+-- from the island they are STANDING ON, not the richest one they own. The permanent Prism yield
+-- rides here too, so a prestige purchase is felt on the very next mote rather than at the till.
+local function moteValueFor(ctx: any, d: any, islandId: number?): number
+	local islandMult = 1
+	if ctx.islands ~= nil and d ~= nil then
+		local ok, value = pcall(function()
+			return (ctx.islands :: any):multiplierFor(d, islandId)
+		end)
+		if ok then
+			islandMult = seamMultiplier(value)
+		end
+	end
+	local yieldMult = tuningFrom(ctx, d, "yieldMultiplierFor", 1, 0)
+	return MOTE_VALUE * islandMult * yieldMult
 end
 
 local CollectionService = { name = "CollectionService" }
 
--- Build the Collect action as a closure over `backpacks` (UserId -> mote count).
--- Payload: {} (no client-supplied data — server adds exactly one mote to the CALLER's backpack;
--- mote identity/proximity is a Tier-3 server-authority concern, deliberately NOT trusted here).
--- Rate: collect is frequent (auto-collect) -> a generous window. Returns {count, capacity, full}.
+export type CollectReply = {
+	count: number,
+	capacity: number,
+	full: boolean,
+	-- How many motes THIS call actually granted. 0 is a legitimate, non-error outcome: the player
+	-- asked before the server clock had produced another mote. This field is the delta a test
+	-- asserts on, and the number of motes the client animates into the player.
+	granted: number,
+	-- The Stardust the backpack is currently worth (already island-multiplied at collect time).
+	value: number,
+	islandId: number,
+	-- Server-owned tuning, echoed so the client never holds its own copy of these numbers. The
+	-- magnet radius and the collect period WERE client constants sitting beside the persisted
+	-- levels that were supposed to control them.
+	magnetRadius: number,
+	collectPeriod: number,
+}
+
+-- Build the Collect action as a closure over the shared per-player state.
+-- Payload: {} — no client-supplied data whatsoever. The server decides how many motes the caller
+-- has earned (from its own clock) and what they are worth (from the caller's own position).
 local function makeCollectAction(
-	backpacks: { [number]: number }
-): Net.Action<{}, { count: number, capacity: number, full: boolean }>
+	backpacks: { [number]: Backpack },
+	collectCredit: { [number]: number },
+	lastSeenMono: { [number]: number }
+): Net.Action<{}, CollectReply>
 	return {
 		name = Net.Actions.Collect, -- "collect.gather"
-		-- Frequent action (motes stream in): allow a high per-second rate with burst.
+		-- Defence in depth only. The economy is governed by the clock gate in the handler; this
+		-- bucket exists so a flood costs the server nothing, not so it costs the player nothing.
 		rate = { maxPerWindow = 20, windowSeconds = 1, burst = 30 },
 		validate = function(raw): Result.Result<{}>
-			-- Untrusted payload must be a table; we accept ONLY an empty intent (no client fields
-			-- are trusted — the server decides what a "collect" does to the caller's backpack).
 			if typeof(raw) ~= "table" then
 				return Result.err(Result.Codes.BadPayload)
 			end
 			return Result.ok({})
 		end,
-		handler = function(
-			ctx,
-			_payload
-		): Result.Result<{ count: number, capacity: number, full: boolean }>
+		handler = function(ctx, _payload): Result.Result<CollectReply>
 			local userId = ctx.player.UserId
-			local count = backpacks[userId] or 0
-			-- ONE capacity read, used for BOTH the enforcing check and the number reported to the
-			-- client. Deliberate: the two drifting apart is exactly the class of bug this fix
+			local pack = backpacks[userId] or emptyBackpack()
+			local d = snapshotOf(ctx, ctx.player)
+
+			-- ----- POSITION GATE -----
+			-- A collect must happen SOMEWHERE. When a world is wired and the player is over the
+			-- void (or has no character), there is nothing to collect and the request is refused.
+			-- When no world is wired at all — Lune, focused specs — position is not a factor and
+			-- the island falls back to the starting island's value.
+			local hasWorld = ctx.world ~= nil and type((ctx.world :: any).islandOf) == "function"
+			local islandId = islandOf(ctx, ctx.player)
+			if hasWorld and islandId == nil then
+				return Result.err(Result.Codes.Rejected, "no motes out here — stand on an island")
+			end
+
+			-- ONE read of each tuning value, used for BOTH enforcement and the number reported to
+			-- the client. Deliberate: the two drifting apart is exactly the class of bug this file
 			-- exists to kill (the HUD said "50" while the shop sold levels nothing enforced).
-			local capacity = capacityFor(ctx)
-			if count >= capacity then
-				-- Backpack full: refuse to over-fill. OutOfRange = "no room" (range = capacity).
+			local capacity = capacityFrom(ctx, d)
+			local period = collectPeriodFrom(ctx, d)
+			local magnetRadius = magnetRadiusFrom(ctx, d)
+
+			local function reply(granted: number): Result.Result<CollectReply>
+				return Result.ok({
+					count = pack.count,
+					capacity = capacity,
+					full = pack.count >= capacity,
+					granted = granted,
+					value = pack.value,
+					islandId = islandId or 1,
+					magnetRadius = magnetRadius,
+					collectPeriod = period,
+				})
+			end
+
+			if pack.count >= capacity then
 				return Result.err(Result.Codes.OutOfRange, "backpack full")
 			end
-			count += 1
-			backpacks[userId] = count
-			return Result.ok({ count = count, capacity = capacity, full = count >= capacity })
+
+			-- ----- THE CLOCK GATE (the anti-exploit that replaced "one mote per request") -----
+			-- Credit is accumulated in MOTES, not in seconds. Two reasons, both load-bearing:
+			--   * `collectPeriod` changes the moment a collect-speed level is bought, so seconds
+			--     banked under the old period would silently convert at the new rate.
+			--   * a seconds-based ledger has to compare `now - (now - period)` against `period`,
+			--     and in floating point that lands a hair BELOW it — so the very first collect of
+			--     every session floored to zero and the player's opening sale was empty.
+			local now = ctx.clock:mono()
+			local credit = collectCredit[userId]
+			local seen = lastSeenMono[userId]
+			if credit == nil or seen == nil then
+				-- First collect of the session is instant, so arriving somewhere feels responsive.
+				credit = 1
+				seen = now
+			end
+			local elapsed = math.max(0, now - seen)
+			-- Idling does not bank motes: the ceiling is small, so the player collects by BEING
+			-- somewhere rather than by waiting somewhere.
+			credit = math.min(credit + elapsed / period, MAX_BANKED_MOTES)
+			lastSeenMono[userId] = now
+
+			local allowed = math.floor(credit)
+			if allowed < 1 then
+				-- Nothing has accrued yet. NOT an error: the client polls faster than the server
+				-- mints, by design. `granted = 0` is the honest answer and the delta a test reads.
+				collectCredit[userId] = credit
+				return reply(0)
+			end
+
+			local room = capacity - pack.count
+			local granted = math.min(allowed, room, MAX_GRANT_PER_CALL)
+			-- Spend EXACTLY what was paid out; the fractional remainder carries forward, so a grant
+			-- can never run ahead of real elapsed server time and progress is never silently lost.
+			collectCredit[userId] = credit - granted
+
+			pack.count += granted
+			pack.value += granted * moteValueFor(ctx, d, islandId)
+			backpacks[userId] = pack
+			return reply(granted)
 		end,
 	}
 end
 
--- Build the Sell action as a closure over `backpacks`.
--- Payload: {} (no client-supplied data — sell converts the CALLER's whole backpack).
--- Rate: selling is deliberate (player returns to the refiner) -> a tight window.
--- Returns {sold, earned, balance}. CONCURRENCY-SAFE: see the order-of-operations note below.
+-- Build the Sell action as a closure over the shared backpack table.
+-- Payload: {} — sell converts the CALLER's whole backpack. Returns {sold, earned, balance}.
 local function makeSellAction(
-	backpacks: { [number]: number }
+	backpacks: { [number]: Backpack }
 ): Net.Action<{}, { sold: number, earned: number, balance: number }>
 	return {
 		name = Net.Actions.Sell, -- "collect.sell"
-		-- Deliberate action: a tight bucket so spam-duplicated sells are also rate-shed.
 		rate = { maxPerWindow = 3, windowSeconds = 1 },
 		validate = function(raw): Result.Result<{}>
 			if typeof(raw) ~= "table" then
@@ -169,72 +322,51 @@ local function makeSellAction(
 			_payload
 		): Result.Result<{ sold: number, earned: number, balance: number }>
 			local userId = ctx.player.UserId
-			local count = backpacks[userId] or 0
+			local pack = backpacks[userId] or emptyBackpack()
+			local count = pack.count
 			if count <= 0 then
-				-- Nothing to sell: not an error condition that grants currency. Report empty sale.
 				local current = ctx.data:get(ctx.player)
 				if not current.ok then
 					return current
 				end
-				local balance = (current.value.currencies.Stardust or 0)
-				return Result.ok({ sold = 0, earned = 0, balance = balance })
+				return Result.ok({
+					sold = 0,
+					earned = 0,
+					balance = (current.value.currencies.Stardust or 0),
+				})
 			end
 
-			-- ----- CONCURRENCY-SAFE SELL (the hard part) -----
+			-- ----- CONCURRENCY-SAFE SELL -----
 			-- ctx.data:update can YIELD on the per-player lock queue. If we read the count, called
-			-- update (yield), then zeroed the backpack AFTER, two interleaved/spam-duplicated sells
-			-- would each see the SAME non-zero count and double-grant. So we:
-			--   1. capture the count,
-			--   2. EMPTY the backpack to 0 BEFORE the (possibly yielding) update,
-			-- so any second sell that interleaves now sees an empty backpack and grants nothing.
-			backpacks[userId] = 0
+			-- update (yield), then zeroed the backpack AFTER, two interleaved sells would each see
+			-- the SAME non-zero count and double-grant. So we EMPTY the backpack BEFORE the
+			-- (possibly yielding) update: any second sell that interleaves sees an empty backpack.
+			local bankedValue = pack.value
+			backpacks[userId] = emptyBackpack()
 
-			-- ----- CONSOLIDATED, SERVER-DERIVED EARN FORMULA -----
-			-- earned = baseSellValue * islandMult * restockMult * stardustMult * (1 + rebirths*STEP).
-			-- baseSellValue is the pre-retrofit count*MOTE_VALUE. Every feature multiplier is read
-			-- NIL-SAFELY (default 1) from its seam, and `rebirths` from the LOCK-HELD snapshot (default
-			-- 0), so when no seam is wired AND rebirths == 0 every factor is 1 and earned == the
-			-- original count*MOTE_VALUE EXACTLY (the existing tests' invariant). math.floor keeps earned
-			-- a whole number once fractional multipliers land (a no-op on the all-1 path).
-			local baseSellValue = count * MOTE_VALUE
+			-- ----- THE CONSOLIDATED EARN FORMULA -----
+			-- earned = bankedValue * restockMult * stardustMult * (1 + rebirths*STEP).
+			-- The ISLAND multiplier is NOT here: it was applied per mote at COLLECT time, against
+			-- the island the player was actually standing on. Every remaining factor is read
+			-- NIL-SAFELY (default 1) from its seam, and `rebirths` from the LOCK-HELD snapshot, so
+			-- with no seams wired and rebirths == 0 earned == count*MOTE_VALUE EXACTLY (the
+			-- existing tests' invariant).
 			local now = ctx.clock:unix()
-
-			-- `earned` is captured OUT of the transform but COMPUTED inside it (it depends on `rebirths`
-			-- + the island / restock / stardust multipliers, ALL read from the lock-held `d` INSIDE the
-			-- transform); the transform writes both Stardust and lifetimeStardust.
 			local earned = 0
 
-			-- 3. add the captured earnings INSIDE the lock-held synchronous transform (no yield), and
-			--    accrue the SAME amount into the lifetime counter.
 			local updated = ctx.data:update(ctx.player, function(d)
-				-- ALL THREE feature multipliers are PURE seam reads over the lock-held snapshot `d` (no
-				-- yield), so per-island mote value, today's rich-vein bonus, AND the 2x boost/gamepass
-				-- reach the sale, read off the SAME snapshot the sale commits on (atomic, no read-check-
-				-- write across a yield). Nil-safe: an unwired seam leaves its factor at 1.
-				local islandMult = 1
-				if ctx.islands ~= nil then
-					islandMult = seamMultiplier((ctx.islands :: any):multiplierFor(d))
-				end
 				local restockMult = 1
 				if ctx.restock ~= nil then
 					restockMult = seamMultiplier((ctx.restock :: any):multiplierFor(d, now))
 				end
-				-- stardustMult (2x boost OR 2x gamepass) is read from the lock-held `d` too (v5: the boost
-				-- is persisted), so a boost arming/expiring concurrently is seen atomically with the sale.
 				local stardustMult = 1
 				if ctx.monetization ~= nil then
 					stardustMult =
 						seamMultiplier((ctx.monetization :: any):stardustMultiplierFor(d, now))
 				end
-				local rebirths = (d.rebirths or 0)
-				local rebirthMult = 1 + rebirths * REBIRTH_STEP
-				earned = math.floor(
-					baseSellValue * islandMult * restockMult * stardustMult * rebirthMult
-				)
+				local rebirthMult = 1 + (d.rebirths or 0) * REBIRTH_STEP
+				earned = math.floor(bankedValue * restockMult * stardustMult * rebirthMult)
 				d.currencies.Stardust = (d.currencies.Stardust or 0) + earned
-				-- Accrue the SAME amount into the lifetime counter. NIL-SAFE on `d.stats`: a real
-				-- PlayerData always has stats (default()/migrate seed it), but a minimal test fake may
-				-- hand a snapshot without one — guard so the lifetime accrual never crashes the grant.
 				if d.stats ~= nil then
 					d.stats.lifetimeStardust = (d.stats.lifetimeStardust or 0) + earned
 				end
@@ -242,23 +374,28 @@ local function makeSellAction(
 			end)
 
 			if not updated.ok then
-				-- 4. The grant FAILED: restore the captured count so the player keeps their motes.
-				-- (Add back rather than overwrite, in case other motes auto-collected during the
-				-- yield window — those must not be lost either.) CLAMP to the player's CURRENT
-				-- capacity: if the backpack refilled during the yield, the restore must not push it
-				-- OVER the cap (that would let the player later sell more than a backpack can hold).
-				-- Overflow motes past capacity are dropped — the holding-cap invariant wins over
-				-- never-lose-a-mote. Re-read the seam here rather than reusing a value captured
-				-- before the yield: a BuyUpgrade could have landed in between, and clamping to the
-				-- stale smaller number would destroy motes the player now has room for.
-				backpacks[userId] = math.min(capacityFor(ctx), (backpacks[userId] or 0) + count)
+				-- The grant FAILED: restore the captured motes so the player keeps them. Add back
+				-- rather than overwrite (motes may have auto-collected during the yield), and clamp
+				-- the COUNT to the player's CURRENT capacity — re-read here rather than reusing a
+				-- pre-yield value, because a BuyUpgrade could have landed in between and clamping
+				-- to the stale smaller number would destroy motes the player now has room for.
+				local capacity = capacityFrom(ctx, snapshotOf(ctx, ctx.player))
+				local current = backpacks[userId] or emptyBackpack()
+				local restoredCount = math.min(capacity, current.count + count)
+				-- Restore value in proportion to the motes that actually fit, so a clamp can never
+				-- leave the player holding 10 motes worth 50 motes of Stardust.
+				local keptFraction = if count > 0
+					then (restoredCount - current.count) / count
+					else 0
+				backpacks[userId] = {
+					count = restoredCount,
+					value = current.value + bankedValue * math.clamp(keptFraction, 0, 1),
+				}
 				return updated
 			end
 
 			local balance = updated.value.currencies.Stardust
 
-			-- Emit currency_earned AFTER a successful grant. NIL-SAFE: ctx.analytics is nil in the spine
-			-- (and in the existing tests), so this is a no-op there; a wired AnalyticsService records it.
 			if ctx.analytics ~= nil then
 				(ctx.analytics :: any):emit("currency_earned", {
 					userId = userId,
@@ -273,97 +410,92 @@ local function makeSellAction(
 	}
 end
 
--- Build the auto-collect ticker as a closure over the SAME backpack table the Collect/Sell actions
--- share. `tick(ctx, player)` is the deterministic, clock-driven, gamepass-gated grant: it reads the
--- player's PERSISTED flags through ctx.data:get, and only if flags[AUTO_COLLECT_FLAG] is truthy does
--- it grant accrued motes (one per AUTO_COLLECT_INTERVAL of elapsed mono time, clamped to capacity).
--- It is concurrency-safe with Collect/Sell: it only ever ADDS to the in-memory backpack and clamps
--- to CAPACITY (same invariant the Collect action enforces), and it carries the sub-interval remainder
--- so it can never grant ahead of real elapsed time. Returns the number of motes granted (0 for
--- non-holders / no-elapsed), so a test can assert the grant deterministically via the fake clock.
-local function makeAutoCollectTicker(backpacks: { [number]: number })
-	local lastMono: { [number]: number } = {} -- per-player last tick time (mono seconds)
+-- Build the auto-collect ticker as a closure over the SAME backpack table the actions share.
+-- Deterministic, clock-driven, gamepass-gated. Returns the number of motes granted so a test can
+-- assert the grant through the fake clock.
+local function makeAutoCollectTicker(backpacks: { [number]: Backpack })
+	local lastMono: { [number]: number } = {}
 	return function(ctx: any, player: any): number
 		local userId = player.UserId
 		local now = ctx.clock:mono()
 		local previous = lastMono[userId]
 		if previous == nil then
-			-- First observation for this player: anchor the clock, grant nothing (no elapsed window).
-			lastMono[userId] = now
+			lastMono[userId] = now -- anchor the clock; no elapsed window yet
 			return 0
 		end
 
-		-- Gamepass gate: only pass-holders auto-collect. Read the PERSISTED flag nil-safely; a player
-		-- with no loaded data or no flag is a strict no-op (but we still advance the anchor so a later
-		-- grant after the pass is bought measures only post-purchase elapsed time).
-		local hasPass = false
-		local got = ctx.data:get(player)
-		if got.ok and got.value.flags ~= nil and got.value.flags[AUTO_COLLECT_FLAG] then
-			hasPass = true
-		end
-
+		local d = snapshotOf(ctx, player)
+		local hasPass = d ~= nil and d.flags ~= nil and d.flags[AUTO_COLLECT_FLAG] == true
 		local elapsed = now - previous
 		if not hasPass then
 			lastMono[userId] = now
 			return 0
 		end
 
-		-- Capacity for THIS ticked player. Deliberately not capacityFor(ctx): the ticker walks every
-		-- live player, so ctx.player is not necessarily `player` — using the helper here would clamp
-		-- everyone's auto-collect to one player's backpack. `got` is already this player's snapshot.
-		local capacity = BASE_CAPACITY
-		local upgradesSeam = ctx.upgrades
-		if got.ok and upgradesSeam ~= nil and type(upgradesSeam.capacityFor) == "function" then
-			local value = upgradesSeam:capacityFor(got.value)
-			if type(value) == "number" and value == value and value >= 1 then
-				capacity = math.floor(value)
-			end
-		end
-
-		local count = backpacks[userId] or 0
-		local granted, carry = autoCollectGrant(elapsed, count, capacity)
-		-- Advance the anchor by the CONSUMED time only (now - carry), so the unspent sub-interval
-		-- remainder is preserved for the next tick — fractional progress is never silently dropped.
-		lastMono[userId] = now - carry
+		-- Capacity for THIS ticked player. Deliberately not the ctx.player helper: the ticker walks
+		-- every live player, so ctx.player is not necessarily `player`.
+		local capacity = capacityFrom(ctx, d)
+		local pack = backpacks[userId] or emptyBackpack()
+		local granted, carry = autoCollectGrant(elapsed, pack.count, capacity)
+		lastMono[userId] = now - carry -- advance by CONSUMED time only; remainder never dropped
 		if granted > 0 then
-			backpacks[userId] = count + granted
+			pack.count += granted
+			pack.value += granted * moteValueFor(ctx, d, islandOf(ctx, player))
+			backpacks[userId] = pack
 		end
 		return granted
 	end
 end
 
--- Start: construct the actions as closures over a single backpack table, then register each on
--- the gateway. One table instance shared by all three (Collect/Sell/auto-collect) => Collect fills
--- what Sell empties, and the auto-collect ticker grants into the same backpack for pass-holders.
+-- Start: construct the actions as closures over one shared backpack table, then register each.
 function CollectionService:Start(context: any): ()
-	local backpacks: { [number]: number } = {}
-	context.net:register(makeCollectAction(backpacks))
+	local backpacks: { [number]: Backpack } = {}
+	-- Per-player collect ledger: `collectCredit` is unspent motes (fractional), `lastSeenMono` is
+	-- the server-mono time the credit was last accrued to. Both are cleared on leave.
+	local collectCredit: { [number]: number } = {}
+	local lastSeenMono: { [number]: number } = {}
+	context.net:register(makeCollectAction(backpacks, collectCredit, lastSeenMono))
 	context.net:register(makeSellAction(backpacks))
-	-- Expose the deterministic, clock-driven auto-collect ticker (Tier-1 tested directly via the fake
-	-- clock — no task.wait inside it). The RUNTIME driver below feeds it the live players.
 	self.tickAutoCollect = makeAutoCollectTicker(backpacks)
 
-	-- ----- RUNTIME-ONLY auto-collect driver (Roblox-only; a strict no-op under Lune) -----
-	-- `game`/`task` are real globals on the Roblox server but NIL under Lune, so the whole driver sits
-	-- behind the established guard (the LeaderboardService/DataService pattern): under Lune, Start has
-	-- ALREADY registered the actions + set the ticker above, then returns here — so the existing tests
-	-- (which drive tickAutoCollect directly) are untouched. Only at runtime do we spin the loop that
-	-- ticks every live player, granting auto-collected motes into the SAME backpack Collect/Sell share.
+	-- Exposed so a test (and the T2.5 lane) can read the authoritative backpack without a Collect
+	-- round trip, and so the session-cleanup below has one named place to reach.
+	self.backpackOf = function(_self: any, userId: number): Backpack
+		return backpacks[userId] or emptyBackpack()
+	end
+	self.forgetPlayer = function(_self: any, userId: number): ()
+		backpacks[userId] = nil
+		collectCredit[userId] = nil
+		lastSeenMono[userId] = nil
+	end
+
+	-- ----- RUNTIME-ONLY (Roblox-only; a strict no-op under Lune) -----
 	local realGame: any = game
 	local realTask: any = task
 	if realGame == nil or realTask == nil or type(realTask.spawn) ~= "function" then
 		return
 	end
 	local Players = realGame:GetService("Players")
-	-- The narrow ctx the ticker needs: the injected SERVER clock (mono) + the per-player data accessor.
-	local tickCtx = { clock = context.clock, data = context.data }
+
+	-- SESSION LIFECYCLE. These tables used to grow one entry per unique visitor for the server's
+	-- lifetime, and a rejoining player inherited a server-side backpack their HUD knew nothing
+	-- about — the HUD read 0 over a server holding 50, which then latched "backpack full"
+	-- immediately. Clearing on leave makes the in-memory state match what the player is shown.
+	Players.PlayerRemoving:Connect(function(player: any): ()
+		self:forgetPlayer(player.UserId)
+	end)
+
+	-- Pass the LIVE context, not a snapshot of its seams. CollectionService starts BEFORE
+	-- UpgradesShopService and WorldService, so a copied table would have captured
+	-- `upgrades = nil, islands = nil, world = nil` forever — the auto-collect a player paid real
+	-- money for would silently ignore their backpack level and their island. The per-request
+	-- ActionContext already reads the seams live; the ticker must do the same.
 	realTask.spawn(function(): ()
 		while true do
 			for _, player in Players:GetPlayers() do
-				-- Isolate each tick: a throw for ONE player must not unwind the loop and silently kill
-				-- auto-collect server-wide. (The ticker is engineered throw-free — get returns a Result,
-				-- the math is pure — but defend in depth, mirroring Net.dispatch's per-handler pcall.)
-				pcall(self.tickAutoCollect, tickCtx, player)
+				-- Isolate each tick: a throw for ONE player must not unwind the loop and silently
+				-- kill auto-collect server-wide.
+				pcall(self.tickAutoCollect, context, player)
 			end
 			realTask.wait(AUTO_COLLECT_DRIVE_INTERVAL)
 		end

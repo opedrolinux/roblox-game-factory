@@ -245,7 +245,7 @@ describe(
 	"Rebirth — the full prestige reset (one atomic transform), all operands persisted",
 	function()
 		it(
-			"on success: Stardust zeroed, upgrades -> {}, island flags cleared, rebirths+1, Prisms granted",
+			"on success: Stardust zeroed, run upgrades cleared, islands KEPT, rebirths+1, Prisms granted",
 			function()
 				local harness, data, player = setup()
 				setStardust(data, player, THRESHOLD)
@@ -269,9 +269,12 @@ describe(
 				expect(d.currencies.Stardust):toBe(0)
 				-- 2. upgrades cleared to an EMPTY table (no bought levels survive).
 				expect(next(d.upgrades)):toBe(nil)
-				-- 3. island flags cleared...
-				expect(d.flags["island.2"]):toBe(nil)
-				expect(d.flags["island.3"]):toBe(nil)
+				-- 3. ISLAND FLAGS SURVIVE. Clearing them is what made prestige a PAY CUT: it
+				--    deleted a multiplicative bonus worth up to 16x and paid back an additive
+				--    +0.1x, so rebirthing cut earnings by up to 93%. Islands are earned
+				--    progression; the run currency and the run upgrades are what a rebirth spends.
+				expect(d.flags["island.2"]):toBe(true)
+				expect(d.flags["island.3"]):toBe(true)
 				-- 4. rebirths incremented.
 				expect(d.rebirths):toBe(1)
 				-- 5. Prisms granted (persisted == returned).
@@ -285,14 +288,14 @@ describe(
 			setStardust(data, player, THRESHOLD)
 			mutate(data, player, function(d)
 				d.flags = {
-					["island.2"] = true, -- will be cleared
+					["island.2"] = true, -- earned progression: must survive
 					["gamepass.vipIsland"] = true, -- must survive
 					["gamepass.x2cash"] = true, -- must survive
 				}
 			end)
 			expect(harness.invoke(REBIRTH, player, {})):toBeOk()
 			local d = snapshot(data, player)
-			expect(d.flags["island.2"]):toBe(nil) -- island flag gone
+			expect(d.flags["island.2"]):toBe(true) -- islands are kept
 			expect(d.flags["gamepass.vipIsland"]):toBe(true) -- purchase persists
 			expect(d.flags["gamepass.x2cash"]):toBe(true) -- purchase persists
 		end)
@@ -315,10 +318,10 @@ describe(
 		)
 
 		it(
-			"a non-island, non-gamepass flag is NOT cleared (only flags['island.*'] reset)",
+			"NO flag is cleared by a rebirth — island, gamepass and bookkeeping alike survive",
 			function()
-				-- The spec resets ONLY the island flags; any other flag (here a non-island marker) must survive
-				-- just like gamepass flags. This guards an over-broad reset that clears the whole flags map.
+				-- A rebirth spends the run CURRENCY and the run UPGRADES. It touches no flag at all,
+				-- so an over-broad reset that wipes the flags map is caught here.
 				local harness, data, player = setup()
 				setStardust(data, player, THRESHOLD)
 				mutate(data, player, function(d)
@@ -329,7 +332,7 @@ describe(
 				end)
 				expect(harness.invoke(REBIRTH, player, {})):toBeOk()
 				local d = snapshot(data, player)
-				expect(d.flags["island.2"]):toBe(nil)
+				expect(d.flags["island.2"]):toBe(true)
 				expect(d.flags["tutorial.done"]):toBe(true)
 			end
 		)
@@ -343,12 +346,20 @@ describe(
 			"rebirths increments by exactly 1 each time (1 -> 2 -> 3); count is never reset",
 			function()
 				local harness, data, player = setup()
+				-- The threshold RISES with each rebirth. It used to be a flat 1000 forever while the
+				-- count was uncapped, so each prestige was FASTER than the last and rebirth-spam was
+				-- the optimal play. The reply names the next threshold, so this test tracks the
+				-- curve through the API rather than copying it.
+				local cost = THRESHOLD
 				for expected = 1, 3 do
-					setStardust(data, player, THRESHOLD) -- re-earn the threshold each run
+					setStardust(data, player, cost) -- re-earn the threshold each run
 					local r = harness.invoke(REBIRTH, player, {})
 					expect(r):toBeOk()
 					expect((r :: any).value.rebirths):toBe(expected)
 					expect(rebirthsOf(data, player)):toBe(expected)
+					expect((r :: any).value.threshold):toBe(cost)
+					expect((r :: any).value.nextThreshold > cost):toBe(true) -- strictly harder
+					cost = (r :: any).value.nextThreshold
 				end
 			end
 		)
@@ -358,9 +369,13 @@ describe(
 			function()
 				local harness, data, player = setup()
 				local running = 0
+				local cost = THRESHOLD
 				for _ = 1, 4 do
-					setStardust(data, player, THRESHOLD)
+					setStardust(data, player, cost)
 					local r = harness.invoke(REBIRTH, player, {})
+					if r.ok then
+						cost = (r :: any).value.nextThreshold
+					end
 					expect(r):toBeOk()
 					local earned = (r :: any).value.prismsEarned
 					running += earned
@@ -405,7 +420,7 @@ describe("Rebirth — derived multiplier (returned for the HUD, NEVER persisted)
 		local m1 = (r1 :: any).value.multiplier
 		expect(m1 > 1):toBe(true) -- one rebirth already lifts the multiplier above the base 1
 
-		setStardust(data, player, THRESHOLD)
+		setStardust(data, player, (r1 :: any).value.nextThreshold)
 		local r2 = harness.invoke(REBIRTH, player, {})
 		expect(r2):toBeOk()
 		local m2 = (r2 :: any).value.multiplier
