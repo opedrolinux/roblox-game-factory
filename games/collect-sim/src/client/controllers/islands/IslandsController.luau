@@ -66,14 +66,18 @@ function IslandsController:Start(context: any): ()
 				-- by kind+id covers every matching pad and is a no-op when none exist yet — and the
 				-- data push re-runs this, so a late-replicating pad is picked up on the next tick.
 				Pads.setLabelAll("unlock", padText(island), island.id)
-				-- Once unlocked, the pad has nothing left to sell: dim its prompt so it stops
-				-- inviting a press that can only ever be refused.
-				if island.unlocked then
-					for _, pad in Pads.findAll("unlock", island.id) do
-						local prompt = pad:FindFirstChildWhichIsA("ProximityPrompt")
-						if prompt ~= nil then
-							prompt.Enabled = false
-						end
+				for _, pad in Pads.findAll("unlock", island.id) do
+					local prompt = pad:FindFirstChildWhichIsA("ProximityPrompt")
+					if prompt ~= nil then
+						-- The PROMPT carries the price too, not just the billboard above it. A live
+						-- screenshot showed the thing the player actually presses reading
+						-- "[E] Locked island / Unlock" — no cost, no reward — while the price sat on
+						-- a separate floating label they may never have looked at.
+						prompt.ObjectText = `Island {island.id}  ·  x{island.multiplier} per mote`
+						prompt.ActionText = `Unlock — ★ {island.cost}`
+						-- Once unlocked the pad has nothing left to sell, so stop inviting a press
+						-- that can only ever be refused.
+						prompt.Enabled = not island.unlocked
 					end
 				end
 			end

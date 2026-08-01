@@ -20,22 +20,32 @@ local Ambience = {}
 -- The named look, kept as data so a Tier-1 spec can assert the CONTRACT (a non-default ClockTime,
 -- an Atmosphere, at least one post-effect) without an engine, and so the numbers are reviewable in
 -- one place rather than scattered through assignment statements.
+-- TUNED AGAINST A LIVE STUDIO RUN, not guessed. The first pass used density 0.36 with haze 2, and
+-- the screenshot showed the result plainly: the whole frame washed to flat blue and the four
+-- outer islands were completely invisible from the starting island. In a game whose entire pull is
+-- "there is a richer island further out", hiding the islands is the worst possible atmosphere.
+-- Thin air, a darker tint and a much nearer fog cutoff give the starfield back and let the neon
+-- island rims read as distant landmarks.
 Ambience.SETTINGS = {
 	clockTime = 0, -- midnight: the sun is down, so the only light is what we place
-	brightness = 1.35,
-	exposureCompensation = 0.25,
-	ambient = { 30, 26, 56 }, -- shadowed side: cold violet, never black (parts stay readable)
-	outdoorAmbient = { 38, 32, 66 },
-	fogEnd = 900,
-	atmosphere = { density = 0.36, haze = 2, glare = 0.4, offset = 0.2 },
-	bloom = { intensity = 0.9, size = 26, threshold = 0.85 },
+	brightness = 1.15,
+	exposureCompensation = 0.15,
+	ambient = { 26, 22, 48 }, -- shadowed side: cold violet, never black (parts stay readable)
+	outdoorAmbient = { 32, 28, 58 },
+	-- Fog is left effectively off: the scene is deep space, and anything that tints the distance
+	-- also tints the starfield.
+	fogEnd = 100000,
+	bloom = { intensity = 1.1, size = 30, threshold = 0.8 },
 	colorCorrection = {
 		brightness = 0.02,
 		contrast = 0.14,
 		saturation = 0.18,
 		tint = { 226, 224, 255 },
 	},
-	starCount = 5000,
+	-- Kept as a documented FINDING, not as a setting: a Sky with blank skybox textures renders no
+	-- stars at all whatever this is set to. The starfield comes from Roblox's built-in night sky,
+	-- which only appears when there is NO Sky instance in Lighting.
+	starCount = 0,
 }
 
 local function rgb(triple: { number }): any
@@ -77,8 +87,23 @@ function Ambience.apply(): boolean
 		Lighting.GlobalShadows = true
 		Lighting.EnvironmentDiffuseScale = 0.6
 		Lighting.EnvironmentSpecularScale = 0.9
+		Lighting.FogStart = settings.fogEnd - 1
 		Lighting.FogEnd = settings.fogEnd
-		Lighting.FogColor = Color3.fromRGB(14, 12, 28)
+		Lighting.FogColor = Color3.fromRGB(6, 5, 14)
+	end)
+
+	-- Neutralise post-effects this module did not author. A place template (or, here, a leftover
+	-- from another project sharing the file) can ship a SunRaysEffect and a DepthOfFieldEffect that
+	-- silently fight the intended look — a live run had both, and DepthOfField blurs exactly the
+	-- distant islands the game wants the player to notice. Disabled, never destroyed: nothing of
+	-- anyone's is lost, and the look becomes deterministic.
+	pcall(function()
+		for _, child in Lighting:GetChildren() do
+			local isOurs = string.sub(child.Name, 1, 6) == "Cosmic"
+			if not isOurs and child:IsA("PostEffect") then
+				child.Enabled = false
+			end
+		end
 	end)
 	if not okCore then
 		applied = false
@@ -87,35 +112,27 @@ function Ambience.apply(): boolean
 		Lighting.Technology = Enum.Technology.ShadowMap
 	end)
 
-	-- A code-built starfield: a Sky with EMPTY texture ids renders as deep space, and StarCount
-	-- fills it. Zero assets, and it is what makes the islands read as floating rather than sitting.
+	-- ----- NO Sky, NO Atmosphere. BOTH DELETED, AND THAT IS THE WHOLE TRICK -----
+	-- Three screenshots were needed to learn this, and none of it was guessable:
+	--
+	--  * A `Sky` with EMPTY skybox texture ids does NOT render as deep space. It renders solid
+	--    black with NO stars — `StarCount` never appears, because the engine only draws stars over
+	--    its own built-in sky. So the hand-built "starfield" produced a void with nothing in it.
+	--  * An `Atmosphere` paints a lit haze BELOW the horizon. At density 0.36 it washed the entire
+	--    frame flat blue; at 0.12 and then 0.04 it still filled three quarters of the screen with a
+	--    blue floor under islands that are supposed to be floating in space.
+	--  * Removing BOTH, and leaving `ClockTime = 0`, hands the scene to Roblox's built-in night sky
+	--    — which is a full starfield in every direction, for free, with no asset.
+	--
+	-- So the correct configuration is a DELETION, and the version with more code in it looked worse.
 	local okSky = pcall(function()
-		local sky: any = replaceChild(Lighting, "Sky", "CosmicSky")
-		sky.SkyboxBk = ""
-		sky.SkyboxDn = ""
-		sky.SkyboxFt = ""
-		sky.SkyboxLf = ""
-		sky.SkyboxRt = ""
-		sky.SkyboxUp = ""
-		sky.StarCount = settings.starCount
-		sky.CelestialBodiesShown = false
-		sky.MoonAngularSize = 0
-		sky.SunAngularSize = 0
+		for _, child in Lighting:GetChildren() do
+			if child:IsA("Sky") or child:IsA("Atmosphere") then
+				child:Destroy()
+			end
+		end
 	end)
 	if not okSky then
-		applied = false
-	end
-
-	local okAtmosphere = pcall(function()
-		local atmosphere: any = replaceChild(Lighting, "Atmosphere", "CosmicAtmosphere")
-		atmosphere.Density = settings.atmosphere.density
-		atmosphere.Offset = settings.atmosphere.offset
-		atmosphere.Color = Color3.fromRGB(90, 84, 140)
-		atmosphere.Decay = Color3.fromRGB(46, 40, 88)
-		atmosphere.Glare = settings.atmosphere.glare
-		atmosphere.Haze = settings.atmosphere.haze
-	end)
-	if not okAtmosphere then
 		applied = false
 	end
 

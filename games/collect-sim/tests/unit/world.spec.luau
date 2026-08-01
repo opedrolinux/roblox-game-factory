@@ -316,16 +316,34 @@ describe("World layout — it degrades safely", function()
 end)
 
 describe("Ambience — the game is lit deliberately, not left on Roblox's default noon", function()
-	it("declares a non-default ClockTime, an atmosphere, and post-processing", function()
+	it("declares a night ClockTime and post-processing", function()
 		-- `grep -rn "Lighting\|Atmosphere\|Sky\|Bloom" src/` used to return ZERO hits across the
 		-- whole codebase. Under the default midday sky the Neon motes and their PointLights are
 		-- perceptually invisible: the one glowing thing in the game did not glow.
+		--
+		-- ClockTime is the load-bearing setting, and the starfield comes from Roblox's OWN night
+		-- sky — which only renders when Lighting holds no Sky and no Atmosphere. That was measured
+		-- from screenshots, not reasoned: a blank-texture Sky draws no stars, and an Atmosphere at
+		-- any density paints a lit blue floor under the islands. See Ambience.apply.
 		local settings = Ambience.SETTINGS
 		expect(settings.clockTime ~= 14):toBe(true) -- Roblox's default
-		expect(settings.atmosphere.density > 0):toBe(true)
+		expect(settings.clockTime <= 5 or settings.clockTime >= 19):toBe(true) -- actually night
 		expect(settings.bloom.intensity > 0):toBe(true)
-		expect(settings.starCount > 0):toBe(true)
 		expect(settings.fogEnd > 0):toBe(true)
+	end)
+
+	it("apply() REMOVES any Sky or Atmosphere rather than adding one", function()
+		-- The correct configuration here is a deletion, and the version with more code in it looked
+		-- worse. Asserted on the source so the finding cannot be quietly undone by a later edit.
+		local fs = require("@lune/fs")
+		local path = "src/server/services/world/Ambience.luau"
+		if not fs.isFile(path) then
+			path = "games/collect-sim/" .. path
+		end
+		local source = fs.readFile(path)
+		expect(string.find(source, 'child:IsA("Sky")', 1, true) ~= nil):toBe(true)
+		expect(string.find(source, 'child:IsA("Atmosphere")', 1, true) ~= nil):toBe(true)
+		expect(string.find(source, "child:Destroy()", 1, true) ~= nil):toBe(true)
 	end)
 
 	it("apply() is a safe no-op with no engine (it never throws under Lune)", function()

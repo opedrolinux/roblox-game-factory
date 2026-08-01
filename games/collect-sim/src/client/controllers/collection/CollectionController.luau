@@ -151,7 +151,10 @@ function CollectionController:Start(context: any): ()
 	local backpackFull = false
 	local backpackCount = 0
 	local backpackValue = 0
-	local currentIsland = 1
+	-- nil, not 1: the readout is written on the FIRST reply as well as on every change. Seeded to 1
+	-- it matched the starting island, so the "Island N · xM per mote" line never appeared at all
+	-- until the player crossed a bridge — which was the one thing they could not do yet.
+	local currentIsland: number? = nil
 
 	local function applyTuning(source: any): ()
 		if source == nil then
@@ -401,10 +404,20 @@ function CollectionController:Start(context: any): ()
 				scattered = true
 			end
 
-			-- Recycle motes the player has walked away from, so the cloud follows without per-mote
-			-- bookkeeping.
+			-- Recycle motes the player has walked away from, AND retry any mote that is currently
+			-- parked because no ground was found for it.
+			--
+			-- That second clause is load-bearing and was missing. The world replicates to the client
+			-- a moment after the controller starts, so the first placement pass found no island
+			-- geometry and parked all 22 motes invisible. The recycle test only re-placed motes that
+			-- had drifted FAR from the player — and a parked mote sits at the origin, right next to
+			-- them — so nothing ever re-placed it. Measured in a live session: `22 total, 0 visible,
+			-- 22 parked`. The player stood on the starting island with no motes at all, which is to
+			-- say: with no game.
 			for _, mote in motes do
-				if not busy[mote] and (mote.Position - origin).Magnitude > SPAWN_RADIUS * 1.9 then
+				local parked = mote.Transparency >= 1
+				local strayed = (mote.Position - origin).Magnitude > SPAWN_RADIUS * 1.9
+				if not busy[mote] and (parked or strayed) then
 					place(mote, origin)
 				end
 			end
@@ -443,7 +456,7 @@ function CollectionController:Start(context: any): ()
 							glow.Color = tint
 						end
 					end
-					Hud.setIsland(currentIsland)
+					Hud.setIsland(value.islandId, value.islandMultiplier)
 				end
 				Hud.setBackpack(value.count, value.capacity)
 

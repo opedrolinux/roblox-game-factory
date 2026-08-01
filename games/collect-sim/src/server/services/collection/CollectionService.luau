@@ -194,6 +194,9 @@ export type CollectReply = {
 	-- The Stardust the backpack is currently worth (already island-multiplied at collect time).
 	value: number,
 	islandId: number,
+	-- What a mote is worth HERE, versus the starting island. The HUD shows it, because "richer
+	-- motes further out" is a spec promise the player had no way to observe.
+	islandMultiplier: number,
 	-- Server-owned tuning, echoed so the client never holds its own copy of these numbers. The
 	-- magnet radius and the collect period WERE client constants sitting beside the persisted
 	-- levels that were supposed to control them.
@@ -243,6 +246,8 @@ local function makeCollectAction(
 			local period = collectPeriodFrom(ctx, d)
 			local magnetRadius = magnetRadiusFrom(ctx, d)
 
+			local islandMultiplier = moteValueFor(ctx, d, islandId) / MOTE_VALUE
+
 			local function reply(granted: number): Result.Result<CollectReply>
 				return Result.ok({
 					count = pack.count,
@@ -251,6 +256,7 @@ local function makeCollectAction(
 					granted = granted,
 					value = pack.value,
 					islandId = islandId or 1,
+					islandMultiplier = islandMultiplier,
 					magnetRadius = magnetRadius,
 					collectPeriod = period,
 				})

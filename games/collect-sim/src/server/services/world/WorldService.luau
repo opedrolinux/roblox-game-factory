@@ -52,8 +52,10 @@ local PAD_W = 8 -- pad X/Z size
 local PAD_H = 1 -- pad thickness
 local PROMPT_DISTANCE = 12 -- ProximityPrompt activation radius (studs)
 local RIM_H = 0.6 -- neon rim thickness around each platform edge
-local VOID_Y = -220 -- decorative void plane, far below (non-colliding: falls are real)
-local FALL_DESTROY_Y = -180 -- character reset height; above the void plane so a fall always resets
+-- Character reset height. Measured in a live run: `Workspace.FallenPartsDestroyHeight` did NOT take
+-- the assignment (it stayed at Studio's -500), so this is documentation of the height a fall
+-- actually resets at rather than a value the game relies on setting. Either way a fall is bounded.
+local FALL_DESTROY_Y = -500
 
 -- A deep-space ramp with DARK bases so the Neon accents actually read as light. The old palette was
 -- five desaturated mid-tones on a grey slab under Roblox's default noon, which is why the one
@@ -415,10 +417,15 @@ local function makePad(spec: PadPlan, parent: any): any
 
 	local billboard: any = Instance.new("BillboardGui")
 	billboard.Name = "Label"
-	billboard.Size = UDim2.new(0, 240, 0, 62)
-	billboard.StudsOffset = Vector3.new(0, 3.4, 0)
-	billboard.AlwaysOnTop = true
-	billboard.MaxDistance = 110
+	billboard.Size = UDim2.new(0, 190, 0, 46)
+	billboard.StudsOffset = Vector3.new(0, 3.2, 0)
+	-- NOT AlwaysOnTop, and a SHORT draw distance. At 110 studs with AlwaysOnTop the labels from
+	-- three islands away drew over the ones at the player's feet: a live screenshot showed
+	-- "Refiner — trade motes for Stardust" printed twice, overlapping "Upgrades Shop", on top of the
+	-- rebirth altar's text. Pads are read from a few steps away, so they only need to be legible
+	-- from a few steps away, and letting them z-sort against the world stops the far ones winning.
+	billboard.AlwaysOnTop = false
+	billboard.MaxDistance = 42
 	billboard.Parent = pad
 
 	local label: any = Instance.new("TextLabel")
@@ -560,11 +567,24 @@ function WorldService:Start(context: any): ()
 		)
 	end
 
-	-- A fall is now a real fall (there is no baseplate). Reset the character above the decorative
-	-- void plane so falling costs a respawn, not an eternity.
+	-- A fall is now a real fall (this world builds no baseplate). Reset the character above the
+	-- decorative void plane so falling costs a respawn, not an eternity.
 	pcall(function()
 		Workspace.FallenPartsDestroyHeight = FALL_DESTROY_Y
 	end)
+
+	-- Roblox's default place template ships a 512x512 Baseplate and a SpawnLocation at the origin.
+	-- Left in place they put a grey floor under the entire archipelago — every island stops reading
+	-- as floating, the void the barriers rely on is gone, and a player can wander the flats instead
+	-- of the islands. The world is code-built and self-contained, so it clears the template's
+	-- furniture rather than depending on someone having deleted it by hand.
+	for _, existing in Workspace:GetChildren() do
+		local isTemplateFloor = existing:IsA("BasePart") and existing.Name == "Baseplate"
+		local isTemplateSpawn = existing:IsA("SpawnLocation") and existing.Parent == Workspace
+		if isTemplateFloor or isTemplateSpawn then
+			existing:Destroy()
+		end
+	end
 
 	local world: any = Instance.new("Folder")
 	world.Name = "World"
@@ -579,19 +599,11 @@ function WorldService:Start(context: any): ()
 	barriersFolder.Name = "Barriers"
 	barriersFolder.Parent = world
 
-	-- The void: a huge, DARK, non-colliding plane far below. It gives the sky-islands something to
-	-- read against instead of an empty skybox, and it cannot be landed on.
-	local void: any = makePart(
-		"Void",
-		Vector3.new(4000, 4, 4000),
-		Vector3.new(centerXFor(#islandIds) / 2, VOID_Y, 0),
-		{ 0.02, 0.02, 0.05 },
-		world
-	)
-	void.CanCollide = false
-	void.CanQuery = false
-	void.CanTouch = false
-	void.Material = Enum.Material.Slate
+	-- THERE IS NO VOID PLANE. An earlier pass put a 4000x4000 dark slab far below "so the islands
+	-- have something to read against"; the live screenshot showed it filling a third of the frame
+	-- as a flat blue wedge that flattened the whole composition. The starfield already IS the void,
+	-- and a fall is already bounded by FallenPartsDestroyHeight. Deleting it was strictly better,
+	-- which is the sort of thing only looking at the thing can tell you.
 
 	for _, platform in plan.platforms do
 		local part: any = makePart(
@@ -696,34 +708,72 @@ function WorldService:Start(context: any): ()
 		warn(`[WorldService] ambience failed to apply: {tostring(ambienceErr)}`)
 	end
 
-	-- Per-player access: assign the character's collision group from the player's unlock state on
-	-- every spawn. IslandsService re-applies it on a successful unlock through the seam.
+	-- ----- PER-PLAYER ACCESS, AND THE JOIN RACE IT HAS TO SURVIVE -----
+	-- A character spawns BEFORE its session finishes loading. Computing the access level from an
+	-- unloaded session yields 0 — "you own nothing" — and, because nothing re-applied it, a player
+	-- who had bought island 2 stayed walled in on island 1 for the whole session. Measured in a
+	-- live Studio run: `csAccessGroup = CsAccess_0` on a player whose island.2 flag was set, with
+	-- every barrier still colliding. No Tier-1 spec can see this: there is no character to spawn
+	-- and no session to race, so the retry below is the fix AND the only place it is expressed.
+	--
+	-- So: retry until the session answers, bounded, and treat "still not loaded" as a reason to
+	-- keep the walls up rather than to open them.
 	local Players = realGame:GetService("Players")
-	local function refresh(player: any): ()
-		local level = 0
-		if islandsSeam ~= nil and type(islandsSeam.accessLevelFor) == "function" then
-			local got = context.data:get(player)
-			if got ~= nil and got.ok then
-				level = islandsSeam:accessLevelFor(got.value)
-			end
+	local realTask: any = task
+
+	local function levelFor(player: any): number?
+		if islandsSeam == nil or type(islandsSeam.accessLevelFor) ~= "function" then
+			return nil
 		end
-		WorldService.applyAccess(self, player, level)
+		local got = context.data:get(player)
+		if got == nil or not got.ok then
+			return nil -- session not loaded yet
+		end
+		return islandsSeam:accessLevelFor(got.value)
 	end
-	Players.PlayerAdded:Connect(function(player: any): ()
+
+	local function refresh(player: any): ()
+		local level = levelFor(player)
+		if level ~= nil then
+			WorldService.applyAccess(self, player, level)
+			return
+		end
+		if realTask == nil or type(realTask.spawn) ~= "function" then
+			return
+		end
+		realTask.spawn(function(): ()
+			-- ~15s of patience at a widening interval. A session that never loads leaves the player
+			-- gated at level 0, which is the safe failure: locked out of islands they own beats
+			-- walking into islands they have not bought.
+			for attempt = 1, 20 do
+				realTask.wait(0.25 + attempt * 0.05)
+				if player.Parent == nil then
+					return -- left before their data arrived
+				end
+				local retryLevel = levelFor(player)
+				if retryLevel ~= nil then
+					WorldService.applyAccess(self, player, retryLevel)
+					return
+				end
+			end
+			warn(
+				`[WorldService] access level for {player.Name} never resolved — they stay gated at `
+					.. "the starting island. Their session did not load."
+			)
+		end)
+	end
+
+	local function hook(player: any): ()
 		player.CharacterAdded:Connect(function(): ()
 			refresh(player)
 		end)
 		if player.Character ~= nil then
 			refresh(player)
 		end
-	end)
+	end
+	Players.PlayerAdded:Connect(hook)
 	for _, player in Players:GetPlayers() do
-		player.CharacterAdded:Connect(function(): ()
-			refresh(player)
-		end)
-		if player.Character ~= nil then
-			refresh(player)
-		end
+		hook(player)
 	end
 end
 
