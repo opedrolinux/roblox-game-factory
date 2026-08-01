@@ -2,27 +2,34 @@
 -- games/collect-sim/src/client/hud/Hud.luau   [hud — presentation, Roblox-only, SINGLETON view]
 -- The client HUD as a SINGLETON VIEW module (NOT a controller): it builds ONE ScreenGui under
 -- PlayerGui lazily and exposes plain setters. Multiple controllers feed it without ever referencing
--- one another:
---   * HudController drives Stardust / Prisms / Rebirths (and later daily/restock) from the "data" push,
---   * CollectionController drives the backpack count from Collect / Sell replies,
---   * ShopController nudges Stardust from a BuyUpgrade reply.
--- Roblox's require-cache makes EVERY requirer share this one table, so controllers reach the HUD
--- through this shared module instead of requiring each other (the framework forbids sibling-controller
--- requires). This is a plain helper module, like Net — not a Start-lifecycle controller.
+-- one another. Roblox's require-cache makes EVERY requirer share this one table.
+--
+-- ----- WHAT CHANGED, AND WHY -----
+-- The old HUD showed five bare numbers and a hint about "the rich vein on island 3" — an island the
+-- player had never heard of, could not see, and had no way to reach. It never stated a GOAL, never
+-- said what the controls were, never showed which island you were on or what your multiplier was,
+-- and assigned the Stardust string directly so selling 150 motes for 1,800 Stardust looked exactly
+-- like selling one. The daily Claim button looked identical whether the reward was ready or 19 hours
+-- away, and `boostExpiresUnix` was replicated to the client and read by nothing.
+--
+-- Everything added here is a READOUT of a server-owned number. The HUD computes no economy.
 --
 -- ROBLOX-ONLY: every Roblox constructor is CALLED inside ensure()/the setters, NEVER at module load,
--- so the module body is plain Lua and Lune-load-safe. It is only ever required by Roblox client
--- controllers; under Lune (game == nil) ensure() is a strict no-op and the setters do nothing.
+-- so the module body is plain Lua and Lune-load-safe.
 
 local Hud = {}
 
--- Singleton view state (plain Lua at load; the Instances are filled by ensure() at runtime).
 local state: any = {
 	mounted = false,
-	labels = {}, -- name -> TextLabel
-	backpackFill = nil, -- the backpack bar's fill Frame
-	capacity = nil, -- last server-reported backpack capacity (Sell replies omit it; we remember it)
-	flashToken = 0, -- generation guard so a newer flash never gets cleared by an older timer
+	labels = {},
+	backpackFill = nil,
+	capacity = nil,
+	flashToken = 0,
+	stardustShown = 0, -- what the counter is currently displaying (the count-up animates toward it)
+	stardustTarget = 0,
+	rollToken = 0,
+	boostExpiresUnix = 0,
+	serverNow = 0,
 }
 
 -- Group-separated integer (e.g. 12345 -> "12,345"); rounds to whole. Pure, no Roblox globals.
@@ -46,26 +53,52 @@ local function commas(value: number): string
 	return sign .. out
 end
 
--- Build one left-aligned greybox TextLabel under `parent`. Roblox constructors are called here (only
--- ever from ensure(), at runtime), never at module load.
-local function newLabel(parent: any, name: string, layoutOrder: number): any
+-- "1h 04m" / "12m 30s" / "45s" — for the daily cooldown and the boost timer, both of which used to
+-- be invisible entirely.
+local function duration(seconds: number): string
+	local s = math.max(0, math.floor(seconds))
+	if s >= 3600 then
+		return string.format("%dh %02dm", s // 3600, (s % 3600) // 60)
+	elseif s >= 60 then
+		return string.format("%dm %02ds", s // 60, s % 60)
+	end
+	return string.format("%ds", s)
+end
+
+local function newLabel(parent: any, name: string, layoutOrder: number, size: number?): any
 	local lbl: any = Instance.new("TextLabel")
 	lbl.Name = name
 	lbl.LayoutOrder = layoutOrder
-	lbl.Size = UDim2.new(1, 0, 0, 26)
+	lbl.Size = UDim2.new(1, 0, 0, size and (size + 6) or 26)
 	lbl.BackgroundTransparency = 1
 	lbl.TextColor3 = Color3.new(1, 1, 1)
 	lbl.TextStrokeTransparency = 0.4
 	lbl.TextXAlignment = Enum.TextXAlignment.Left
 	lbl.Font = Enum.Font.GothamMedium
-	lbl.TextSize = 22
+	lbl.TextSize = size or 22
 	lbl.Text = ""
 	lbl.Parent = parent
 	return lbl
 end
 
--- Build the HUD exactly once under the local player's PlayerGui. Idempotent + lazy: the first setter
--- (or HudController:Start) triggers it; later calls are no-ops. Guarded so Lune never builds anything.
+local function panel(parent: any, name: string): any
+	local frame: any = Instance.new("Frame")
+	frame.Name = name
+	frame.BackgroundColor3 = Color3.fromRGB(10, 9, 20)
+	frame.BackgroundTransparency = 0.32
+	frame.BorderSizePixel = 0
+	frame.Parent = parent
+	local corner: any = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = frame
+	local stroke: any = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(96, 120, 200)
+	stroke.Transparency = 0.6
+	stroke.Thickness = 1
+	stroke.Parent = frame
+	return frame
+end
+
 local function ensure(): ()
 	if state.mounted then
 		return
@@ -87,81 +120,44 @@ local function ensure(): ()
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	gui.Parent = playerGui
 
-	-- Stats panel (top-left): Stardust / Prisms / Rebirths, fed by the "data" push.
-	local stats: any = Instance.new("Frame")
-	stats.Name = "Stats"
+	-- ----- Stats panel (top-left) -----
+	local stats = panel(gui, "Stats")
 	stats.Position = UDim2.new(0, 16, 0, 16)
-	stats.Size = UDim2.new(0, 240, 0, 104)
-	stats.BackgroundColor3 = Color3.new(0, 0, 0)
-	stats.BackgroundTransparency = 0.45
-	stats.BorderSizePixel = 0
-	stats.Parent = gui
-	local statsCorner: any = Instance.new("UICorner")
-	statsCorner.Parent = stats
+	stats.Size = UDim2.new(0, 268, 0, 148)
 	local statsPad: any = Instance.new("UIPadding")
-	statsPad.PaddingLeft = UDim.new(0, 12)
-	statsPad.PaddingTop = UDim.new(0, 8)
+	statsPad.PaddingLeft = UDim.new(0, 14)
+	statsPad.PaddingTop = UDim.new(0, 10)
 	statsPad.Parent = stats
 	local statsLayout: any = Instance.new("UIListLayout")
 	statsLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	statsLayout.Parent = stats
 
-	state.labels.Stardust = newLabel(stats, "Stardust", 1)
-	state.labels.Prisms = newLabel(stats, "Prisms", 2)
-	state.labels.Rebirths = newLabel(stats, "Rebirths", 3)
+	local stardust = newLabel(stats, "Stardust", 1, 28)
+	stardust.Font = Enum.Font.GothamBold
+	stardust.TextColor3 = Color3.fromRGB(255, 222, 130)
+	state.labels.Stardust = stardust
+	state.labels.Prisms = newLabel(stats, "Prisms", 2, 19)
+	state.labels.Prisms.TextColor3 = Color3.fromRGB(186, 150, 255)
+	state.labels.Rebirths = newLabel(stats, "Rebirths", 3, 19)
+	-- Which island you are on and what a mote is worth there. Both are server-derived, and neither
+	-- was visible anywhere in the game — so "richer motes further out" was unobservable even after
+	-- it started being true.
+	state.labels.Island = newLabel(stats, "Island", 4, 19)
+	state.labels.Island.TextColor3 = Color3.fromRGB(150, 210, 255)
+	-- Lifetime earnings and owned perks. `stats` and `flags` have been replicated to every client
+	-- since v4 and read by NOTHING; these two labels are their first readers, and a career total is
+	-- the one number a collector actually wants to watch grow.
+	state.labels.Lifetime = newLabel(stats, "Lifetime", 5, 15)
+	state.labels.Lifetime.TextColor3 = Color3.fromRGB(160, 160, 180)
+	state.labels.Perks = newLabel(stats, "Perks", 6, 15)
+	state.labels.Perks.TextColor3 = Color3.fromRGB(255, 200, 120)
 
-	-- Backpack bar (bottom-center): a fill Frame scaled by count/capacity + a centered count label.
-	local bp: any = Instance.new("Frame")
-	bp.Name = "Backpack"
-	bp.AnchorPoint = Vector2.new(0.5, 1)
-	bp.Position = UDim2.new(0.5, 0, 1, -16)
-	bp.Size = UDim2.new(0, 300, 0, 28)
-	bp.BackgroundColor3 = Color3.new(0, 0, 0)
-	bp.BackgroundTransparency = 0.45
-	bp.BorderSizePixel = 0
-	bp.Parent = gui
-	local bpCorner: any = Instance.new("UICorner")
-	bpCorner.Parent = bp
-	local fill: any = Instance.new("Frame")
-	fill.Name = "Fill"
-	fill.AnchorPoint = Vector2.new(0, 0.5)
-	fill.Position = UDim2.new(0, 0, 0.5, 0)
-	fill.Size = UDim2.new(0, 0, 1, 0)
-	fill.BackgroundColor3 = Color3.new(0.36, 0.62, 0.46)
-	fill.BackgroundTransparency = 0.15
-	fill.BorderSizePixel = 0
-	fill.Parent = bp
-	local fillCorner: any = Instance.new("UICorner")
-	fillCorner.Parent = fill
-	local bpLabel: any = newLabel(bp, "Text", 1)
-	bpLabel.Size = UDim2.new(1, 0, 1, 0)
-	bpLabel.TextXAlignment = Enum.TextXAlignment.Center
-	bpLabel.ZIndex = 2
-	state.labels.Backpack = bpLabel
-	state.backpackFill = fill
-
-	-- Flash line (top-center): transient one-line messages (sold X, backpack full, ...).
-	local flash: any = newLabel(gui, "Flash", 0)
-	flash.AnchorPoint = Vector2.new(0.5, 0)
-	flash.Position = UDim2.new(0.5, 0, 0, 14)
-	flash.Size = UDim2.new(0, 460, 0, 28)
-	flash.TextXAlignment = Enum.TextXAlignment.Center
-	state.labels.Flash = flash
-
-	-- Daily streak badge + claim button (Gap #2: Daily has no controller — HudController owns the
-	-- call and registers it via Hud.onDailyClaim; this is just the surface).
-	local daily: any = Instance.new("Frame")
-	daily.Name = "Daily"
-	daily.Position = UDim2.new(0, 16, 0, 132)
-	daily.Size = UDim2.new(0, 240, 0, 36)
-	daily.BackgroundColor3 = Color3.new(0, 0, 0)
-	daily.BackgroundTransparency = 0.45
-	daily.BorderSizePixel = 0
-	daily.Parent = gui
-	local dailyCorner: any = Instance.new("UICorner")
-	dailyCorner.Parent = daily
+	-- ----- Daily row -----
+	local daily = panel(gui, "Daily")
+	daily.Position = UDim2.new(0, 16, 0, 174)
+	daily.Size = UDim2.new(0, 268, 0, 38)
 	local dailyPad: any = Instance.new("UIPadding")
-	dailyPad.PaddingLeft = UDim.new(0, 8)
+	dailyPad.PaddingLeft = UDim.new(0, 10)
 	dailyPad.PaddingRight = UDim.new(0, 8)
 	dailyPad.Parent = daily
 	local dailyRow: any = Instance.new("UIListLayout")
@@ -171,90 +167,137 @@ local function ensure(): ()
 	dailyRow.Parent = daily
 	local dailyLabel: any = Instance.new("TextLabel")
 	dailyLabel.Name = "Text"
-	dailyLabel.Size = UDim2.new(0, 148, 1, 0)
+	dailyLabel.Size = UDim2.new(0, 150, 1, 0)
 	dailyLabel.BackgroundTransparency = 1
 	dailyLabel.TextColor3 = Color3.new(1, 1, 1)
 	dailyLabel.TextXAlignment = Enum.TextXAlignment.Left
 	dailyLabel.Font = Enum.Font.GothamMedium
-	dailyLabel.TextSize = 18
+	dailyLabel.TextSize = 17
 	dailyLabel.Text = "Daily streak: 0"
 	dailyLabel.Parent = daily
 	state.labels.Daily = dailyLabel
 	local claim: any = Instance.new("TextButton")
 	claim.Name = "Claim"
-	claim.Size = UDim2.new(0, 64, 0, 26)
-	claim.BackgroundColor3 = Color3.new(0.30, 0.52, 0.34)
+	claim.Size = UDim2.new(0, 88, 0, 26)
+	claim.BackgroundColor3 = Color3.fromRGB(60, 140, 84)
 	claim.BorderSizePixel = 0
 	claim.TextColor3 = Color3.new(1, 1, 1)
 	claim.Font = Enum.Font.GothamMedium
-	claim.TextSize = 16
+	claim.TextSize = 15
 	claim.Text = "Claim"
 	claim.Parent = daily
 	local claimCorner: any = Instance.new("UICorner")
 	claimCorner.Parent = claim
+	state.labels.Claim = claim
 	claim.Activated:Connect(function(): ()
 		if state.dailyClaimFn ~= nil then
 			state.dailyClaimFn()
 		end
 	end)
 
-	-- Restock "rich vein" hint (top-right), fed by RestockController.
-	local restock: any = newLabel(gui, "Restock", 0)
+	-- ----- Objective + controls (bottom-left) -----
+	-- The HUD never stated a goal. A new player saw five numbers and no reason to walk anywhere.
+	local goal = panel(gui, "Objective")
+	goal.AnchorPoint = Vector2.new(0, 1)
+	goal.Position = UDim2.new(0, 16, 1, -16)
+	goal.Size = UDim2.new(0, 340, 0, 76)
+	local goalPad: any = Instance.new("UIPadding")
+	goalPad.PaddingLeft = UDim.new(0, 12)
+	goalPad.PaddingTop = UDim.new(0, 8)
+	goalPad.Parent = goal
+	local goalLayout: any = Instance.new("UIListLayout")
+	goalLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	goalLayout.Parent = goal
+	local goalTitle = newLabel(goal, "Title", 1, 14)
+	goalTitle.TextColor3 = Color3.fromRGB(150, 210, 255)
+	goalTitle.Text = "NEXT GOAL"
+	state.labels.ObjectiveTitle = goalTitle
+	state.labels.Objective = newLabel(goal, "Text", 2, 18)
+	state.labels.Objective.Text = "Walk into the glowing motes to collect them"
+	local hint = newLabel(goal, "Hint", 3, 14)
+	hint.TextColor3 = Color3.fromRGB(170, 170, 190)
+	hint.Text = "Walk near motes to collect · E at a pad to use it"
+	state.labels.Hint = hint
+
+	-- ----- Backpack bar (bottom-center) -----
+	local bp = panel(gui, "Backpack")
+	bp.AnchorPoint = Vector2.new(0.5, 1)
+	bp.Position = UDim2.new(0.5, 0, 1, -16)
+	bp.Size = UDim2.new(0, 320, 0, 30)
+	local fill: any = Instance.new("Frame")
+	fill.Name = "Fill"
+	fill.AnchorPoint = Vector2.new(0, 0.5)
+	fill.Position = UDim2.new(0, 0, 0.5, 0)
+	fill.Size = UDim2.new(0, 0, 1, 0)
+	fill.BackgroundColor3 = Color3.fromRGB(92, 200, 148)
+	fill.BackgroundTransparency = 0.12
+	fill.BorderSizePixel = 0
+	fill.Parent = bp
+	local fillCorner: any = Instance.new("UICorner")
+	fillCorner.CornerRadius = UDim.new(0, 8)
+	fillCorner.Parent = fill
+	local bpLabel: any = newLabel(bp, "Text", 1, 18)
+	bpLabel.Size = UDim2.new(1, 0, 1, 0)
+	bpLabel.TextXAlignment = Enum.TextXAlignment.Center
+	bpLabel.ZIndex = 2
+	state.labels.Backpack = bpLabel
+	state.backpackFill = fill
+
+	-- ----- Flash line (top-center) -----
+	local flash: any = newLabel(gui, "Flash", 0, 22)
+	flash.AnchorPoint = Vector2.new(0.5, 0)
+	flash.Position = UDim2.new(0.5, 0, 0, 14)
+	flash.Size = UDim2.new(0, 520, 0, 30)
+	flash.TextXAlignment = Enum.TextXAlignment.Center
+	flash.Font = Enum.Font.GothamBold
+	state.labels.Flash = flash
+
+	-- ----- Right column: rich vein + boost timer -----
+	local restock: any = newLabel(gui, "Restock", 0, 18)
 	restock.AnchorPoint = Vector2.new(1, 0)
 	restock.Position = UDim2.new(1, -16, 0, 16)
-	restock.Size = UDim2.new(0, 340, 0, 26)
+	restock.Size = UDim2.new(0, 360, 0, 26)
 	restock.TextXAlignment = Enum.TextXAlignment.Right
 	state.labels.Restock = restock
 
-	-- Welcome-back popup (hidden until OfflineController reports an offline grant > 0).
-	local popup: any = Instance.new("Frame")
-	popup.Name = "WelcomeBack"
+	-- boostExpiresUnix has been replicated to every client since v5 and read by NO client code.
+	local boost: any = newLabel(gui, "Boost", 0, 18)
+	boost.AnchorPoint = Vector2.new(1, 0)
+	boost.Position = UDim2.new(1, -16, 0, 46)
+	boost.Size = UDim2.new(0, 360, 0, 26)
+	boost.TextXAlignment = Enum.TextXAlignment.Right
+	boost.TextColor3 = Color3.fromRGB(255, 200, 120)
+	boost.Text = ""
+	state.labels.Boost = boost
+
+	-- ----- Welcome-back popup -----
+	local popup = panel(gui, "WelcomeBack")
 	popup.Visible = false
 	popup.AnchorPoint = Vector2.new(0.5, 0.5)
 	popup.Position = UDim2.new(0.5, 0, 0.4, 0)
-	popup.Size = UDim2.new(0, 360, 0, 170)
-	popup.BackgroundColor3 = Color3.new(0.08, 0.09, 0.12)
-	popup.BackgroundTransparency = 0.05
-	popup.BorderSizePixel = 0
-	popup.Parent = gui
-	local popupCorner: any = Instance.new("UICorner")
-	popupCorner.Parent = popup
+	popup.Size = UDim2.new(0, 380, 0, 180)
+	popup.BackgroundTransparency = 0.04
 	local popupPad: any = Instance.new("UIPadding")
-	popupPad.PaddingLeft = UDim.new(0, 16)
-	popupPad.PaddingRight = UDim.new(0, 16)
-	popupPad.PaddingTop = UDim.new(0, 14)
-	popupPad.PaddingBottom = UDim.new(0, 14)
+	popupPad.PaddingLeft = UDim.new(0, 18)
+	popupPad.PaddingRight = UDim.new(0, 18)
+	popupPad.PaddingTop = UDim.new(0, 16)
 	popupPad.Parent = popup
 	local popupLayout: any = Instance.new("UIListLayout")
 	popupLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	popupLayout.Padding = UDim.new(0, 10)
 	popupLayout.Parent = popup
-	local popupTitle: any = Instance.new("TextLabel")
-	popupTitle.LayoutOrder = 0
-	popupTitle.Size = UDim2.new(1, 0, 0, 30)
-	popupTitle.BackgroundTransparency = 1
-	popupTitle.TextColor3 = Color3.new(1, 1, 1)
+	local popupTitle = newLabel(popup, "Title", 0, 24)
 	popupTitle.Font = Enum.Font.GothamBold
-	popupTitle.TextSize = 24
 	popupTitle.Text = "Welcome back!"
-	popupTitle.Parent = popup
-	local popupBody: any = Instance.new("TextLabel")
-	popupBody.Name = "Body"
-	popupBody.LayoutOrder = 1
+	local popupBody = newLabel(popup, "Body", 1, 18)
 	popupBody.Size = UDim2.new(1, 0, 0, 66)
-	popupBody.BackgroundTransparency = 1
-	popupBody.TextColor3 = Color3.new(1, 1, 1)
-	popupBody.Font = Enum.Font.GothamMedium
-	popupBody.TextSize = 18
 	popupBody.TextWrapped = true
-	popupBody.Text = ""
-	popupBody.Parent = popup
 	state.labels.WelcomeBackBody = popupBody
 	state.welcomeBack = popup
 	local popupClose: any = Instance.new("TextButton")
 	popupClose.LayoutOrder = 2
-	popupClose.Size = UDim2.new(1, 0, 0, 32)
-	popupClose.BackgroundColor3 = Color3.new(0.20, 0.42, 0.62)
+	popupClose.Size = UDim2.new(1, -18, 0, 34)
+	popupClose.BackgroundColor3 = Color3.fromRGB(60, 110, 190)
 	popupClose.BorderSizePixel = 0
 	popupClose.TextColor3 = Color3.new(1, 1, 1)
 	popupClose.Font = Enum.Font.GothamMedium
@@ -270,36 +313,129 @@ local function ensure(): ()
 	state.mounted = true
 end
 
--- ----- PUBLIC SETTERS (each ensures the HUD exists, then writes one element) -----
+-- ----- PUBLIC SETTERS -----
 
--- Force the HUD to build now (HudController:Start calls this so it exists before the first data push).
 function Hud.ensure(): ()
 	ensure()
 end
 
+-- Roll the Stardust counter toward the new value instead of snapping. Selling 150 motes for 1,800
+-- Stardust used to look identical to selling one, because the label was assigned directly.
 function Hud.setStardust(amount: number): ()
 	ensure()
-	if state.labels.Stardust then
-		state.labels.Stardust.Text = "Stardust: " .. commas(amount)
+	local label = state.labels.Stardust
+	if label == nil then
+		return
 	end
+	state.stardustTarget = amount
+	local from = state.stardustShown
+	local delta = amount - from
+	if math.abs(delta) < 1 then
+		state.stardustShown = amount
+		label.Text = "★ " .. commas(amount)
+		return
+	end
+	state.rollToken += 1
+	local token = state.rollToken
+	local realTask: any = task
+	if realTask == nil or type(realTask.spawn) ~= "function" then
+		state.stardustShown = amount
+		label.Text = "★ " .. commas(amount)
+		return
+	end
+	realTask.spawn(function(): ()
+		local steps = 14
+		for step = 1, steps do
+			if state.rollToken ~= token then
+				return -- a newer roll took over; never fight it
+			end
+			-- Ease out, so the number decelerates into its final value.
+			local t = 1 - (1 - step / steps) ^ 3
+			state.stardustShown = from + delta * t
+			label.Text = "★ " .. commas(state.stardustShown)
+			realTask.wait(0.03)
+		end
+		if state.rollToken == token then
+			state.stardustShown = state.stardustTarget
+			label.Text = "★ " .. commas(state.stardustTarget)
+		end
+	end)
 end
 
 function Hud.setPrisms(amount: number): ()
 	ensure()
 	if state.labels.Prisms then
-		state.labels.Prisms.Text = "Prisms: " .. commas(amount)
+		state.labels.Prisms.Text = "◆ Prisms: " .. commas(amount)
 	end
 end
 
 function Hud.setRebirths(count: number): ()
 	ensure()
+	state.rebirths = count
 	if state.labels.Rebirths then
-		state.labels.Rebirths.Text = "Rebirths: " .. commas(count)
+		local multiplier = 1 + count * 0.1
+		state.labels.Rebirths.Text = string.format("Rebirths: %d  (x%.1f)", count, multiplier)
 	end
 end
 
--- Update the backpack count (and remember capacity — Sell replies omit it, so a Sell passes nil and
--- keeps the last known cap). The fill bar scales to count/capacity and shifts toward amber as it fills.
+-- Which island the player is standing on, and what that island multiplies mote value by.
+function Hud.setIsland(islandId: number, multiplier: number?): ()
+	ensure()
+	state.islandId = islandId
+	if multiplier ~= nil then
+		state.islandMultiplier = multiplier
+	end
+	if state.labels.Island then
+		local mult = state.islandMultiplier
+		if mult ~= nil then
+			state.labels.Island.Text = string.format("Island %d  ·  x%g per mote", islandId, mult)
+		else
+			state.labels.Island.Text = string.format("Island %d", islandId)
+		end
+	end
+end
+
+-- Lifetime Stardust earned — the monotonic career total that survives every rebirth. It is the
+-- number a collector watches, and it was replicated to the client and shown nowhere.
+function Hud.setLifetime(amount: number): ()
+	ensure()
+	if state.labels.Lifetime then
+		state.labels.Lifetime.Text = "Lifetime: " .. commas(amount) .. " ★"
+	end
+end
+
+-- Owned perks, from the replicated flags map. Also the client's first reader of `flags`.
+function Hud.setPerks(flags: any): ()
+	ensure()
+	local label = state.labels.Perks
+	if label == nil then
+		return
+	end
+	if type(flags) ~= "table" then
+		label.Text = ""
+		return
+	end
+	local owned: { string } = {}
+	if flags["gamepass.2xStardust"] then
+		table.insert(owned, "2x")
+	end
+	if flags["gamepass.autoCollect"] then
+		table.insert(owned, "Auto")
+	end
+	if flags["gamepass.vipIsland"] then
+		table.insert(owned, "VIP")
+	end
+	label.Text = if #owned > 0 then "Perks: " .. table.concat(owned, " · ") else ""
+end
+
+-- The one line that tells a new player what to do next. Fed by whichever controller knows.
+function Hud.setObjective(text: string): ()
+	ensure()
+	if state.labels.Objective then
+		state.labels.Objective.Text = text
+	end
+end
+
 function Hud.setBackpack(count: number, capacity: number?): ()
 	ensure()
 	if capacity ~= nil then
@@ -308,9 +444,9 @@ function Hud.setBackpack(count: number, capacity: number?): ()
 	local cap = state.capacity or 0
 	if state.labels.Backpack then
 		if cap > 0 then
-			state.labels.Backpack.Text = "Backpack: " .. tostring(count) .. " / " .. tostring(cap)
+			state.labels.Backpack.Text = `Backpack  {count} / {cap}`
 		else
-			state.labels.Backpack.Text = "Backpack: " .. tostring(count)
+			state.labels.Backpack.Text = `Backpack  {count}`
 		end
 	end
 	if state.backpackFill then
@@ -319,15 +455,12 @@ function Hud.setBackpack(count: number, capacity: number?): ()
 			frac = math.clamp(count / cap, 0, 1)
 		end
 		state.backpackFill.Size = UDim2.new(frac, 0, 1, 0)
-		-- green -> amber as the backpack fills (cosmetic feedback that selling is due).
+		-- green -> amber -> red as it fills, so "go sell" is readable at a glance.
 		state.backpackFill.BackgroundColor3 =
-			Color3.new(0.36 + 0.5 * frac, 0.62 - 0.18 * frac, 0.46 - 0.2 * frac)
+			Color3.fromRGB(92 + 150 * frac, 200 - 90 * frac, 148 - 90 * frac)
 	end
 end
 
--- Show a transient one-line message; a generation token ensures a newer flash is never wiped by an
--- older auto-clear timer. The clear runs on task (a real client global; guarded so it stays inert if
--- somehow absent).
 function Hud.flash(text: string): ()
 	ensure()
 	if not state.labels.Flash then
@@ -336,6 +469,7 @@ function Hud.flash(text: string): ()
 	state.flashToken += 1
 	local token = state.flashToken
 	state.labels.Flash.Text = text
+	state.labels.Flash.TextTransparency = 0
 	local realTask: any = task
 	if realTask ~= nil and type(realTask.spawn) == "function" then
 		realTask.spawn(function(): ()
@@ -354,8 +488,27 @@ function Hud.setDailyStreak(streak: number): ()
 	end
 end
 
--- Register the daily-claim button's click handler (HudController owns the actual Daily net call,
--- covering Gap #2). The button built in ensure() invokes whatever is registered here.
+-- Drive the Claim button's colour, text and Active state off the server's cooldown. The button used
+-- to look identical whether the reward was ready or nineteen hours away.
+function Hud.setDailyReady(ready: boolean, secondsUntilReady: number?): ()
+	ensure()
+	local claim = state.labels.Claim
+	if claim == nil then
+		return
+	end
+	if ready then
+		claim.Text = "Claim"
+		claim.BackgroundColor3 = Color3.fromRGB(60, 160, 92)
+		claim.AutoButtonColor = true
+		claim.Active = true
+	else
+		claim.Text = if secondsUntilReady ~= nil then duration(secondsUntilReady) else "Claimed"
+		claim.BackgroundColor3 = Color3.fromRGB(58, 58, 72)
+		claim.AutoButtonColor = false
+		claim.Active = false
+	end
+end
+
 function Hud.onDailyClaim(fn: () -> ()): ()
 	ensure()
 	state.dailyClaimFn = fn
@@ -368,8 +521,24 @@ function Hud.setRestockHint(text: string): ()
 	end
 end
 
--- Show the welcome-back popup with the server-reported offline grant (OfflineController calls this
--- once on join when granted > 0). All numbers are server-authoritative; we only display them.
+-- The 2x boost countdown. `boostExpiresUnix` has been replicated since v5 and read by nothing; this
+-- is its first client reader. `serverNow` must come from a server-derived time — never os.time().
+function Hud.setBoost(boostExpiresUnix: number, serverNow: number): ()
+	ensure()
+	state.boostExpiresUnix = boostExpiresUnix or 0
+	state.serverNow = serverNow or 0
+	local label = state.labels.Boost
+	if label == nil then
+		return
+	end
+	local remaining = state.boostExpiresUnix - state.serverNow
+	if remaining > 0 then
+		label.Text = `⚡ 2x Stardust — {duration(remaining)}`
+	else
+		label.Text = ""
+	end
+end
+
 function Hud.showWelcomeBack(granted: number, balance: number): ()
 	ensure()
 	if state.labels.WelcomeBackBody then

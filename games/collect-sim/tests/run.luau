@@ -33,6 +33,7 @@ local SPEC_PATHS = {
 	"./unit/monetization.spec",
 	"./unit/net.spec",
 	"./unit/offline.spec",
+	"./unit/reachability.spec",
 	"./unit/rebirth.spec",
 	"./unit/restock.spec",
 	"./unit/shop.spec",

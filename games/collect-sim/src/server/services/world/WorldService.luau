@@ -499,10 +499,11 @@ function WorldService:Start(context: any): ()
 	-- `islandOf(player)` is the ONLY way a handler learns where a player is standing. It reads the
 	-- character's own position from the DataModel — never a client-supplied payload — so a client
 	-- cannot claim to be on island 5. Returns nil when there is no character (the caller decides).
+	-- Deliberately NARROW. An earlier draft also published `islandIdAt` and `getPlan` on the seam;
+	-- the reachability gate flagged both as defined-and-referenced-nowhere, which is the exact
+	-- pattern this whole remediation exists to kill. The pure `WorldService.islandIdAt(plan, ...)`
+	-- and `self.plan` remain available to anything that genuinely needs them.
 	local WorldSeam = {}
-	function WorldSeam.islandIdAt(_self: any, x: number, y: number, z: number): number?
-		return WorldService.islandIdAt(plan, x, y, z)
-	end
 	function WorldSeam.islandOf(_self: any, player: any): number?
 		if player == nil then
 			return nil
@@ -521,9 +522,6 @@ function WorldService:Start(context: any): ()
 	-- Exposed so the islands feature can re-apply access the moment an unlock commits.
 	function WorldSeam.applyAccess(_self: any, player: any, level: number): ()
 		WorldService.applyAccess(self, player, level)
-	end
-	function WorldSeam.getPlan(_self: any): WorldPlan
-		return plan
 	end
 	context.world = WorldSeam
 

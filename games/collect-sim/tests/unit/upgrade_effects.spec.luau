@@ -181,7 +181,7 @@ describe("upgrade effects — a bought level must be READ by the code governing 
 		expect(seam:capacityFor(d)):toBe(50)
 		expect(seam:magnetRadiusFor(d)):toBe(6)
 		expect(seam:walkSpeedFor(d)):toBe(16)
-		expect(seam:levelOf(d, "backpack")):toBe(0)
+		expect(seam:yieldMultiplierFor(d)):toBe(1)
 	end)
 
 	it("a missing seam falls back to base capacity, never uncapping it", function()

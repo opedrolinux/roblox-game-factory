@@ -13,8 +13,12 @@ local Net = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared").
 -- Mirror the server's refresh cadence so the client board is never staler than one server interval.
 local POLL_INTERVAL = 5
 -- Greybox board geometry (in-world; replaced by art later — v1 is greybox-in-code per CLAUDE.md §11).
-local BOARD_SIZE = Vector3.new(8, 10, 0.5)
-local BOARD_POSITION = Vector3.new(0, 8, -20)
+-- The board used to sit at (0, 8, -20) with its 10-stud height centred there — so its bottom half
+-- was buried inside the island (top surface y=4), it intersected the rebirth pad at z=-20, and its
+-- front face pointed away from the play area at the back edge. Raised clear of the platform, moved
+-- off the altar, and rotated to face the spawn.
+local BOARD_SIZE = Vector3.new(11, 8, 0.5)
+local BOARD_POSITION = Vector3.new(-19, 12, -21)
 
 local LeaderboardController = { name = "LeaderboardController" }
 
@@ -26,21 +30,31 @@ local function buildBoard(): any
 	part.Anchored = true
 	part.CanCollide = false
 	part.Size = BOARD_SIZE
-	part.Position = BOARD_POSITION
+	-- Face the play area (+Z, toward the spawn) instead of the back edge of the island.
+	part.CFrame = CFrame.new(BOARD_POSITION) * CFrame.Angles(0, 0, 0)
+	part.Color = Color3.fromRGB(10, 10, 22)
+	part.Material = Enum.Material.SmoothPlastic
 	part.Parent = workspace
 
 	local surface = Instance.new("SurfaceGui")
 	surface.Name = "LeaderboardSurface"
 	surface.Face = Enum.NormalId.Front
-	surface.CanvasSize = Vector2.new(400, 500)
+	surface.CanvasSize = Vector2.new(400, 300)
+	-- Without this the board is lit by the (now midnight) scene and reads as a black slab.
+	surface.LightInfluence = 0
 	surface.Parent = part
 
 	local title = Instance.new("TextLabel")
 	title.Name = "Title"
 	title.Size = UDim2.new(1, 0, 0, 50)
-	title.Text = "Top Collectors — Lifetime Stardust"
+	-- Say what the board actually is. It ranks the players currently on THIS server, with no
+	-- cross-server persistence, and calling it "Top Collectors" implied otherwise.
+	title.Text = "Top Collectors — this server"
 	title.TextScaled = true
-	title.BackgroundTransparency = 0.3
+	title.TextColor3 = Color3.fromRGB(255, 222, 130)
+	title.Font = Enum.Font.GothamBold
+	title.BackgroundColor3 = Color3.fromRGB(18, 16, 34)
+	title.BackgroundTransparency = 0.15
 	title.Parent = surface
 
 	local list = Instance.new("Frame")

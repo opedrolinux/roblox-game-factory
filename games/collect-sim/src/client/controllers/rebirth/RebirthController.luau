@@ -57,21 +57,77 @@ function RebirthController:Start(context: any): ()
 		return result
 	end
 
-	-- Slice 4: bind the in-world rebirth pad (built by WorldService) to self.rebirth(). Wired on the
-	-- CLIENT only (never also server-side) so the action fires once; the server owns the threshold,
-	-- the Prisms grant, and the full atomic reset — we just translate the reply into a HUD message.
+	-- ----- THE ALTAR: state its price, then make you mean it -----
+	-- The most destructive action in the game used to fire on ONE keypress, with no on-screen cost,
+	-- no reward, and no confirmation anywhere. The pad now carries the live threshold (server-derived,
+	-- read through the shop projection) and requires a HOLD, which is Roblox's own built-in
+	-- are-you-sure and costs nothing to implement.
+	local HOLD_SECONDS = 1.5
+
+	local function altarLabel(preview: any): string
+		if preview == nil then
+			return "Rebirth Altar"
+		end
+		if preview.capped then
+			return "Rebirth Altar — maxed out"
+		end
+		local nextMult = string.format("%.1f", preview.multiplierNext)
+		if preview.ready then
+			return `Rebirth Altar — READY\nHold E: lose ★ {preview.threshold}, keep your islands, gain ◆ {preview.prismsPreview} and x{nextMult} forever`
+		end
+		local held = math.floor(preview.stardust)
+		return `Rebirth Altar — needs ★ {preview.threshold}\nYou have ★ {held} · keeps your islands`
+	end
+
+	-- Refresh the altar's own billboard from the server's prestige preview. It rides the shop
+	-- projection because that is where the server already derives the threshold and the reward.
+	local function refreshAltar(): ()
+		local result = net:call(Net.Actions.FetchUpgrades, {})
+		if not result.ok then
+			return
+		end
+		local preview = result.value.rebirth
+		self._preview = preview
+		Pads.setLabelAll("rebirth", altarLabel(preview))
+		for _, pad in Pads.findAll("rebirth") do
+			local prompt = pad:FindFirstChildWhichIsA("ProximityPrompt")
+			if prompt ~= nil then
+				prompt.HoldDuration = HOLD_SECONDS
+				prompt.ActionText = if preview ~= nil and preview.ready
+					then "Hold to Rebirth"
+					else "Not ready"
+				prompt.Enabled = preview == nil or (preview.ready and not preview.capped)
+			end
+		end
+	end
+	self.refreshAltar = refreshAltar
+	task.spawn(refreshAltar)
+	net:on("data", function(_view: any): ()
+		task.spawn(refreshAltar)
+	end)
+
 	Pads.onTrigger("rebirth", nil, LocalPlayer, function(_pad: any): ()
 		local result = self.rebirth()
 		if result.ok then
 			-- Update the HUD prestige readouts straight from the authoritative reply (snappy); the
-			-- post-write "data" push reconciles Stardust (the reply carries no balance — rebirth zeroes it).
+			-- post-write "data" push reconciles Stardust (rebirth zeroes it).
 			Hud.setRebirths(result.value.rebirths)
 			Hud.setPrisms(result.value.prisms)
+			local multiplier = string.format("%.1f", result.value.multiplier)
 			Hud.flash(
-				`Rebirth complete — {result.value.rebirths} rebirths, {result.value.prisms} Prisms`
+				`REBIRTH {result.value.rebirths} — every mote is now worth x{multiplier}, and you kept your islands`
 			)
+			task.spawn(refreshAltar)
 		elseif result.code == Result.Codes.Insufficient then
-			Hud.flash("Not enough Stardust to rebirth yet")
+			local preview = self._preview
+			if preview ~= nil then
+				local held = math.floor(preview.stardust)
+				Hud.flash(`Rebirth needs ★ {preview.threshold} — you have ★ {held}`)
+			else
+				Hud.flash("Not enough Stardust to rebirth yet")
+			end
+		elseif result.code == Result.Codes.OutOfRange then
+			Hud.flash("You have rebirthed as far as this game goes")
 		else
 			Hud.flash("Rebirth failed")
 		end

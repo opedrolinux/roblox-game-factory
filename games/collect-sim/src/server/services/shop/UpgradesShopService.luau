@@ -147,11 +147,6 @@ end
 
 local UpgradesSeam = {}
 
--- Levels are exposed so a caller can assert the READ moved, not just the stored number.
-function UpgradesSeam.levelOf(_self: any, d: any, upgradeId: string): number
-	return levelOf(d, upgradeId)
-end
-
 function UpgradesSeam.capacityFor(_self: any, d: any): number
 	return BASE_CAPACITY + levelOf(d, "backpack") * CAPACITY_PER_LEVEL
 end
@@ -428,6 +423,11 @@ local function makeFetchUpgradesAction(): Net.Action<{}, any>
 			return Result.ok({
 				entries = entries,
 				tuning = UpgradesSeam:tuningFor(d),
+				-- The SERVER's unix clock. The HUD needs it to count down the daily cooldown and the
+				-- 2x boost, and a client clock is not a clock: `os.time()` on a player's machine can
+				-- be wrong by hours, or set deliberately. Both of those countdowns were invisible
+				-- before, so this is their only source of truth.
+				now = ctx.clock:unix(),
 				balances = {
 					Stardust = (d.currencies.Stardust or 0),
 					Prisms = (d.currencies.Prisms or 0),

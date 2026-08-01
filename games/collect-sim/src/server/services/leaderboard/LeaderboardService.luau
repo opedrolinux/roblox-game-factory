@@ -142,7 +142,20 @@ function LeaderboardService.refresh(
 ): number
 	local rows: { Row } = {}
 	for _, player in players do
-		if type(player) == "table" and type(player.UserId) == "number" then
+		-- DUCK-TYPE the player. This guard used to test the Lua type for equality with the string
+		-- "table" — and a real Roblox Player is USERDATA, so it rejected every actual player and the
+		-- board was empty in every live server, forever. It passed happily in every test, because
+		-- the test harness fabricates players as plain Lua tables: the bug and the mock that hid it
+		-- were the same shape.
+		--
+		-- The documented Player-surrogate contract is exactly "has .UserId and .Name", so that is
+		-- what we check. A `nil` player, a number, or a string still falls through.
+		-- pcall the index so a scalar in the list (indexing a number throws) is skipped rather than
+		-- taking the whole refresh down.
+		local readable, userId = pcall(function()
+			return (player :: any).UserId
+		end)
+		if readable and type(userId) == "number" then
 			local got = dataGet(player)
 			table.insert(rows, {
 				userId = player.UserId,
@@ -238,10 +251,60 @@ function LeaderboardService:Start(context: any): ()
 	-- injected clock (§7 — never os.time/wall time) and maybeRefresh over the present players. The loop
 	-- yields REFRESH_INTERVAL between ticks; maybeRefresh itself re-gates on server time, so even if the
 	-- loop were ever driven faster it would not over-refresh.
+	-- ----- leaderstats: the platform's own social surface, and it costs eight lines -----
+	-- A `leaderstats` folder on the Player makes Stardust and Rebirths appear next to every player's
+	-- name in Roblox's built-in player list. The game had none, so the only place anyone's progress
+	-- was visible was their own screen. Values are mirrored from the SERVER's persisted data on the
+	-- same cadence as the board; nothing here computes an economy.
+	local function ensureLeaderstats(player: any): any
+		local existing = player:FindFirstChild("leaderstats")
+		if existing ~= nil then
+			return existing
+		end
+		local folder: any = Instance.new("Folder")
+		folder.Name = "leaderstats"
+		local stardust: any = Instance.new("IntValue")
+		stardust.Name = "Stardust"
+		stardust.Parent = folder
+		local rebirths: any = Instance.new("IntValue")
+		rebirths.Name = "Rebirths"
+		rebirths.Parent = folder
+		folder.Parent = player
+		return folder
+	end
+
+	local function syncLeaderstats(player: any): ()
+		local got = dataGet(player)
+		if got == nil or not got.ok then
+			return -- session not loaded yet; the next cadence tick picks it up
+		end
+		local folder = ensureLeaderstats(player)
+		local d = got.value
+		local stardust = folder:FindFirstChild("Stardust")
+		local rebirths = folder:FindFirstChild("Rebirths")
+		if stardust ~= nil then
+			stardust.Value = math.floor((d.currencies and d.currencies.Stardust) or 0)
+		end
+		if rebirths ~= nil then
+			rebirths.Value = math.floor(d.rebirths or 0)
+		end
+	end
+
+	Players.PlayerAdded:Connect(function(player: any): ()
+		pcall(ensureLeaderstats, player)
+	end)
+	for _, player in Players:GetPlayers() do
+		pcall(ensureLeaderstats, player)
+	end
+
 	realTask.spawn(function(): ()
 		while true do
 			local now = context.clock:unix()
-			self:maybeRefresh(now, Players:GetPlayers(), dataGet)
+			local present = Players:GetPlayers()
+			self:maybeRefresh(now, present, dataGet)
+			for _, player in present do
+				pcall(syncLeaderstats, player)
+			end
 			realTask.wait(REFRESH_INTERVAL)
 		end
 	end)
