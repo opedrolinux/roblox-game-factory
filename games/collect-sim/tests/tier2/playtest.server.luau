@@ -333,14 +333,26 @@ runPhase("traversal", function(): (boolean, any)
 	end
 
 	local platforms: { any } = {}
+	-- ISLANDS ONLY. The Islands folder also holds the bridges that join them and the neon rims that
+	-- outline them, and treating those as platforms produced a confident, wrong failure: the surface
+	-- probe sampled a 12-stud-wide bridge at +/-15 studs from its centre and reported "Bridge_1_2
+	-- has no ground" four times over. The rims are non-collidable decoration and would have failed
+	-- the same way. A probe has to know what it is standing on before it can judge the ground.
 	for _, inst in islandsFolder:GetChildren() do
-		if inst:IsA("BasePart") then
+		if inst:IsA("BasePart") and string.sub(inst.Name, 1, 7) == "Island_" then
 			table.insert(platforms, inst)
 		end
 	end
 	if #platforms == 0 then
 		return false, "no island platforms to traverse"
 	end
+	diagnostics.platformNames = (function(): { string }
+		local names: { string } = {}
+		for _, plat in platforms do
+			table.insert(names, plat.Name)
+		end
+		return names
+	end)()
 	table.sort(platforms, function(a, b): boolean
 		return a.Position.X < b.Position.X
 	end)
@@ -380,35 +392,78 @@ runPhase("traversal", function(): (boolean, any)
 	-- yes. It was a check that could hardly fail, which is worse than no check. What actually
 	-- matters to a player is the DROP: stepping off an island onto a baseplate 7 studs below is not
 	-- a hole, but it is also not a bridge, and the human should be told which one this world has.
+	-- ----- THE ASSERTION USED TO BE INVERTED, AND THAT IS WHY IT PASSED -----
+	-- It asked "can a player reach every island?" and PASSED WHEN THE ANSWER WAS YES. But islands
+	-- 2-5 are gated content costing 500 to 40,000 Stardust, and a brand-new player with zero
+	-- Stardust freely walking onto all four is the defect a human reported in their first minute.
+	-- Its own evidence line documented the mechanism and graded it green: "worst fall 7.0 studs onto
+	-- Baseplate". `voidSteps > 0` was also structurally impossible while a 424x248 baseplate spanned
+	-- the whole archipelago, and `worstDrop` was computed, printed, and compared against nothing.
+	--
+	-- What the world owes a player is BOTH of these at once:
+	--   * a walkable crossing exists on the intended line (the bridge), and
+	--   * stepping off that line is a real fall (the archipelago is islands, not a floor).
+	-- So we sample the crossing's CENTRE LINE and require ground, and sample well off it and require
+	-- NONE. Either one alone is satisfiable by a mistake.
+	local ON_LINE_GAPS: { string } = {}
+	local offLineSupported = 0
+	local onLineSteps, offLineSteps = 0, 0
 	local worstDrop, worstAt, worstOnto = 0, "", ""
-	local voidSteps = 0
-	local steps = 0
+	local OFF_LINE_Z = 40 -- far outside any bridge's width
+	local previousY: number? = nil
+
 	for i = 1, #platforms - 1 do
 		local a, b = platforms[i], platforms[i + 1]
-		local top = a.Position.Y + a.Size.Y / 2
-		local x = a.Position.X
-		while x < b.Position.X do
+		previousY = nil -- each crossing is measured on its own
+		local aEdge = a.Position.X + a.Size.X / 2
+		local bEdge = b.Position.X - b.Size.X / 2
+		local top = math.max(a.Position.Y, b.Position.Y) + 40
+		local x = aEdge
+		while x < bEdge do
 			x += 1
-			steps += 1
-			local from = Vector3.new(x, top + 3, a.Position.Z)
-			local hit = Workspace:Raycast(from, Vector3.new(0, -400, 0), params)
-			if hit == nil then
-				voidSteps += 1
+			-- ON the crossing line: there must be something to walk on.
+			onLineSteps += 1
+			local fromOn = Vector3.new(x, top, a.Position.Z)
+			local onHit = Workspace:Raycast(fromOn, Vector3.new(0, -600, 0), params)
+			if onHit == nil then
+				previousY = nil
+				table.insert(
+					ON_LINE_GAPS,
+					`no crossing at x={math.floor(x)} between {a.Name} and {b.Name}`
+				)
 			else
-				local drop = from.Y - hit.Position.Y
-				if drop > worstDrop then
-					worstDrop = drop
-					worstAt = `x={math.floor(x)} between {a.Name} and {b.Name}`
-					worstOnto = hit.Instance.Name
+				-- MEASURE THE STEP, NOT THE HEIGHT. An earlier version compared each sample against
+				-- the higher of the two islands, which reports a RAMP as a 9.7-stud "dip" — the
+				-- crossing rises 14 studs over its length, so of course its foot is far below its
+				-- head. That is what a bridge IS. What a player cannot walk up is a sudden STEP, so
+				-- that is what gets compared: the change in ground height per stud travelled.
+				if previousY ~= nil then
+					local step = math.abs(onHit.Position.Y - previousY)
+					if step > worstDrop then
+						worstDrop = step
+						worstAt = `x={math.floor(x)} between {a.Name} and {b.Name}`
+						worstOnto = onHit.Instance.Name
+					end
 				end
+				previousY = onHit.Position.Y
+			end
+
+			-- OFF the crossing line: there must be nothing. A floor here means the archipelago is a
+			-- car park and the barriers gate a route nobody has to take.
+			offLineSteps += 1
+			local fromOff = Vector3.new(x, top, a.Position.Z + OFF_LINE_Z)
+			if Workspace:Raycast(fromOff, Vector3.new(0, -600, 0), params) ~= nil then
+				offLineSupported += 1
 			end
 		end
 	end
 
 	diagnostics.traversal = {
 		platforms = #platforms,
-		stepsSampled = steps,
-		voidSteps = voidSteps,
+		onLineSteps = onLineSteps,
+		onLineGaps = #ON_LINE_GAPS,
+		offLineSteps = offLineSteps,
+		offLineSupported = offLineSupported,
 		worstDropStuds = worstDrop,
 		worstDropAt = worstAt,
 		landsOn = worstOnto,
@@ -417,15 +472,24 @@ runPhase("traversal", function(): (boolean, any)
 	if #surfaceMisses > 0 then
 		return false, surfaceMisses
 	end
-	if voidSteps > 0 then
+	if #ON_LINE_GAPS > 0 then
+		return false, ON_LINE_GAPS -- the crossing a player is meant to use has a hole in it
+	end
+	if offLineSupported > 0 then
 		return false,
-			`{voidSteps} of {steps} sampled points between islands have NOTHING beneath them — a player who steps there falls forever`
+			`{offLineSupported} of {offLineSteps} points {OFF_LINE_Z} studs off the crossing line have GROUND beneath them — this is a floor, not an archipelago, and the island barriers gate a route nobody has to take`
+	end
+	-- The drop is now COMPARED, not merely printed. A bridge that dips more than a character can
+	-- climb back out of is a crossing in name only.
+	if worstDrop > 3 then
+		return false,
+			`the crossing dips {string.format("%.1f", worstDrop)} studs below the islands it joins at {worstAt} (onto {worstOnto}) — too deep to walk back out of`
 	end
 	return true,
-		`{#platforms} platforms, all surfaces supported, {steps} inter-island points sampled with 0 over the void; worst fall {string.format(
+		`{#platforms} platforms; {onLineSteps} points ON the crossing all supported (worst dip {string.format(
 			"%.1f",
 			worstDrop
-		)} studs onto {worstOnto} ({worstAt}) — whether that is CROSSABLE is not asserted, physics does not run here`
+		)} studs onto {worstOnto}), and all {offLineSteps} points {OFF_LINE_Z} studs off it are over the VOID — whether the crossing is walkable at speed is not asserted, physics does not run here`
 end)
 
 -- ══ PHASE: no-log-errors ═════════════════════════════════════════════════════════════════════════
@@ -607,10 +671,33 @@ runPhase("client-load", function(): (boolean, any)
 		`{#loaded} client module(s) loaded clean; {#blockedByLocalPlayer} need a real LocalPlayer (expected in edit mode, NOT a defect); 0 real load failures`
 end)
 
--- ══ KNOWN-RED: reported separately, never gating ═════════════════════════════════════════════════
--- These are expected to FAIL against the current build because they assert the SPEC, and the build
--- does not meet it yet. They are kept out of the pass/fail AND so the gate stays meaningful, and
--- surfaced loudly so they cannot quietly become normal.
+-- ══ SPEC ASSERTIONS — GATING. A red here PARKS the run; it can never be green. ═══════════════════
+
+-- Give a synthetic player a real body, standing on real geometry.
+--
+-- This is now REQUIRED, and the requirement is itself a finding. Collect is position-gated: the
+-- server derives which island you are on from your character's own position, and a request from a
+-- player who is nowhere is refused. A plain `{UserId, Name}` table has no character, so the probe
+-- below used to record `capacityBefore: -1, capacityAfter: -1` — a measurement that could not be
+-- taken, which the old lane would then have reported as a detail field rather than as a red.
+--
+-- A table player CAN carry a real Model in `.Character`, which is exactly what the position seam
+-- reads. So the lane places its player on the starting island, the way a real one arrives.
+local function embody(player: any, x: number, y: number, z: number): ()
+	local model = Instance.new("Model")
+	model.Name = `T25Body_{player.UserId}`
+	local root = Instance.new("Part")
+	root.Name = "HumanoidRootPart"
+	root.Anchored = true
+	root.CanCollide = false
+	root.Transparency = 1
+	root.Size = Vector3.new(2, 2, 1)
+	root.Position = Vector3.new(x, y, z)
+	root.Parent = model
+	model.PrimaryPart = root
+	model.Parent = Workspace
+	player.Character = model
+end
 
 runKnownRed("upgrade-effects", function(): (boolean, any)
 	if bootError ~= nil then
@@ -620,39 +707,176 @@ runKnownRed("upgrade-effects", function(): (boolean, any)
 	local player = freshPlayer("upg")
 	context.data:loadSession(player)
 	context.data:update(player, function(d: any): any
-		d.currencies.Stardust = 100000
+		d.currencies.Stardust = 1000000
 		return d
 	end)
+	embody(player, 0, 6, 0) -- standing on the starting island
 
-	-- ONLY `backpack` has a server-observable channel: Collect's reply carries `capacity`. The other
-	-- three upgrades live entirely in client constants, so a server script CANNOT assert their
-	-- effect. Asserting "the level incremented" instead would PASS on a completely inert upgrade —
-	-- a tautology dressed as a check — so they are declared UNASSERTABLE by name instead.
-	local UNASSERTABLE: { [string]: string } = {
-		["walk-speed"] = "Humanoid.WalkSpeed (client)",
-		["magnet"] = "CollectionController ABSORB_RADIUS (client constant)",
-		["collect-speed"] = "CollectionController TICK (client constant)",
-	}
-
-	local before = invokeAs(player, A.Collect, {})
-	local capBefore = if before ~= nil and before.ok then before.value.capacity else -1
-
-	local bought = invokeAs(player, A.BuyUpgrade, { upgradeId = "backpack" })
-	if bought == nil or not bought.ok then
-		local code = if bought ~= nil then tostring(bought.code) else "nil"
-		return false, `could not buy the backpack upgrade to test it: {code}`
+	-- EVERY upgrade is server-observable now, and that is the whole point of the fix this phase
+	-- exists to police. capacity/magnetRadius/collectPeriod ride the Collect reply; walkSpeed rides
+	-- the shop projection. Nothing here is declared "unassertable": if the server cannot see an
+	-- upgrade's effect, neither can the player, and that is a RED rather than a footnote.
+	local function tuningNow(): any
+		local reply = invokeAs(player, A.Collect, {})
+		local shop = invokeAs(player, A.FetchUpgrades, {})
+		if reply == nil or not reply.ok then
+			local code = if reply ~= nil then tostring(reply.code) else "nil"
+			local message = if reply ~= nil then tostring(reply.message) else ""
+			return nil, `Collect refused ({code}: {message}) — cannot measure any upgrade`
+		end
+		if shop == nil or not shop.ok then
+			return nil, "FetchUpgrades refused — cannot read walkSpeed"
+		end
+		return {
+			capacity = reply.value.capacity,
+			magnetRadius = reply.value.magnetRadius,
+			collectPeriod = reply.value.collectPeriod,
+			walkSpeed = shop.value.tuning.walkSpeed,
+		}
 	end
 
-	local after = invokeAs(player, A.Collect, {})
-	local capAfter = if after ~= nil and after.ok then after.value.capacity else -1
+	-- Which tuning field each upgrade is supposed to move, and in which direction.
+	local EXPECTED: { { id: string, field: string, direction: number } } = {
+		{ id = "backpack", field = "capacity", direction = 1 },
+		{ id = "magnet", field = "magnetRadius", direction = 1 },
+		{ id = "collect-speed", field = "collectPeriod", direction = -1 }, -- shorter is faster
+		{ id = "walk-speed", field = "walkSpeed", direction = 1 },
+	}
+
+	local before, err = tuningNow()
+	if before == nil then
+		return false, err
+	end
+
+	local moved: { [string]: any } = {}
+	local inert: { string } = {}
+	for _, expectation in EXPECTED do
+		local bought = invokeAs(player, A.BuyUpgrade, { upgradeId = expectation.id })
+		if bought == nil or not bought.ok then
+			local code = if bought ~= nil then tostring(bought.code) else "nil"
+			table.insert(inert, `{expectation.id}: could not buy ({code})`)
+			continue
+		end
+		local after, afterErr = tuningNow()
+		if after == nil then
+			return false, afterErr
+		end
+		local from = before[expectation.field]
+		local to = after[expectation.field]
+		moved[expectation.id] = `{expectation.field} {from} -> {to}`
+		if (to - from) * expectation.direction <= 0 then
+			table.insert(
+				inert,
+				`{expectation.id}: {expectation.field} did not move ({from} -> {to})`
+			)
+		end
+		before = after
+	end
+
+	local detail = { moved = moved, inert = inert }
+	if #inert > 0 then
+		return false, detail
+	end
+	return true, detail
+end)
+
+-- ══ SPEC ASSERTION: the island unlock must change ACCESS, not just a number ══════════════════════
+-- The world had no barrier of any kind, so a player with zero Stardust walked onto islands 2-5 in
+-- the first minute and the unlock sold access they already had. Access is a per-player collision
+-- group, which is a plain DataModel state delta — no physics stepping required to read it.
+runKnownRed("island-access", function(): (boolean, any)
+	if bootError ~= nil then
+		return false, `bootstrap failed: {bootError}`
+	end
+	local PhysicsService = game:GetService("PhysicsService")
+	local world = Workspace:FindFirstChild("World")
+	local barriers = world and world:FindFirstChild("Barriers")
+	if barriers == nil or #barriers:GetChildren() == 0 then
+		return false, "NO BARRIERS EXIST — every locked island is freely walkable"
+	end
+
+	local gatedIds: { number } = {}
+	for _, part in barriers:GetChildren() do
+		local gates = part:GetAttribute("gatesIslandId")
+		if type(gates) == "number" then
+			table.insert(gatedIds, gates)
+		end
+	end
+	table.sort(gatedIds)
+	if #gatedIds == 0 then
+		return false, "barriers exist but none declares the island it gates"
+	end
+
+	-- A player who owns nothing must be BLOCKED by every gate; a player who owns island 2 must be
+	-- blocked by every gate EXCEPT island 2's. Read straight off the collision matrix.
+	local blockedAtLevel0: { string } = {}
+	local blockedAtLevel2: { string } = {}
+	for _, islandId in gatedIds do
+		local barrierGroup = `CsBarrier_{islandId}`
+		local ok0, collides0 = pcall(function()
+			return PhysicsService:CollisionGroupsAreCollidable("CsAccess_0", barrierGroup)
+		end)
+		local ok2, collides2 = pcall(function()
+			return PhysicsService:CollisionGroupsAreCollidable("CsAccess_2", barrierGroup)
+		end)
+		if not ok0 or not ok2 then
+			return false, `collision groups are not configured for island {islandId}`
+		end
+		if collides0 then
+			table.insert(blockedAtLevel0, tostring(islandId))
+		end
+		if collides2 then
+			table.insert(blockedAtLevel2, tostring(islandId))
+		end
+	end
 
 	local detail = {
-		backpackCapacityBefore = capBefore,
-		backpackCapacityAfter = capAfter,
-		backpackUpgradeHasEffect = capAfter > capBefore,
-		unassertableFromServer = UNASSERTABLE,
+		gates = gatedIds,
+		blockedOwningNothing = blockedAtLevel0,
+		blockedOwningIsland2 = blockedAtLevel2,
 	}
-	if capAfter <= capBefore then
+	if #blockedAtLevel0 ~= #gatedIds then
+		return false, detail -- a gate that stops nobody is not a gate
+	end
+	if #blockedAtLevel2 ~= #gatedIds - 1 then
+		return false, detail -- buying island 2 must open exactly one gate
+	end
+	return true, detail
+end)
+
+-- ══ SPEC ASSERTION: "no open exploit" ═══════════════════════════════════════════════════════════
+-- The spec names this a success criterion and, before this, NOTHING in any lane exercised it. The
+-- frozen server clock makes this a CEILING measurement rather than a pacing one, which is exactly
+-- what is wanted: with the clock stopped the credit never refills, so what an unlimited flood can
+-- extract is a deterministic number.
+runKnownRed("collect-ceiling", function(): (boolean, any)
+	if bootError ~= nil then
+		return false, `bootstrap failed: {bootError}`
+	end
+	local A = Net.Actions
+	local player = freshPlayer("flood")
+	context.data:loadSession(player)
+	embody(player, 0, 6, 0)
+
+	local granted = 0
+	local calls = 0
+	for _ = 1, 200 do
+		local reply = invokeAs(player, A.Collect, {})
+		calls += 1
+		if reply ~= nil and reply.ok then
+			granted += reply.value.granted
+		end
+	end
+	local sold = invokeAs(player, A.Sell, {})
+	local detail = {
+		calls = calls,
+		granted = granted,
+		soldMotes = if sold ~= nil and sold.ok then sold.value.sold else -1,
+		note = "server clock is frozen in this lane, so this is the WORST CASE a flood can ever mint",
+	}
+	-- One mote is the opening grant every session is allowed. Anything meaningfully above that
+	-- means the grant is keyed to the REQUEST rather than to the clock.
+	if granted > 2 then
 		return false, detail
 	end
 	return true, detail
@@ -756,20 +980,55 @@ for _, name in EXPECTED_PHASES do
 	table.insert(phases, { name = name, ok = ok, detail = phaseDetail[name] or "phase never ran" })
 end
 
+-- ----- THREE-STATE VERDICT: green | parked | red -----
+-- This lane once published `"ok": true` on a build where all four shop upgrades did nothing, every
+-- island was freely walkable, rebirth cut your income by 93%, and the leaderboard was empty in
+-- every live server. It was not that the lane failed to notice. `runKnownRed("upgrade-effects")`
+-- measured the backpack defect CORRECTLY and printed `capacityBefore: 50, capacityAfter: 50` — and
+-- then serialized it into a sibling field that contributed nothing to the verdict.
+--
+-- So the bug was never the assertion. It was that "I found something broken" and "everything is
+-- fine" could both be true of the same run. A second REPORTING CHANNEL cannot fix that; only a
+-- third VERDICT STATE can. `green` now requires every gating phase to pass AND the known-red
+-- ledger to be empty. A known-broken player-facing feature makes the run `parked` — never green.
+local failedKnownRed: { string } = {}
+for _, k in knownRed do
+	if k.ok ~= true then
+		table.insert(failedKnownRed, k.name)
+	end
+end
+
+local verdict: string
+if not allOk then
+	verdict = "red" -- a gating phase failed outright
+elseif #failedKnownRed > 0 then
+	verdict = "parked" -- the build runs, and a player-facing promise is measurably unmet
+else
+	verdict = "green"
+end
+
 print("── tier-2.5 AI PLAYTEST ──")
 for _, p in phases do
 	print(`  [{if p.ok then "PASS" else "FAIL"}] {p.name}: {HttpService:JSONEncode(p.detail)}`)
 end
-print("── known-red (NOT gating; assert the spec, which the build does not yet meet) ──")
+print(
+	"── spec assertions (GATING: any RED here parks the run — it can never be green) ──"
+)
 for _, k in knownRed do
 	print(`  [{if k.ok then "PASS" else "RED "}] {k.name}: {HttpService:JSONEncode(k.detail)}`)
 end
 print(`── diagnostics: {HttpService:JSONEncode(diagnostics)}`)
+print(`── VERDICT: {string.upper(verdict)}`)
 
 print(HttpService:JSONEncode({
 	tier = 2.5,
-	ok = allOk,
+	verdict = verdict,
+	-- `ok` is kept for any existing reader, but it now means what a reader assumes it means:
+	-- true ONLY on a fully green run. It used to be true on a parked one.
+	ok = verdict == "green",
+	gatingPhasesPassed = allOk,
+	parkedBy = failedKnownRed,
 	phases = phases,
-	knownRed = knownRed,
-	blindTo = "the ENTIRE client: HUD, motes, leaderboard board, client bootstrap, ProximityPrompt reachability, and ALL physics (jumping, falling, collision). Physics does not step in this lane and there is no LocalPlayer. A green here is NOT 'ready to play'.",
+	specAssertions = knownRed,
+	blindTo = "the ENTIRE client: HUD, motes, leaderboard board, client bootstrap, ProximityPrompt reachability, and ALL physics (jumping, falling, collision). Physics does not step in this lane and there is no LocalPlayer. A green here is NOT 'ready to play' — the defects that shipped past this lane were found by a human in the first minute, and later reproduced by driving a live Studio session through the real RemoteFunction. See tests/tier2/ENGINE-FACTS.md.",
 }))

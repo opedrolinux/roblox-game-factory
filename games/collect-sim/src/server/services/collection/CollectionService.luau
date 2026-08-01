@@ -177,8 +177,21 @@ local function moteValueFor(ctx: any, d: any, islandId: number?): number
 			islandMult = seamMultiplier(value)
 		end
 	end
+	-- Today's rich vein is POSITIONAL too, and for the same reason: it is supposed to be a reason
+	-- to go somewhere. Banked per mote against the island the player was standing on, so a vein on
+	-- island 3 pays for motes gathered on island 3 — not for everything you do anywhere because
+	-- you happen to own island 3.
+	local restockMult = 1
+	if ctx.restock ~= nil and d ~= nil then
+		local ok, value = pcall(function()
+			return (ctx.restock :: any):multiplierFor(d, ctx.clock:unix(), islandId)
+		end)
+		if ok then
+			restockMult = seamMultiplier(value)
+		end
+	end
 	local yieldMult = tuningFrom(ctx, d, "yieldMultiplierFor", 1, 0)
-	return MOTE_VALUE * islandMult * yieldMult
+	return MOTE_VALUE * islandMult * restockMult * yieldMult
 end
 
 local CollectionService = { name = "CollectionService" }
@@ -361,17 +374,13 @@ local function makeSellAction(
 			local earned = 0
 
 			local updated = ctx.data:update(ctx.player, function(d)
-				local restockMult = 1
-				if ctx.restock ~= nil then
-					restockMult = seamMultiplier((ctx.restock :: any):multiplierFor(d, now))
-				end
 				local stardustMult = 1
 				if ctx.monetization ~= nil then
 					stardustMult =
 						seamMultiplier((ctx.monetization :: any):stardustMultiplierFor(d, now))
 				end
 				local rebirthMult = 1 + (d.rebirths or 0) * REBIRTH_STEP
-				earned = math.floor(bankedValue * restockMult * stardustMult * rebirthMult)
+				earned = math.floor(bankedValue * stardustMult * rebirthMult)
 				d.currencies.Stardust = (d.currencies.Stardust or 0) + earned
 				if d.stats ~= nil then
 					d.stats.lifetimeStardust = (d.stats.lifetimeStardust or 0) + earned

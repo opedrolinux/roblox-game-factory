@@ -1129,11 +1129,17 @@ end)
 -- position seam wired, which is the composition no per-feature gate can see.
 -- =====================================================================================================
 describe("Where you STAND decides what a mote is worth, end-to-end", function()
+	-- Day 14 -> 14%5 == 4 -> today's rich vein is island 5, which no player below unlocks. That
+	-- isolation is load-bearing now that the vein is POSITIONAL: on day 12 the vein lands on island
+	-- 3, and measuring the island-3 rate on that day folds the 3x vein into the 4x island and reads
+	-- 12x. The suite caught exactly that when the vein moved from ownership to position.
+	local VEIN_FREE_DAY = 14
+
 	it(
 		"the same motes pay more on island 3 than on island 1, with everything else equal",
 		function()
 			local SECONDS_PER_DAY = 86400
-			local g = buildGame({ startUnix = 12 * SECONDS_PER_DAY + 100, world = true })
+			local g = buildGame({ startUnix = VEIN_FREE_DAY * SECONDS_PER_DAY + 100, world = true })
 			local p = Mocks.player(95, "Wanderer")
 			g:join(p)
 			setStardust(g, p, 100000)
@@ -1157,7 +1163,7 @@ describe("Where you STAND decides what a mote is worth, end-to-end", function()
 		-- Every island has its own refiner, and mote value is banked at collect time, so walking
 		-- home to sell can never be a free multiplier choice — nor a tax for selling where you are.
 		local SECONDS_PER_DAY = 86400
-		local g = buildGame({ startUnix = 12 * SECONDS_PER_DAY + 100, world = true })
+		local g = buildGame({ startUnix = VEIN_FREE_DAY * SECONDS_PER_DAY + 100, world = true })
 		local p = Mocks.player(96, "Hauler")
 		g:join(p)
 		setStardust(g, p, 100000)
@@ -1177,6 +1183,41 @@ describe("Where you STAND decides what a mote is worth, end-to-end", function()
 		expect(onSite.sold):toBe(collectedAgain)
 
 		expect(atHome.earned / atHome.sold):toBe(onSite.earned / onSite.sold)
+	end)
+
+	it("today's rich vein pays only where the vein IS, not everywhere you own", function()
+		-- The "rich vein on island N" was a global 3x granted for OWNING island N. Once all five
+		-- were unlocked it became a permanent, invariant 3x that never rotated and never sent
+		-- anyone anywhere — a daily event that does not move the player is not an event.
+		local SECONDS_PER_DAY = 86400
+		-- Day 11 -> 11%5 == 1 -> vein island 2. The player owns 2 AND 3, so ownership alone cannot
+		-- explain a difference between them: only standing on the vein can.
+		local g = buildGame({ startUnix = 11 * SECONDS_PER_DAY + 100, world = true })
+		local p = Mocks.player(97, "Prospector")
+		g:join(p)
+		setStardust(g, p, 100000)
+		for _, id in { 2, 3 } do
+			expect(g.invoke(A.UnlockIsland, p, { islandId = id })):toBeOk()
+		end
+
+		local fetch = g.invoke(A.FetchRestock, p, {})
+		expect(fetch):toBeOk()
+		local veinIsland = (fetch :: any).value.islandId
+		expect(veinIsland):toBe(2)
+		local veinBonus = (fetch :: any).value.multiplier
+		expect(veinBonus > 1):toBe(true)
+
+		g.context.world:standOn(p.UserId, 2) -- ON the vein
+		local onVein = earnPerMote(g, p, 20)
+		g.context.world:standOn(p.UserId, 3) -- a RICHER island, but not today's vein
+		local offVein = earnPerMote(g, p, 20)
+
+		-- Island 3 is worth 4x and island 2 is worth 2x, so without the vein island 3 must win.
+		-- With the vein on island 2, island 2 earns 2 * 3 = 6x against island 3's 4x — so standing
+		-- on the vein beats standing on the objectively better island. That inversion is the whole
+		-- point of a daily vein, and it was impossible while the bonus applied everywhere.
+		expect(onVein > offVein):toBe(true)
+		expect(onVein / offVein):toBe((2 * veinBonus) / 4)
 	end)
 end)
 

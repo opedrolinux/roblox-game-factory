@@ -107,8 +107,18 @@ end
 -- can call it under the per-player lock. When `d` is nil OR `now` is not a usable number we return
 -- the identity default 1, so the pre-feature Sell behavior is preserved exactly and a focused test
 -- that omits a snapshot stays a no-op multiplier.
+-- ----- THE VEIN IS A PLACE, NOT A PERMISSION -----
+-- `islandId` is WHERE THE PLAYER IS STANDING, supplied by the caller from the position seam. It is
+-- the difference between "there is a rich vein on island 3 today — go there" and "you own island 3,
+-- so everything you do anywhere pays 3x". The feature was the second one: the bonus applied to
+-- every sale from every island the moment you UNLOCKED the vein island, and once all five were
+-- unlocked it became a permanent, invariant 3x that never rotated and never sent anyone anywhere.
+-- A daily event that does not move the player is not an event, it is a number.
+--
+-- `islandId == nil` (no world wired, offline earnings, no character) falls back to the old
+-- ownership test, which is the right reading for a reward that is not tied to a place.
 local RestockSeam = {}
-function RestockSeam.multiplierFor(_self: any, d: any, now: number): number
+function RestockSeam.multiplierFor(_self: any, d: any, now: number, islandId: number?): number
 	if d == nil then
 		return 1
 	end
@@ -117,6 +127,13 @@ function RestockSeam.multiplierFor(_self: any, d: any, now: number): number
 		return 1
 	end
 	local veinId = richVeinIslandId(now)
+	if islandId ~= nil then
+		-- Positional: you must be STANDING on today's vein, and own it.
+		if islandId == veinId and hasIslandUnlocked(d, veinId) then
+			return RICH_VEIN_MULTIPLIER
+		end
+		return 1
+	end
 	if hasIslandUnlocked(d, veinId) then
 		return RICH_VEIN_MULTIPLIER
 	end
