@@ -316,7 +316,7 @@
           Ten features and a walkable world, booted in a real DataModel, saves proven against real
           storage, and a machine playtest confirming the scene is not obviously broken.
         </span>
-        <span class="metric">361 / 361 tests · T2.5 green · 1 known defect · 1 fixed &amp; proven in-engine · awaiting human playtest</span>
+        <span class="metric">422 / 422 tests · T2.5 GREEN on rebuilt phases · 66-defect audit remediated · 5 more found by playing it in Studio · awaiting human playtest</span>
       </div>
     </div>
   </section>
@@ -505,9 +505,23 @@
       <div class="col col-machine">
         <div class="chead">
           <span class="ctag">I can do these</span>
-          <h3>One known defect, one fixed, and a missing suite</h3>
+          <h3>66 audited defects, remediated — then five more found by playing it</h3>
         </div>
         <ul>
+          <li class="done">
+            <span class="bullet">✓</span>
+            <span>
+              A human played it and said nothing worked. They were right — <strong>66 defects confirmed, then fixed</strong>
+              <small>One pattern explained 26 of them: <em>a value the player pays for is written to the save file, and the rule that governs play is a hardcoded constant sitting next to it, reading nothing.</em> Maxing all four upgrades cost 9,625 Stardust and changed nothing; rebirth cut earnings up to 93%; islands 2–5 were freely walkable so the unlock sold access you already had; the leaderboard rejected every real player because one guard tested for a Lua table and a Player is userdata. All now fixed, and the pattern itself is mechanized as a static gate that walks the source and fails when any published value has no reader.</small>
+            </span>
+          </li>
+          <li class="done">
+            <span class="bullet">✓</span>
+            <span>
+              Then the game was driven in a live Studio session — <strong>five more, invisible to every offline lane</strong>
+              <small>A player owning island 2 was still walled in, because access was computed before their save loaded. Every mote was parked invisible, because the world replicates after the controller starts. And the sky: a Sky with blank textures draws no stars, and an Atmosphere paints a lit blue floor under islands meant to be floating — deleting both was the fix. Three of the five were invisible in every log and obvious in a screenshot.</small>
+            </span>
+          </li>
           <li class="done">
             <span class="bullet">✓</span>
             <span>
