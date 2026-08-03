@@ -17,6 +17,7 @@ local gateReachabilitySpec = require("./gate_reachability_spec")
 -- guard nobody runs is the rot it was built to catch.
 local t25HarnessLoader = require("./t25_harness_loader")
 local t25ForgerySpec = require("./t25_forgery_spec")
+local t25ProvenanceSpec = require("./t25_provenance_spec")
 
 local checks = 0
 local failures: { string } = {}
@@ -36,6 +37,7 @@ runSpec("sample-removal gate", gateSampleSpec)
 runSpec("reachability gate", gateReachabilitySpec)
 runSpec("t2.5 harness (the REAL template, loaded)", t25HarnessLoader.spec)
 runSpec("t2.5 channel forgery (the REAL template)", t25ForgerySpec.spec)
+runSpec("t2.5 artifact provenance (attack A9)", t25ProvenanceSpec.spec)
 
 if #failures > 0 then
 	print(string.format("FAIL - %d of %d checks failed:", #failures, checks))

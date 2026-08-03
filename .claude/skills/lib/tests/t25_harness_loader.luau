@@ -701,6 +701,23 @@ function loader.filledBootstrapMirror(names: { string }): Substitution
 	}
 end
 
+-- The self-parenting rule (a `world` delta whose act made no harness-owned game action is refused)
+-- is CORRECT for a real game and IMPOSSIBLE to satisfy in this sandbox: there is no booted game
+-- here, so `invokeAs` cannot be called, and every fixture below must therefore parent its own
+-- marker Part to make the world move at all.
+--
+-- This is a concession granted to the HARNESS SELF-TESTS and to nothing else. It is declared, not
+-- silent, and it is not reachable by a phase author -- a fork gets the shipped template, where the
+-- rule is on. Fixtures that exist to test the rule ITSELF must not pass this substitution, or they
+-- would be testing the concession. See `t25_forgery_spec` attack D.
+function loader.relaxSelfParentRule(): Substitution
+	return {
+		anchor = '		if effective == "world" and actGameActions == 0 then',
+		replacement = "		if false then",
+		why = "the sandbox has no booted game, so no fixture can drive a world change through invokeAs; granted to harness self-tests only",
+	}
+end
+
 -- ═════════════════════════════════════════════════════════════════════════════════════════════════
 -- THE DEMONSTRATION.  Driven by tests/run.luau.
 --
@@ -710,7 +727,7 @@ end
 -- file exists.
 -- ═════════════════════════════════════════════════════════════════════════════════════════════════
 
-local FORK = { loader.filledBootstrapMirror(DEFAULT_MOUNT_CHILDREN) }
+local FORK = { loader.filledBootstrapMirror(DEFAULT_MOUNT_CHILDREN), loader.relaxSelfParentRule() }
 
 -- Failure detail only. A check that fails must say what it SAW, or the next agent re-derives it.
 local function shortJson(value: any): string
@@ -1239,7 +1256,11 @@ function loader.spec(sourcePath: string?): (number, { string })
 	-- survive to be read. A throw here would blank the whole report at exactly the moment somebody
 	-- needs it.
 	local mutantOk, mutant = pcall(function(): any
-		local sandbox = loader.load({ source = template, substitutions = { FORK[1], MUTATION } })
+		-- FORK[1] and FORK[2] both neutralise clauses that are NOT under test here (the bootstrap
+		-- blocker and the self-parenting rule), for the same reason `blindTo` and the shipped mint
+		-- are used above: the subject floor must be the only variable the mutation moves.
+		local sandbox =
+			loader.load({ source = template, substitutions = { FORK[1], FORK[2], MUTATION } })
 		sandbox.Harness.phase(zeroSubjectsButMoving(sandbox))
 		sandbox.Harness.finish({ "no-subjects" })
 		return sandbox:evidence()

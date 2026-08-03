@@ -209,6 +209,11 @@ type PhaseState = {
 	subjectsWhat: { string },
 	deltas: number,
 	channels: { [string]: number }, -- effective channel -> count, the anti-A1/A2 evidence
+	-- PER-SUBJECT channels. `channels` above is a phase-wide tally, and a phase-wide tally is
+	-- exactly what let the root pattern back in: one genuine `world` delta anywhere in the phase
+	-- satisfied the rule for every save-only delta beside it. The subject is the unit that has to
+	-- carry its own evidence, so the counts are kept per subject as well as in aggregate.
+	subjectChannels: { [string]: { [string]: number } },
 	failures: { string },
 	passes: { string },
 	unmeasurable: { Unverified },
@@ -448,6 +453,28 @@ end
 
 local function resetContact(): ()
 	contact.reply, contact.world, contact.saved = 0, 0, 0
+end
+
+-- ── THE ACT LEDGER ───────────────────────────────────────────────────────────────────────────────
+-- The contact ledger above scopes to READS: it answers "where did this value come from". This one
+-- scopes to ACTS and answers a different question the harness could not previously ask at all:
+-- "who moved the world -- the game, or this phase?"
+--
+-- A `world` delta whose act parents its own instances is a phase measuring its own hand. The value
+-- moved, the reader is genuinely minted, the ledger is genuinely hit -- and none of it says anything
+-- about the GAME. The template shipped exactly this shape as `example-delta` (make a Folder, then
+-- count IntValues you parent into it), so it was the pattern being taught.
+--
+-- Only harness-owned actions count, because those are the only ones that go THROUGH the game:
+-- `invokeAs` (the real remote gateway) and `embody`/`moveBody`/`disembody` (a body the game's own
+-- systems react to). Raw `Instance.new(...).Parent = workspace` is not one of them, by design.
+local actDepth = 0
+local gameActions = 0
+
+local function noteGameAction(): ()
+	if actDepth > 0 then
+		gameActions += 1
+	end
 end
 
 local function contactSnapshot(): { [string]: number }
@@ -831,6 +858,13 @@ local function newProbe(state: PhaseState): Probe
 		state.channels[effective] = (state.channels[effective] or 0) + 1
 		if type(subject) == "string" and subject ~= "" then
 			state.coveredIds[subject] = true
+			-- The same count, kept where it can actually be held against the subject it describes.
+			local per = state.subjectChannels[subject]
+			if per == nil then
+				per = {}
+				state.subjectChannels[subject] = per
+			end
+			per[effective] = (per[effective] or 0) + 1
 		end
 	end
 
@@ -886,7 +920,13 @@ local function newProbe(state: PhaseState): Probe
 		-- this waited until after the act, both "sides" would be the same object.
 		local beforeSnapshot = snapshotValue(beforeRaw)
 
+		-- THE ACT WINDOW. Zeroed and depth-scoped for the same reason the read window is: an
+		-- `invokeAs` made during a READ must not be mistaken for one made during the ACT.
+		gameActions = 0
+		actDepth += 1
 		local actOk, actErr = pcall(act)
+		actDepth -= 1
+		local actGameActions = gameActions
 		if not actOk then
 			fail(state, `delta "{label}": the act threw: {tostring(actErr)}`)
 			return
@@ -909,6 +949,20 @@ local function newProbe(state: PhaseState): Probe
 		local effective, mintProblem = effectiveChannel(theReader.channel, hits)
 		if mintProblem ~= nil then
 			fail(state, `delta "{label}" ({theReader.what}): {mintProblem}`)
+		end
+
+		-- SELF-PARENTED SUBJECTS. A `world` delta is a claim that the GAME changed the world. If the
+		-- act went through no harness-owned action at all, the only thing known to have touched the
+		-- world during that window is this phase. The reader can be perfectly minted and the ledger
+		-- perfectly hit and the claim still be about the phase's own hand -- which is how the shipped
+		-- `example-delta` (make a Folder, count the IntValues you put in it) passed as game contact.
+		-- Scoped to `world` deliberately: `reply` already proves a gateway crossing by construction,
+		-- and widening this would flag correct code, which is how a gate gets switched off.
+		if effective == "world" and actGameActions == 0 then
+			fail(
+				state,
+				`delta "{label}" ({theReader.what}): the world moved, but the act made NO harness-owned game action -- no invokeAs, no embody/moveBody. Nothing but this phase is known to have touched the world in that window, so this measures the harness's own hand, not the game. Drive the change through Harness.invokeAs or Harness.moveBody.`
+			)
 		end
 
 		local before, after = beforeSnapshot, afterSnapshot
@@ -1332,6 +1386,7 @@ end
 -- A plain `{UserId, Name}` table stands NOWHERE. Any server that derives eligibility from position
 -- refuses such a player, and the refusal looks exactly like a legitimate one.
 function Harness.embody(player: any, position: Vector3?): Model
+	noteGameAction()
 	Harness.disembody(player)
 	local at = position or Harness.spawnPoint()
 	local model = Instance.new("Model")
@@ -1352,6 +1407,7 @@ function Harness.embody(player: any, position: Vector3?): Model
 end
 
 function Harness.moveBody(player: any, position: Vector3): ()
+	noteGameAction()
 	local model = embodied[player]
 	if model == nil then
 		failActive(`moveBody called for an unembodied player ({tostring(player.Name)})`)
@@ -1397,6 +1453,9 @@ function Harness.invokeAs(player: any, actionName: string, payload: any): any
 	-- `probe:delta` read is in flight, which is what makes "this value came back through the real
 	-- remote gateway" a MEASURED fact rather than a declared one.
 	noteContact("reply")
+	-- ...and the ACT ledger's counter, which is scoped to the act window instead. A dispatch is the
+	-- clearest possible evidence that the GAME, not the phase, is what moved next.
+	noteGameAction()
 	local ok, reply = pcall(function(): any
 		local ctx = (BOOT.net :: any):actionContext(player)
 		return (BOOT.Net :: any).dispatch(BOOT.registry, BOOT.gate, ctx, actionName, payload)
@@ -1737,6 +1796,7 @@ function Harness.phase(spec: PhaseSpec): ()
 		subjectsWhat = {},
 		deltas = 0,
 		channels = {},
+		subjectChannels = {},
 		failures = {},
 		passes = {},
 		unmeasurable = {},
@@ -1882,6 +1942,26 @@ function Harness.phase(spec: PhaseSpec): ()
 				)
 			end
 		end
+
+		-- THE SAME RULE, PER SUBJECT. The aggregate above is necessary and NOT sufficient: it was
+		-- satisfied by a single genuine `world` delta anywhere in the phase, which then sheltered
+		-- every save-only delta beside it. "The capacity upgrade saved 60" and "a rock respawned"
+		-- are different subjects; the second cannot vouch for the first. Sorted so the message is
+		-- deterministic across runs -- a verdict that reorders between runs is unreviewable.
+		local laundered: { string } = {}
+		for subject, per in state.subjectChannels do
+			local subjectReached = (per.reply or 0) + (per.world or 0)
+			if subjectReached == 0 and (per.saved or 0) > 0 then
+				table.insert(laundered, subject)
+			end
+		end
+		table.sort(laundered)
+		for _, subject in laundered do
+			table.insert(
+				channelReasons,
+				`subject "{subject}" was asserted ONLY against the save file ({state.subjectChannels[subject].saved} delta(s), no reply/world reader on this subject). Another subject in this phase did reach the game, and that is exactly the laundering this rule exists to stop: the save file moving proves the write happened, never that the rule governing play reads it back. Give THIS subject its own paired reply/world reader -- see probe:governs.`
+			)
+		end
 	end
 
 	local ok = #state.failures == 0
@@ -1944,6 +2024,9 @@ function Harness.phase(spec: PhaseSpec): ()
 		uncoveredSubjects = uncovered,
 		deltas = state.deltas,
 		channels = state.channels,
+		-- Emitted so a reviewer (and the factory's own spec) can see WHICH subject carried which
+		-- evidence, rather than a phase-wide total that hides the distribution.
+		subjectChannels = state.subjectChannels,
 		detail = if ok
 			then `{state.subjects} subject(s) [{table.concat(state.subjectsWhat, ", ")}], {state.deltas} delta(s) asserted [{channelSummary}]; {#state.passes} assertion(s) passed`
 			else table.concat(reasons, " | "),
@@ -2749,10 +2832,19 @@ Harness.phase({
 -- awkward it would be to assert a bare write instead; there is no API for it. That awkwardness is
 -- the entire lesson. `probe:expect` alone can never green a phase.
 --
--- THIS EXAMPLE USED TO TEACH THE ATTACK. It read `#folder:GetChildren()` off a Folder the phase had
--- just created itself — a closure over a phase-local, touching the game nowhere, and the template was
--- SHOWING that shape to every future game. The read below is MINTED instead: `Harness.readWorldCount`
--- walks the live Workspace, so the harness knows it made `world` contact and can say so.
+-- THIS EXAMPLE HAS TAUGHT TWO ATTACKS IN A ROW, WHICH IS WORTH KNOWING BEFORE YOU COPY IT.
+--
+--   1. It first read `#folder:GetChildren()` off a Folder the phase had just created — a closure over
+--      a phase-local, touching the game nowhere. Fixed by MINTING the read: `Harness.readWorldCount`
+--      walks the live Workspace, so the harness knows it made `world` contact and can say so.
+--   2. The minted version was still the harness measuring its own hand: the act PARENTED the very
+--      instances the reader then counted. The number moved, the mint was real, the ledger was
+--      real — and the game had nothing to do with any of it. That is why an act must now go through
+--      a harness-owned action (`invokeAs`, `embody`/`moveBody`), and why the act below does.
+--
+-- The lesson both times is the same one: an assertion is only about the game to the extent that the
+-- GAME is what moved. In YOUR fork, the act here should almost always be a real `Harness.invokeAs`
+-- of one of your own actions, with the reader watching the effect that action is supposed to have.
 Harness.phase({
 	name = "example-delta",
 	gating = false,
@@ -2763,28 +2855,24 @@ Harness.phase({
 		{ claim = "whether anything here is visible to a player", becauseLimit = "hasLocalPlayer" },
 	},
 	body = function(probe: Probe): ()
-		local folder = Instance.new("Folder")
-		folder.Name = "T25ExampleSubject"
-		folder.Parent = Workspace
+		local player = Harness.freshPlayer("example")
 		probe:subjects({ "example-subject" }, "example subject")
 
 		probe:delta(
-			"adding a child increases the child count IN THE LIVE WORKSPACE",
-			Harness.readWorldCount(
-				"children of T25ExampleSubject",
-				function(inst: Instance): boolean
-					return inst.Parent == folder
-				end
-			),
+			"embodying a player puts a body IN THE LIVE WORKSPACE",
+			Harness.readWorldCount("T25 bodies in Workspace", function(inst: Instance): boolean
+				return string.sub(inst.Name, 1, 8) == "T25Body_"
+			end),
 			function(): ()
-				local child = Instance.new("IntValue")
-				child.Name = "added"
-				child.Parent = folder
+				-- Harness-owned, so the world change is attributable to something other than this
+				-- phase's own hand. Replace this with `Harness.invokeAs(player, "<yourAction>", ...)`
+				-- and the shape carries straight over.
+				Harness.embody(player)
 			end,
 			{ direction = "up", minMagnitude = 0.5, subject = "example-subject" }
 		)
 
-		folder:Destroy()
+		Harness.disembody(player)
 	end,
 })
 -- ============ END REPLACE ME ============

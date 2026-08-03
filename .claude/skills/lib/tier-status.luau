@@ -176,6 +176,15 @@ local function verdictAgrees(decoded: any): boolean
 	return decoded.ok == (decoded.verdict == "green")
 end
 
+-- ── T2.5 PROVENANCE ──────────────────────────────────────────────────────────────────────────────
+-- ATTACK A9. Extracted whole into `t25-provenance.luau` so it can be PINNED by a spec: tier-status is
+-- a CLI script with top-level side effects, and a rule no test can reach is a rule that rots. The
+-- module carries the full argument, the collect-sim artifact that motivated it, and the fail-closed
+-- reasoning; this file only wires it to the game dir on the command line.
+local T25Provenance = require("./t25-provenance")
+
+local t25StaleReason: string? = nil
+
 local function readT25(): Ladder.Status?
 	local decoded = readEvidence(dir .. "/tests/tier2/last-playtest.json")
 	if decoded == nil then
@@ -186,6 +195,11 @@ local function readT25(): Ladder.Status?
 	end
 	local d = decoded :: any
 	if not verdictAgrees(d) then
+		return "red"
+	end
+	t25StaleReason =
+		T25Provenance.staleReason(dir, d, T25Provenance.newestMtimeUnder(dir .. "/src"))
+	if t25StaleReason ~= nil then
 		return "red"
 	end
 	local okByName = phaseOkByName(d)
@@ -319,6 +333,10 @@ local verdict = {
 	-- stopped somewhere.
 	t2Evidence = t2 or "unrun",
 	t25Evidence = t25 or "unrun",
+	-- Emitted whenever staleness is what reds T2.5. A bare "red" here would send the next reader
+	-- hunting through phase results for a failure that is not in them — the artifact's phases all
+	-- passed; it is the artifact itself that no longer describes this tree.
+	t25StaleReason = t25StaleReason,
 	t27Evidence = t27 or "unrun",
 	engineLaneAvailable = engineLaneAvailable,
 	studioLaneAvailable = studioLaneAvailable,
