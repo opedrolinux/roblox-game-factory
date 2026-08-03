@@ -10,6 +10,13 @@ local process = require("@lune/process")
 local mergeSpec = require("./merge_spec")
 local tierLadderSpec = require("./tier_ladder_spec")
 local gateSampleSpec = require("./gate_sample_spec")
+local gateReachabilitySpec = require("./gate_reachability_spec")
+-- Not a `_spec` module but a loader that EXERCISES the shipped T2.5 template: it slices the real
+-- `templates/tier2/playtest.server.luau` off disk and runs its verdict derivation under stubs. Wired
+-- in here on purpose — its fail-closed drift guards only fire if something runs them, and a drift
+-- guard nobody runs is the rot it was built to catch.
+local t25HarnessLoader = require("./t25_harness_loader")
+local t25ForgerySpec = require("./t25_forgery_spec")
 
 local checks = 0
 local failures: { string } = {}
@@ -26,6 +33,9 @@ end
 runSpec("merge classifier", mergeSpec)
 runSpec("verification ladder", tierLadderSpec)
 runSpec("sample-removal gate", gateSampleSpec)
+runSpec("reachability gate", gateReachabilitySpec)
+runSpec("t2.5 harness (the REAL template, loaded)", t25HarnessLoader.spec)
+runSpec("t2.5 channel forgery (the REAL template)", t25ForgerySpec.spec)
 
 if #failures > 0 then
 	print(string.format("FAIL - %d of %d checks failed:", #failures, checks))

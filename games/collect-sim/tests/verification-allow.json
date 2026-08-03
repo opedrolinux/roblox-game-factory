@@ -1,0 +1,29 @@
+{
+	"$schema": "verification-allow/1",
+	"entries": [
+		{
+			"rule": "view-field-read",
+			"subject": "Types.luau::PlayerView.schemaVersion",
+			"reason": "Server-owned migration bookkeeping, projected deliberately so a support probe can read a live player's schema version without a DataStore round-trip. No client file reads it and none should. The hand-written reachability spec this gate replaced carried the same exemption, dated, for the same reason.",
+			"addedUnix": 1785673132,
+			"addedBy": "review of the harvest-verification workflow",
+			"expiresUnix": 1788265000
+		},
+		{
+			"rule": "view-field-read",
+			"subject": "Types.luau::PlayerView.stats.joinCount",
+			"reason": "REAL DEBT, not a false positive. DataService increments it on every join (DataService.luau:154) and no client file displays it, so the server pays replication for a value nobody sees. Waived for one cycle to keep the gauntlet honest rather than red; the fix is to either surface it in the HUD or stop projecting it into PlayerView. The 30-day expiry forces that decision instead of burying it.",
+			"addedUnix": 1785673132,
+			"addedBy": "review of the harvest-verification workflow",
+			"expiresUnix": 1788265000
+		},
+		{
+			"rule": "view-field-read",
+			"subject": "Types.luau::PlayerView.stats.playtimeSeconds",
+			"reason": "REAL DEBT, and the worse of the two: this field is never WRITTEN either. Migrations initialises it to 0 and no code anywhere increments it, so it is dangling on both ends — persisted, replicated, and dead. Waived for one cycle only; the fix is to accumulate it server-side or drop it from the view. Exactly the written-never-read pattern this gate exists to catch, caught on the gate's first run against a game that had just been through a 66-defect audit.",
+			"addedUnix": 1785673132,
+			"addedBy": "review of the harvest-verification workflow",
+			"expiresUnix": 1788265000
+		}
+	]
+}

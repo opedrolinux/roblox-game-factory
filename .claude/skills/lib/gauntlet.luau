@@ -5,7 +5,10 @@
 --
 -- Runs, with cwd = <gameDir>: `stylua --check .` · `selene src` · `rojo build` · an in-process static
 -- `require-resolve` gate (gate-require.luau — verifies every require resolves in the Roblox DataModel,
--- catching cross-service requires that pass under Lune but throw at Roblox boot) · `lune run
+-- catching cross-service requires that pass under Lune but throw at Roblox boot) · an in-process static
+-- `reachability` gate (gate-reachability.luau — "written here, read nowhere": the root pattern behind 26
+-- of collect-sim's 66 confirmed defects, where a value the player PAYS for is written to the save file
+-- and the rule that governs play is a hardcoded constant beside it reading nothing) · `lune run
 -- tests/run.luau` — and prints ONE JSON line:
 --   {"ok":bool,"gameDir":"...","stages":[{"name":"stylua","ok":bool,"output":"..."},...]}
 -- Exit 0 iff every stage passed. The pipeline's builder / test-gate agents call this to get a
@@ -22,6 +25,11 @@ local stdio = require("@lune/stdio")
 
 -- T0.5 require-resolution gate (in-process; runs the static check the other four stages are blind to).
 local GateRequire = require("./gate-require")
+-- T1 static-reachability gate (in-process). Same fail-closed contract as GateRequire: `M.run` NEVER
+-- throws and NEVER writes — every failure path returns a red Stage carrying its own diagnostic, because
+-- the call below sits OUTSIDE the `run()` pcall helper and a throw here would kill the JSON line for the
+-- whole gauntlet (a "couldn't check" that reads as "nothing ran" instead of as a failure).
+local GateReachability = require("./gate-reachability")
 
 type Stage = { name: string, ok: boolean, output: string }
 
@@ -112,12 +120,38 @@ local function runLune(): Stage
 	return { name = "lune", ok = true, output = base.output }
 end
 
+-- The in-process gates fail closed the same way `run` does, one step further out: `run` pcalls the
+-- SPAWN, this pcalls the whole GATE. Both in-process gates document that they never throw — but "the
+-- gate promised not to throw" is not a verification, and an uncaught throw here does not produce a red
+-- stage, it produces NO JSON LINE AT ALL, which every downstream reader (tier-status, the workflow
+-- agents) sees as "the gauntlet did not run" rather than as a failure. Same doctrine as :49.
+local function runGate(name: string, gate: (string) -> Stage): Stage
+	local ok, result = pcall(gate, dir)
+	if not ok then
+		return {
+			name = name,
+			ok = false,
+			output = "the in-process `"
+				.. name
+				.. "` gate THREW: "
+				.. tostring(result)
+				.. "\n[gauntlet] a check that could not run is a FAILURE, never a skip.",
+		}
+	end
+	return result :: Stage
+end
+
 local buildOut = ".gauntlet-build.rbxlx"
 local stages: { Stage } = {
 	run("stylua", "stylua", { "--check", "." }),
 	run("selene", "selene", { "src" }),
 	run("rojo", "rojo", { "build", "default.project.json", "--output", buildOut }),
-	GateRequire.run(dir),
+	runGate("require", GateRequire.run),
+	-- T1 static reachability. Ordered BEFORE the lune stage deliberately: it is the cheapest gate in the
+	-- factory (milliseconds of string scanning, no subprocess) and it covers the largest single class of
+	-- defect any game here has had — the class that 313 green Lune tests coexisted with, because the
+	-- tests asserted the WRITE and never the READ.
+	runGate("reachability", GateReachability.run),
 	runLune(),
 }
 

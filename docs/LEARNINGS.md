@@ -11,6 +11,64 @@ Format: **the trap** · *why it's dangerous* · the shape to watch for · the fi
 
 ---
 
+## 0. THE ROOT PATTERN — written here, read nowhere
+
+> **A value the player pays for is written to the save file, and the rule that governs play is a
+> hardcoded constant sitting right next to it, reading nothing.**
+
+*Why it's dangerous:* it is **the single largest failure mode this factory has ever had** — one pattern
+behind **26 of 66 confirmed defects** in one game — and it is **invisible to a passing test suite by
+construction.** A human playtested `collect-sim` and said *"lots and lots of things are not working."*
+He was right. At that moment: **361 green Tier-1 tests** and an automated playtest lane reporting **all
+green**.
+
+**The shape to watch for** — this is what it looked like in the real tree:
+
+```
+CAPACITY = 50      sat beside   d.upgrades.backpack
+ABSORB_RADIUS = 6  sat beside   d.upgrades.magnet
+TICK = 0.06        sat beside   d.upgrades["collect-speed"]
+"WalkSpeed"        was absent from src/ entirely, while a walk-speed upgrade was on sale
+Prisms             granted by rebirth, persisted, shown in the HUD, decremented by nothing
+boostExpiresUnix / lastClaimUnix / resetsAtUnix / dayNumber   replicated, zero client readers
+```
+
+Maxing all four shop upgrades cost **9,625 Stardust and changed nothing.** Rebirth was a **pay cut** —
+it cleared the island flags, so income fell up to 93%, and the Prisms it paid out bought nothing.
+
+**The transferable half — the tests had the same shape.** Every test asserted the **WRITE** ("the level
+persisted", "the balance fell by the cost") and none asserted the **READ**. Worse, `Mocks.net` never
+projected `islands`/`restock`/`upgrades` into the `ActionContext`, so every seam was tested in
+**isolation** while the **composition** — a handler consuming a seam through `ctx` — was exercised by
+nothing at all.
+
+**The fix pattern — ASSERT THE DELTA.** Capture state `S`, perform action `A`, capture `S′`, assert
+`S′ − S` is the delta the spec promised. And its four corollaries, each of which cost the factory
+something:
+
+1. **A return code is not a delta.** `Ok` means the handler replied. The T2.5 lane accepted **any typed
+   `Err`** as a pass, so *"island 2 refuses to unlock"* was indistinguishable from working.
+2. **A registered action is not a delta.** "7 pad dispatches" was counted as 7 proofs; it was one empty
+   `Sell` plus six `Err(Insufficient)` refusals against a zero balance — the earn formula was never
+   entered once.
+3. **A module that requires is not a delta.** Resolution is not execution.
+4. **"I could not check this" must never serialize as green.** It needs a **third verdict state**
+   (`green`/`parked`/`red`), *not* a second reporting channel. The assertion that actually found the
+   backpack bug printed `capacityBefore: 50, capacityAfter: 50` — into a `knownRed` list emitted
+   **beside** the verdict. The run published `"ok": true`. *"I found something broken"* and *"everything
+   is fine"* were both true of the same run.
+
+**Who catches it now:** the **T1 static reachability gate** (`gate-reachability.luau`, gauntlet stage 5)
+offline in about a second, and the **T2.5** playtest lane by measured before/after. **Author it right;
+do not lean on the gates** — three of `gate-reachability`'s eight rules have measured blind spots and
+nine of eleven adversarial attacks on the T2.5 harness came back green
+(`docs/VERIFICATION-LADDER.md` §6.5, §7.6). *(Found by an 81-agent audit after the human playtest; 70
+findings raised, 66 confirmed by verifiers whose default was to refute.)*
+
+Full method: **`docs/AI-PLAYTEST-METHOD.md`.**
+
+---
+
 ## 1. Economy / concurrency (the most-caught class)
 
 - **Capacity-cap bypass on a failure-restore path.** *A player sells over the cap → free money.* When a
@@ -100,6 +158,35 @@ Format: **the trap** · *why it's dangerous* · the shape to watch for · the fi
 - **A recorded higher-tier FAILURE must block, not be swallowed.** When the engine-smoke (T2) was actually
   run and FAILED, the handoff must refuse — even if the automated lane is otherwise "down". A known
   non-booting game is never relabeled "ready". *(Found dogfooding the verification-ladder handoff guard.)*
+- **A vacuous gate is worse than no gate.** *A check that quietly stops finding subjects reports green
+  forever.* Real instances, all shipped: `spawn-safety` raycast downward and hit **the spawn pad itself**
+  — it would have passed with every island in the game deleted. `traversal` computed a `worstDrop` and
+  compared it to nothing. And the T2 boot smoke omitted `WorldService` from its hand-mirrored bootstrap
+  list, so for **weeks** every world assertion ran against a Workspace containing **zero parts** and
+  passed. **Fix:** every gate emits its **subject count numerically**, zero subjects on an applicable
+  rule is a **FAIL**, and a *drop* in subject count against a committed baseline is a FAIL too (16 seams
+  → 2 is the same lie as zero). Before trusting a new gate, **aim it at nothing** — a missing directory,
+  an empty tree — and confirm it goes red.
+- **Numeric thresholds fail by being relaxed.** *`checked >= 8` becomes `> 0`, which is vacuity wearing
+  a counter.* A threshold tuned to one game's current *size* is a near-miss away from being loosened by
+  the next agent. **Fix:** presence checks with no numbers, plus a monotonic baseline. `gate-reachability`
+  ships with **zero** magic constants for exactly this reason.
+- **A waiver added in the same turn as the RED defeats the gate.** *An agent trips a check and exempts
+  itself.* **Fix (all three, together):** waivers are dated and expire (≤ 30 days — a date in a *comment*
+  expires nothing); a waiver that **matched nothing this run is a FAIL** (that is how allowlists rot into
+  blanket suppression); and the ingest refuses green if `git status --porcelain` on the allowlist file is
+  dirty. Also key waivers `file::Table.method` — keying by **bare name** meant exempting `tuningFor`
+  exempted *every* `tuningFor` in the game.
+- **A harness that fabricates its subjects hides the bug that has the same shape as the fabrication.**
+  `type(player) == "table"` emptied the leaderboard in every live server, forever, and was green in every
+  test — **because the harness fabricates players as plain tables. The bug and the mock that hid it were
+  the same shape.** Watch for any assertion whose truth depends on the mock's representation.
+- **A false RED costs what a false green costs.** *It trains people to ignore reds exactly as surely as
+  a false green trains them to trust greens.* A pacing rung measured 30 successes and 290 rate-shed of
+  320 dispatches — **exactly the burst size**, because the edit-mode server clock is frozen and never
+  refills the bucket. **That number described the harness, not the game.** It was deleted and replaced
+  with a mechanism: a phase declaring a dependency on a lane limit measured as *absent* is **refused and
+  recorded unmeasurable**, never run and never scored.
 - **An "Unknown" is never a "pass".** In any grader/judge, an undetermined verdict (criterion or quality)
   is surfaced as needs-resolution, NOT counted toward done; and a DETERMINISTIC signal must be parsed in
   code, never read via a model's interpretation. *(Caught self-testing the `/goal` grader's compose block:
@@ -118,6 +205,28 @@ Format: **the trap** · *why it's dangerous* · the shape to watch for · the fi
 - **A push only fires where you wrote the push.** After a server write, push the client-safe view from the
   write path (`update()`), not only on join — else the HUD goes stale after rebirth/unlock/offline. *(The
   presentation review caught the missing post-write `"data"` push.)*
+- **A controller that calls the server from `Start()` races `loadSession`'s yield.** *Offline earnings
+  are lost PERMANENTLY, because autosave then erases the away window.* Same family: `CharacterAdded`
+  fires **before** `loadSession` finishes, so a player who owned island 2 was assigned island 0's
+  collision group and collided with every barrier. **Fix:** a bounded join retry that keeps the
+  restrictive state (walls UP, access denied) while the session is *unknown* — never the permissive one.
+  **No offline rung can see this**; Lune cannot even `require` a controller (`LocalPlayer` at module
+  scope). It took driving the real `RemoteFunction` from the **client context** of a live Studio session.
+  *(T2.7; fixed `e984d84`, verified RED→GREEN in-engine, 54 Stardust recovered.)*
+- **Three presentation defects were invisible in every log and obvious in a picture.** A `Sky` with blank
+  skybox textures renders **no stars** (`StarCount` only draws over Roblox's *own* sky, and a blank `Sky`
+  replaces it), while an `Atmosphere` paints a lit haze *below* the horizon — washing the frame flat blue
+  at density `0.36` and still filling three quarters of it at `0.04`. **The correct config was a deletion,
+  and the version with more code in it looked worse.** Separately: `AlwaysOnTop` billboards at 110 studs
+  drew labels from three islands away over the ones at the player's feet; and the world replicated *after*
+  the mote controller started, giving `22 total, 0 visible, 22 parked` — a number no log flagged.
+  **Fix pattern:** screenshots are a **verification instrument**, with the assertion written down *before*
+  the capture and a per-image verdict of `pass`/`fail`/**`cannot-tell`** — and `cannot-tell` is not a pass.
+- **A write that reports success and does nothing.** `Workspace.FallenPartsDestroyHeight` silently ignores
+  assignment from a Script (stays `-500`). Generalized rule, needing no game knowledge: **after any
+  property write a probe performs, READ IT BACK and assert it took.** And **never freeze, anchor or pause
+  the thing you are about to measure** — anchoring a character to hold it still **stops position
+  replication**, so the server keeps seeing the old spot and every position assertion silently passes.
 
 ## 7. Toolchain gotchas (cost real time)
 
@@ -132,4 +241,5 @@ Format: **the trap** · *why it's dangerous* · the shape to watch for · the fi
 
 *Add to this file whenever a gate catches a real bug class — that is the flywheel. Per-game specifics live
 in the game's own `CLAUDE.md`; design rationale in `docs/CORE-DESIGN.md`; the verification tiers in
-`docs/VERIFICATION-LADDER.md`.*
+`docs/VERIFICATION-LADDER.md`; and **how an AI verifies a game like a human — what each rung is blind to,
+and why — in `docs/AI-PLAYTEST-METHOD.md`.***

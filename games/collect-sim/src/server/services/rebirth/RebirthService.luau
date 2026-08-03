@@ -90,6 +90,14 @@ local function thresholdFor(rebirths: number): number
 	return math.floor(REBIRTH_BASE_THRESHOLD * (count + 1) ^ REBIRTH_THRESHOLD_EXPONENT)
 end
 
+-- PURE: the permanent Sell multiplier after `rebirths` completed ones. ONE definition, because there
+-- were three — here, in the reply at the altar, and inline in CollectionService's Sell formula — and
+-- they did not agree: two clamped `rebirths` and one did not. The reachability gate reported the SEAM
+-- as orphaned, which was the symptom; three copies of one rule was the defect.
+local function multiplierFor(rebirths: number): number
+	return 1 + math.max(0, math.floor(rebirths or 0)) * REBIRTH_STEP
+end
+
 -- Server-derived Prisms grant from the Stardust held at the moment of rebirth, measured against
 -- THIS rebirth's threshold so a deeper run on a harder curve still pays more.
 local function prismsFor(stardust: number, threshold: number): number
@@ -272,7 +280,7 @@ local function makeRebirthAction(): Net.Action<{}, {
 				-- single keypress with no on-screen cost or reward anywhere in the game.
 				threshold = outThreshold,
 				nextThreshold = thresholdFor(outRebirths),
-				multiplier = 1 + outRebirths * REBIRTH_STEP,
+				multiplier = multiplierFor(outRebirths),
 			})
 		end,
 	}
@@ -284,14 +292,14 @@ end
 -- on one keypress with no on-screen cost and no confirmation anywhere.
 local RebirthSeam = {}
 
-function RebirthSeam.thresholdFor(_self: any, d: any): number
-	local rebirths = if d ~= nil and type(d.rebirths) == "number" then d.rebirths else 0
-	return thresholdFor(rebirths)
-end
-
+-- NOTE: there is deliberately no `RebirthSeam.thresholdFor`. It existed, was called by nothing, and
+-- survived the hand-written reachability spec for weeks because `Net.luau` happened to name it in a
+-- PROSE COMMENT and that spec substring-matched raw source. The factory gate masks comments before
+-- matching, and found it on its first run. `previewFor` below already returns `threshold`, which is
+-- what every caller actually wanted.
 function RebirthSeam.multiplierFor(_self: any, d: any): number
 	local rebirths = if d ~= nil and type(d.rebirths) == "number" then d.rebirths else 0
-	return 1 + math.max(0, math.floor(rebirths)) * REBIRTH_STEP
+	return multiplierFor(rebirths)
 end
 
 -- The complete pre-commit picture: what it costs, what you have, what you would get, and the
@@ -323,8 +331,8 @@ function RebirthSeam.previewFor(
 		stardust = stardust,
 		ready = (not capped) and stardust >= threshold,
 		prismsPreview = prismsFor(stardust, threshold),
-		multiplierNow = 1 + rebirths * REBIRTH_STEP,
-		multiplierNext = 1 + (rebirths + 1) * REBIRTH_STEP,
+		multiplierNow = multiplierFor(rebirths),
+		multiplierNext = multiplierFor(rebirths + 1),
 		capped = capped,
 	}
 end

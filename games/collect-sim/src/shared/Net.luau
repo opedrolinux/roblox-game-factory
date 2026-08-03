@@ -76,8 +76,8 @@ export type ActionContext = {
 	-- standing on island 1 paid the island-5 rate and the islands were decoration. nil under Lune
 	-- (no world is built) and nil-safe at every reader: an absent seam means "island 1".
 	world: any?,
-	-- ctx.rebirth: pure READ seam over the prestige curve (thresholdFor / multiplierFor /
-	-- previewFor). Published so the shop panel and the altar can state the price and the reward
+	-- ctx.rebirth: pure READ seam over the prestige curve (multiplierFor / previewFor; previewFor
+	-- carries the threshold). Published so the shop panel and the altar can state the price and the reward
 	-- BEFORE the player commits — the most destructive action in the game used to fire on one
 	-- keypress with no on-screen cost or confirmation anywhere.
 	rebirth: any?,

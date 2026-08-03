@@ -32,3 +32,6 @@ logs/
 .DS_Store
 Thumbs.db
 *.log
+
+# Throwaway games generated to test the new-game scaffolder
+games/not-a-real-game-xyz/

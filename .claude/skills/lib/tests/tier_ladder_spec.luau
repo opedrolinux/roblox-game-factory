@@ -53,6 +53,22 @@ return function(): (number, { string })
 		"T2",
 		"through T2 -> T2"
 	)
+	-- T2.5/T2.7 were admitted to the ladder (HANDOFF-2), so "through the human gate" now REQUIRES them:
+	-- a T3 claim over an un-run automated playtest is exactly the non-contiguous claim this function
+	-- exists to refuse.
+	eq(
+		ladder.highestTierReached({
+			T0 = "green",
+			["T0.5"] = "green",
+			T1 = "green",
+			T2 = "green",
+			["T2.5"] = "green",
+			["T2.7"] = "green",
+			T3 = "green",
+		}),
+		"T3",
+		"through the human gate -> T3"
+	)
 	eq(
 		ladder.highestTierReached({
 			T0 = "green",
@@ -61,8 +77,19 @@ return function(): (number, { string })
 			T2 = "green",
 			T3 = "green",
 		}),
-		"T3",
-		"through the human gate -> T3"
+		"T2",
+		"a green T3 over an un-run T2.5 does not count (contiguity holds for the new rungs too)"
+	)
+	eq(
+		ladder.highestTierReached({
+			T0 = "green",
+			["T0.5"] = "green",
+			T1 = "green",
+			T2 = "green",
+			["T2.5"] = "green",
+		}),
+		"T2.5",
+		"through the automated playtest -> T2.5"
 	)
 
 	-- ── handoff: THE conflation regression — Lune-green but require-red ───────
@@ -178,6 +205,7 @@ return function(): (number, { string })
 			stage("selene", true),
 			stage("rojo", true),
 			stage("require", true),
+			stage("reachability", true),
 			stage("lune", true),
 		},
 	})
@@ -192,6 +220,7 @@ return function(): (number, { string })
 			stage("selene", true),
 			stage("rojo", true),
 			stage("require", false),
+			stage("reachability", true),
 			stage("lune", true),
 		},
 	})
@@ -206,6 +235,7 @@ return function(): (number, { string })
 			stage("selene", true),
 			stage("rojo", false),
 			stage("require", true),
+			stage("reachability", true),
 			stage("lune", true),
 		},
 	})
@@ -218,6 +248,7 @@ return function(): (number, { string })
 			stage("stylua", true),
 			stage("selene", true),
 			stage("rojo", true),
+			stage("reachability", true),
 			stage("lune", true),
 		},
 	})
@@ -225,6 +256,48 @@ return function(): (number, { string })
 		noRequireStage["T0.5"],
 		"unrun",
 		"absent require stage -> T0.5 unrun (fail-closed, never green)"
+	)
+
+	-- The reachability gate joined T1. Two properties, both load-bearing:
+	--  (a) a RED reachability stage makes T1 red even with every Lune test green — that combination is
+	--      the exact state collect-sim shipped in: 313 green tests beside four upgrades that did nothing,
+	--      because the tests asserted the WRITE and never the READ;
+	--  (b) an OLD gauntlet artifact that predates the stage reads T1 "unrun", never "green" — the same
+	--      fail-closed rule the require stage got, so a stale artifact cannot launder itself into a tier
+	--      it was never measured against.
+	local reachRed = ladder.fromGauntlet({
+		ok = false,
+		stages = {
+			stage("stylua", true),
+			stage("selene", true),
+			stage("rojo", true),
+			stage("require", true),
+			stage("reachability", false),
+			stage("lune", true),
+		},
+	})
+	eq(reachRed["T0"], "green", "T0 unaffected by a reachability failure")
+	eq(reachRed["T0.5"], "green", "T0.5 unaffected by a reachability failure")
+	eq(
+		reachRed["T1"],
+		"red",
+		"reachability red + every Lune test green -> T1 RED (inert logic is not certified logic)"
+	)
+
+	local noReachStage = ladder.fromGauntlet({
+		ok = true,
+		stages = {
+			stage("stylua", true),
+			stage("selene", true),
+			stage("rojo", true),
+			stage("require", true),
+			stage("lune", true),
+		},
+	})
+	eq(
+		noReachStage["T1"],
+		"unrun",
+		"absent reachability stage -> T1 unrun (fail-closed, never green)"
 	)
 
 	-- A duplicated stage name (malformed input the real gauntlet never emits): a red occurrence must win,
@@ -255,6 +328,9 @@ return function(): (number, { string })
 				stage("selene", selene),
 				stage("rojo", rojo),
 				stage("require", require_),
+				-- the reachability stage rides with lune: both are T1, and every case below that wants a
+				-- green T1 needs BOTH present and green
+				stage("reachability", lune),
 				stage("lune", lune),
 			},
 		}
@@ -287,6 +363,104 @@ return function(): (number, { string })
 	local sLane = ladder.statusFor(gauntlet(true, true, true, true, true), nil, nil, true)
 	eq(sLane.ready, false, "lane available + T2 unrun -> statusFor refuses (run the smoke)")
 	eq(sLane.blockedBy, "T2", "statusFor blocks on the un-run T2 when the lane exists")
+
+	-- ── the admitted rungs: T2.5 (automated playtest) and T2.7 (live Studio) ──
+	local greenBase = { T0 = "green", ["T0.5"] = "green", T1 = "green" }
+	local function withRungs(extra: { [string]: string }): { [string]: any }
+		local r: { [string]: any } = {}
+		for k, v in greenBase do
+			r[k] = v
+		end
+		for k, v in extra do
+			r[k] = v
+		end
+		return r
+	end
+
+	-- HANDOFF-4, THE regression this rewrite exists for. Before it, tier-status wrapped its T2.5 gating
+	-- in `if t2 == "green"`, so with the engine lane down and T2 never run, a RECORDED RED PLAYTEST WAS
+	-- SILENTLY IGNORED and handoff still returned ready-for-human. A red is red regardless of the rung
+	-- below it.
+	local redPlaytestUnrunSmoke = ladder.handoff(withRungs({ ["T2.5"] = "red" }), false)
+	eq(
+		redPlaytestUnrunSmoke.ready,
+		false,
+		"a RED T2.5 blocks handoff even though T2 below it was never run (HANDOFF-4)"
+	)
+	eq(redPlaytestUnrunSmoke.blockedBy, "T2.5", "the red playtest is named as the blocker")
+
+	local redStudioPass = ladder.handoff(withRungs({ T2 = "green", ["T2.7"] = "red" }), false)
+	eq(redStudioPass.ready, false, "a RED T2.7 blocks handoff with its own lane down")
+	eq(redStudioPass.blockedBy, "T2.7", "the red Studio pass is named as the blocker")
+
+	-- Lane map: each engine rung has its OWN lane. The T2.5 lane being up makes an un-run T2.5 a
+	-- BLOCKER (an un-exhausted automatable rung), exactly as the T2 lane always did for T2.
+	local t25LaneUp = ladder.handoff(
+		withRungs({ T2 = "green" }),
+		{ ["T2"] = true, ["T2.5"] = true, ["T2.7"] = false }
+	)
+	eq(t25LaneUp.ready, false, "T2.5 lane up + T2.5 un-run -> run it before escalating")
+	eq(t25LaneUp.blockedBy, "T2.5", "blocked by the un-run automated playtest")
+	eq(t25LaneUp.lastAutomatable, "T2.5", "lastAutomatable is the highest rung with a live lane")
+
+	-- The legacy BOOLEAN must never be read as "all three engine lanes are up": a lane that was never
+	-- declared is not available (fail-closed), so `true` still means only the T2 smoke lane.
+	local legacyBool = ladder.handoff(withRungs({ T2 = "green" }), true)
+	eq(legacyBool.ready, true, "legacy boolean true does not silently claim a T2.5 lane")
+	eq(legacyBool.lastAutomatable, "T2", "legacy boolean true -> lastAutomatable stays T2")
+
+	-- T2.5 green with the Studio lane down: escalate, with a label that names the ENTIRE CLIENT as
+	-- unverified. The edit-mode lane has no LocalPlayer, so it is structurally blind to client wiring.
+	local sceneVerified = ladder.handoff(withRungs({ T2 = "green", ["T2.5"] = "green" }), false)
+	eq(sceneVerified.ready, true, "T2.5 green + Studio lane down -> may escalate")
+	eq(sceneVerified.highestGreen, "T2.5", "highestGreen reaches T2.5")
+	check(
+		string.find(sceneVerified.label, "scene%-verified%-T2%.5") ~= nil,
+		"the label claims T2.5 only when T2.5 actually passed"
+	)
+	check(
+		string.find(sceneVerified.label, "ENTIRE CLIENT") ~= nil,
+		"the label names what is still unverified rather than implying readiness"
+	)
+
+	-- Every automatable rung exhausted. The claim is still BOUNDED: one Studio session cannot contend
+	-- with itself and JobId is "" there, so that limit must be said out loud in the label.
+	local fullyVerified =
+		ladder.handoff(withRungs({ T2 = "green", ["T2.5"] = "green", ["T2.7"] = "green" }), false)
+	eq(fullyVerified.ready, true, "T0..T2.7 green -> ready for the human")
+	eq(fullyVerified.highestGreen, "T2.7", "highestGreen reaches T2.7")
+	check(
+		string.find(fullyVerified.label, "engine%-verified%-T2%.7") ~= nil,
+		"the top automatable label is claimed only with T2.7 evidence"
+	)
+	check(
+		string.find(fullyVerified.label, "UNTESTABLE") ~= nil,
+		"even the top automatable label states what remains untestable by construction"
+	)
+
+	-- statusFor carries the higher evidence through, and DEFAULTS it to un-run (never green by absence).
+	local sHigher = ladder.statusFor(
+		gauntlet(true, true, true, true, true),
+		"green",
+		nil,
+		false,
+		{ ["T2.5"] = "green", ["T2.7"] = "green" }
+	)
+	eq(sHigher.highestGreen, "T2.7", "statusFor layers T2.5/T2.7 evidence in")
+	local sNoHigher = ladder.statusFor(gauntlet(true, true, true, true, true), "green", nil, false)
+	eq(
+		sNoHigher.highestGreen,
+		"T2",
+		"absent T2.5/T2.7 evidence defaults to un-run, never green (fail-closed)"
+	)
+	local sRedHigher = ladder.statusFor(
+		gauntlet(true, true, true, true, true),
+		nil,
+		nil,
+		false,
+		{ ["T2.5"] = "red" }
+	)
+	eq(sRedHigher.ready, false, "statusFor refuses on a recorded red T2.5 with T2 un-run")
 
 	-- ── rungIndex ────────────────────────────────────────────────────────────
 	check(ladder.rungIndex("T0") < ladder.rungIndex("T0.5"), "T0 below T0.5")

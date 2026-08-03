@@ -42,7 +42,10 @@ destructive or outward-facing (§4). The autonomy rests on four mechanisms:
    waiting on a prompt for hours. Concrete config in `.claude/settings.json`; for a truly unattended
    run the operator launches the session with full bypass — the fence (§4) still holds.
 2. **Self-healing, not blind generation.** Nothing is "done" until it passes **the gauntlet**:
-   `stylua --check` → `selene` → `rojo build` → `lune` unit tests. A PostToolUse hook runs format+lint
+   `stylua --check` → `selene` → `rojo build` → `gate-require` → `gate-reachability` → `lune` unit tests.
+   (Six stages; the reachability gate runs *before* the test suite because it is the cheapest gate that
+   can see the "written here, read nowhere" class, so it should fail fast and specifically.)
+   A PostToolUse hook runs format+lint
    on every edited file and feeds failures straight back so the agent fixes them in the same turn.
    A subagent that can't get its feature green doesn't block the run — its branch is **parked** for
    human review and the run continues on everything else.
@@ -92,8 +95,13 @@ Safety nets behind the fence: per-feature commits + OneDrive version history on 
 These are not "dangerous," they are *human-judgment*. The factory produces everything up to them,
 then waits:
 
+- **Is it FUN** — pacing, whether the reward curve earns a second session, whether a price is right.
+  Nothing below T3 attempts this, and the rungs below exist to make sure it is the *only* thing you
+  are asked. See `docs/AI-PLAYTEST-METHOD.md` §6.
 - **Visual / UI sign-off** — 3D layout, lighting, UI sizing across phone/desktop, overall feel.
-  AI is weakest here and a screenshot loop is slow; the factory greyboxes with code and hands off.
+  The factory greyboxes with code and hands off. *(Partly narrowed since: the T2.7 pass takes
+  screenshots with written assertions, so "the sky is blank" and "the HUD never rendered" are now
+  machine-catchable. It can prove the stars render; it cannot prefer them.)*
 - **The publish decision** — and the ~30 min of manual Roblox steps that have no API: create the
   universe in Studio, the maturity/compliance questionnaire, icon + thumbnails.
 - **Kill or scale** — reading the funnel and deciding to drop a prototype or invest in it.
@@ -147,8 +155,11 @@ spec (specs/<name>.md)               one page: loop, economy, features, monetiza
   → integrate (serial)               union-merge each merge-ready branch; re-run gauntlet
   → test gate (integration)          independent test agent tests the MERGED whole (cross-feature)
   → adversarial review (parallel)    exploit + RACE-CONDITION hunt (economy dupes, double-spend), loop-until-dry
-  → full verify                      gauntlet + (when keys exist) Open Cloud engine tests
-  → HUMAN GATE                       visual pass in Studio, then the publish decision
+  → full verify                      the six-stage gauntlet: T0 static · T0.5 require · T1 Lune + REACHABILITY
+  → T2  engine boot smoke            run-in-roblox: it BOOTS, services Start, the loop runs on the real wire
+  → T2.5 automated AI playtest       run-in-roblox (edit mode): measured state DELTAS + a RECORDED falsification
+  → T2.7 live Studio pass            /engine-pass: the REAL client wire + screenshots with written assertions
+  → HUMAN GATE                       the human plays it and judges ONE thing: is it FUN
   → publish                          human-run; factory has prepared everything shippable
 ```
 
@@ -167,9 +178,30 @@ the human reviews only at the visual/publish gate (§5).
 **Definition of done — before a game reaches your gate.** A build is "ready for human review" only when:
 the core loop is completable end-to-end · every feature is green at both test gates · the adversarial
 pass found no open exploit · monetization + the core analytics events are wired · the re-entry hooks
-exist · and **every automatable verification tier (T0..T2) is green or explicitly blocked-on-human, with
-the status label stating the highest tier passed.** Anything short of that is *in progress*, not *done* —
-and the run says so rather than pretending.
+exist · and **every automatable verification rung (T0 · T0.5 · T1 · T2 · T2.5 · T2.7) is green or
+explicitly blocked-on-human, with the status label stating the highest tier passed.** Anything short of
+that is *in progress*, not *done* — and the run says so rather than pretending.
+
+**Three additions to that definition, each bought with a real failure:**
+
+- **T1 now includes static reachability.** *No value the player pays for may be written to the save file
+  and read by no rule that governs play.* That one pattern accounted for **26 of 66 confirmed defects** in
+  a game that had 361 green tests at the time — because every test asserted the **write** and none the
+  **read**. `gate-reachability.luau` is gauntlet stage 5, offline, about a second.
+- **A tier is never claimed without a real evidence artifact**, and **a gate never observed RED is not
+  known to work.** The T2.5 lane reports `T2.5-unfalsified` — not green — until every gating phase has
+  been deliberately broken and the RED recorded against the same script hash. `parked` is a first-class
+  third verdict and never launders into green.
+- **A red rung refuses the handoff regardless of the rung below it.** A recorded RED playtest is red even
+  when the rung under it never ran. (This was a live bug: the reader wrapped its T2.5 check in
+  `if t2 == "green"`, so a recorded failure was silently ignored and handoff still returned ready.)
+
+**What the human gate is now FOR.** Every rung above exists so the human playtest can be about **fun and
+nothing else** — not "does buying this do anything", not "does it boot", not "is the sky blank". The
+benchmark is blunt: before this machinery, a human found the top defects **in the first minute.** Judgement
+the factory still does not attempt: fun and feel, aesthetic preference, real input on a real device,
+multi-client contention (one Studio session cannot contend with itself and `game.JobId` is `""`), and the
+publish decision. Method and honest blind spots: **`docs/AI-PLAYTEST-METHOD.md`.**
 
 > **"The gauntlet is green" is necessary but NOT sufficient — it is one rung, not the whole ladder.**
 > The factory once shipped a game that passed every Lune check and *did not boot in Roblox at all*: a
@@ -181,7 +213,10 @@ and the run says so rather than pretending.
 > · **T3** human playtest. The loop **must not escalate to a human while a cheaper automatable rung
 > (T0..T2) is still red or un-run** — exhaust automation first. When the engine lane is unconnected, T2
 > is honestly recorded `blocked-on-human` and the label reads `verified-local-T1 (logic only, NOT
-> engine-booted)` — it is *never* relabeled "ready" off T1. The handoff guard
+> engine-booted)` — it is *never* relabeled "ready" off T1. **The ladder has since grown two more rungs
+> above T2 — `T2.5` (automated AI playtest, edit mode) and `T2.7` (agent-driven live Studio) — and lane
+> availability is now a per-rung map, because "`run-in-roblox` is on PATH but no Studio session is open"
+> is the normal state and one boolean cannot say it.** The handoff guard
 > (`.claude/skills/lib/tier-ladder.luau`, `highestTierReached` + `handoff`) is the **built, unit-tested
 > policy** that computes this verdict mechanically rather than from prose, so no step can launder
 > Lune-green into engine-verified. It is **runnable today** as

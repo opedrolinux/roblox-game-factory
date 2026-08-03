@@ -379,7 +379,20 @@ local function makeSellAction(
 					stardustMult =
 						seamMultiplier((ctx.monetization :: any):stardustMultiplierFor(d, now))
 				end
-				local rebirthMult = 1 + (d.rebirths or 0) * REBIRTH_STEP
+				-- The rebirth multiplier is READ FROM ITS SEAM, like every other factor in this
+				-- formula. It used to be a second copy of the curve computed inline here, and the
+				-- two copies did not agree: `RebirthSeam.multiplierFor` clamps with
+				-- `math.max(0, math.floor(rebirths))` and this line did not, so a negative or
+				-- fractional `rebirths` paid differently depending on which copy you asked. The
+				-- factory reachability gate reported the seam as ORPHANED — that was the symptom;
+				-- the duplicated rule was the defect. The fallback below is the clamped form, so
+				-- the two paths now agree even with no seam wired.
+				local rebirthMult
+				if ctx.rebirth ~= nil then
+					rebirthMult = seamMultiplier((ctx.rebirth :: any):multiplierFor(d))
+				else
+					rebirthMult = 1 + math.max(0, math.floor(d.rebirths or 0)) * REBIRTH_STEP
+				end
 				earned = math.floor(bankedValue * stardustMult * rebirthMult)
 				d.currencies.Stardust = (d.currencies.Stardust or 0) + earned
 				if d.stats ~= nil then

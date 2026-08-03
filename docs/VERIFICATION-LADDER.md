@@ -7,7 +7,9 @@ fix as three layers: a static require-resolution gate, an explicit gating ladder
 
 `FACTORY.md` owns *policy*; `LOOP-ENGINEERING.md` owns *why the loop is shaped this way + the upgrade
 roadmap*; this file owns *the verification ladder* — the thing that decides when the loop is allowed
-to reach the human. It extends `LOOP-ENGINEERING.md` §4 upgrades 3–4 (cross-turn grader + LLM-judge)
+to reach the human. **`docs/AI-PLAYTEST-METHOD.md` owns the *method*** — what each rung is blind to,
+which rung should catch which class of defect, and what is left for a person. Read the two together.
+It extends `LOOP-ENGINEERING.md` §4 upgrades 3–4 (cross-turn grader + LLM-judge)
 with the rung those upgrades assume but the factory does not yet have: **proof the game runs in
 Roblox at all.**
 
@@ -23,6 +25,22 @@ in `FACTORY.md` §8 + `portfolio/README.md`, and the D1-shim-by-default authorin
 it prepares the lane (authors the smoke script + runbook) and returns `T2-blocked-on-human`, never
 claiming `T2-green` without a real JSON evidence line; it activates when the Studio MCP bridge exposes a
 run tool. Companion to the `tier1-tier2-require-blindspot` memory and `docs/TESTING.md` §9.
+
+**2026-08 — the ladder grew three rungs (§6, §7, §8).** A human playtested `collect-sim` and an audit
+confirmed **66 defects** behind a lane reporting all green. One pattern explained 26 of them and the
+factory had no gate for it (**the root pattern** — see `docs/AI-PLAYTEST-METHOD.md` §1). The response
+added: a **static reachability gate** inside T1 (`gate-reachability.luau`, gauntlet stage 5); **T2.5**,
+an automated AI playtest in `run-in-roblox`'s edit-mode lane; and **T2.7**, an agent-driven **live
+Studio** pass. `tier-ladder.luau`'s `RUNGS` now carries `T2.5` and `T2.7` with a **per-rung lane map**
+(a single `engineLaneAvailable` boolean could not express "`run-in-roblox` is on PATH but Studio is
+not"). **Read `docs/AI-PLAYTEST-METHOD.md` alongside this file** — it owns the *method* (what each rung
+is blind to, and why), including an honest ledger of which of the new machinery has been observed RED
+and which has not.
+
+**Correction — the Studio MCP bridge is LIVE.** Two claims below (§2's "Studio MCP exposes zero tools"
+and §5.2(a)'s caveat) were true when written and are now **false**. They are struck through in place
+rather than deleted, because the reasoning that followed from them still explains why L3 shipped in
+park-mode.
 
 ---
 
@@ -103,40 +121,68 @@ flowchart TD
   S(["build-game loop"]) --> T0
   T0["T0 — Static<br/>stylua · selene · rojo build<br/>proves: compiles to a place"]
   T05["T0.5 — Require-resolution ✦ NEW (L1)<br/>gate-require.luau · protected-config<br/>proves: every require resolves in the DataModel<br/>catches the cross-service boot bug — no Roblox"]
-  T1["T1 — Lune logic<br/>tests/run.luau + integration<br/>proves: economy/state correct under the file loader"]
-  T2["T2 — In-engine smoke ✦ NEW (L3)<br/>boot the real place — Studio + MCP<br/>proves: it BOOTS · services Start · loop on the real wire"]
-  T3["T3 — Human playtest<br/>fun · feel · presentation · input · world"]
+  T1["T1 — Lune logic + static reachability ✦ NEW (2026-08)<br/>tests/run.luau + integration + gate-reachability.luau<br/>proves: economy/state correct under the file loader<br/>AND no value is written that nothing reads"]
+  T2["T2 — In-engine smoke ✦ NEW (L3)<br/>boot the real place — run-in-roblox / Studio + MCP<br/>proves: it BOOTS · services Start · loop on the real wire"]
+  T25["T2.5 — Automated AI playtest ✦ NEW (2026-08)<br/>run-in-roblox, EDIT mode · playtest.server.luau<br/>proves: measured state DELTAS, not reply codes<br/>blind: no LocalPlayer · no physics · frozen clock"]
+  T27["T2.7 — Agent-driven LIVE Studio ✦ NEW (2026-08)<br/>MCP bridge · /engine-pass · screenshots with assertions<br/>proves: real boot · the REAL client wire · how it LOOKS<br/>blind: one client only · JobId is empty"]
+  T3["T3 — Human playtest<br/>FUN. Nothing else — that is the point of the rungs above."]
   STOP{{"REFUSE handoff<br/>status = highest green rung<br/>in-progress, not ready"}}
 
   T0 -->|green| T05
   T05 -->|green| T1
   T1 -->|green| T2
-  T2 -->|"green OR blocked-on-human"| T3
+  T2 -->|green| T25
+  T25 -->|"green OR parked"| T27
+  T27 -->|"green OR blocked-on-human"| T3
 
   T0 -. red .-> STOP
   T05 -. red .-> STOP
   T1 -. red .-> STOP
   T2 -. "red / unrun" .-> STOP
+  T25 -. "red / unfalsified" .-> STOP
+  T27 -. "red / unrun / hybrid place" .-> STOP
 
   classDef new fill:#fff3cd,stroke:#d39e00,stroke-width:2px;
+  classDef newer fill:#d1e7dd,stroke:#0f5132,stroke-width:2px;
   classDef human fill:#e7f1ff,stroke:#0d6efd,stroke-width:2px;
   classDef stop fill:#f8d7da,stroke:#dc3545,stroke-width:2px;
   class T05,T2 new;
+  class T25,T27 newer;
   class T3 human;
   class STOP stop;
 ```
+
+**Two rules the arrows encode.** A rung's *red* refuses the handoff regardless of the rung below it —
+a recorded RED playtest is red even when T2 never ran (this was a real bug: the old `tier-status`
+reader wrapped its T2.5 check in `if t2 == "green"`, so a recorded failure was silently ignored and
+handoff still returned ready). And `T2.5-parked` is **not green** — it is the third verdict state that
+exists so *"I found something broken"* and *"everything is fine"* can never again both be true of the
+same run.
 
 | Rung | What it runs | What it proves | Engine? | Built today? |
 |---|---|---|---|---|
 | **T0 — static** | `stylua --check` · `selene` · `rojo build` | Formats, lints, compiles to a place | No | ✅ (gauntlet stages 1–3) |
 | **T0.5 — require-resolution** | `gate-require.luau` (new) | Every `require` resolves in the **DataModel**, not just the filesystem; D1 shim branches agree | No | ❌ **L1 below** |
-| **T1 — Lune logic** | `lune run tests/run.luau` + integration suite | Economy/state logic is correct under the filesystem loader | No | ✅ (gauntlet stage 4) |
-| **T2 — in-engine smoke** | boot the real place; traverse the core loop | The game **boots**; services `Start`; loop completes over the real wire | **Yes** | ❌ **L3 below** (blocked-on-human) |
-| **T3 — human playtest** | a person plays it | Fun, feel, presentation, input, world | Yes | ✅ (human gate) |
+| **T1 — Lune logic** | `lune run tests/run.luau` + integration suite | Economy/state logic is correct under the filesystem loader | No | ✅ (gauntlet stage 6) |
+| **T1 — static reachability** ✦ | `gate-reachability.luau` | No value the player pays for is **written and read by nothing**; no dangling seam, unsunk currency, or unread replicated field | No | ✅ (gauntlet stage 5 — §6) |
+| **T2 — in-engine smoke** | boot the real place; traverse the core loop | The game **boots**; services `Start`; loop completes over the real wire | **Yes** | ✅ (`run-in-roblox`) |
+| **T2.5 — automated AI playtest** ✦ | `run-in-roblox` on `tests/tier2/playtest.server.luau` | Measured **state deltas** from real dispatches — the spec's promises, asserted as before/after | **Yes** (edit mode) | ✅ (§7) |
+| **T2.7 — live Studio pass** ✦ | `/engine-pass <gameDir>` over the MCP bridge | Real boot · the **real client remote gateway** · screenshots with written assertions | **Yes** (Play + edit) | ✅ (§8) — *skill unrun, see §11* |
+| **T3 — human playtest** | a person plays it | **Fun.** | Yes | ✅ (human gate) |
 
-**Automatable today:** T0 → T0.5 → T1 (T0.5 needs building but needs **no key/Studio**).
-**Automatable once provisioned:** T2 (Open Cloud key absent; Studio MCP exposes zero tools today).
+**Automatable today:** T0 → T0.5 → T1 → T2 → T2.5 (`run-in-roblox` is on PATH at
+`~/.aftman/bin/run-in-roblox`; the lane is additionally gated on `GATE_ENGINE_LANE ∈ {1,true}` so a
+machine without Studio installed parks honestly rather than failing noisily).
+**Automatable with a live session:** T2.7 — needs Roblox Studio open on the place, `rojo serve` running
+inside the game directory, and the MCP plugin connected. ~~Studio MCP exposes zero tools today~~ —
+**stale.** `list_roblox_studios`, `set_active_studio`, `get_studio_state`, `execute_luau`,
+`start_stop_play`, `get_console_output`, `screen_capture` and `wait_job_finished` are all live, and the
+loop in §8 was driven end to end on them (commit `6b5dbee`).
 **Human-only:** T3.
+
+**Lane availability is per-rung, not one boolean.** `tier-ladder.luau` exposes `ENGINE_RUNGS =
+{"T2","T2.5","T2.7"}` and a lane *map*, because "`run-in-roblox` is on PATH but no Studio session is
+open" is the normal state of this machine and a single flag cannot say it.
 
 This ladder makes the existing doctrine honest. `ARCHITECTURE.md` (tiers table, ~lines 152–160)
 already *names* Tier-1 Lune / Tier-2 Open Cloud / Tier-3 Studio — but the loop never escalates through
@@ -347,8 +393,10 @@ Three options against the **hard publish fence**:
   live; thereafter the factory injects the smoke script and reads the JSON verdict. **Fence-clean by
   construction:** zero network calls, no `rbxcloud`/`lune publish`/curl-to-roblox, no
   publish/account/money. The **one** human action is: open the place in Studio with the plugin
-  connected. *Caveat:* the registered `Roblox_Studio` bridge currently exposes **zero tools** — until
-  the plugin is live, the factory can only **prepare** the lane and hand a runbook.
+  connected. ~~*Caveat:* the registered `Roblox_Studio` bridge currently exposes **zero tools** — until
+  the plugin is live, the factory can only **prepare** the lane and hand a runbook.~~ **STALE as of
+  2026-08:** the bridge is live and was driven end to end — see §8. The plugin's Connect button is not
+  even required: `rojo serve`'s read API lets Studio fetch the tree itself (§8, STEP 1).
 - **(b) Open Cloud Luau Execution — INSIDE the fence, rejected for autonomous use.** Blocked as
   *code* today, not just policy: `Fence.luau` blocks every net call whose host matches the `roblox.com`
   suffix (and `apis.roblox.com` is where Luau Execution lives) and blocks `rbxcloud` outright. The fence
@@ -381,27 +429,252 @@ SpawnLocation). Single-server only — multi-client replication races and live e
 
 ---
 
-## 6. Honest limits + what stays human
+## 6. The T1 static-reachability gate (`gate-reachability.luau`)
 
-Even with all three layers, classes remain below the automatable rungs:
+**Built 2026-08, wired as gauntlet stage 5** — after `require`, before `lune`, because it is the
+cheapest gate that can see the root pattern and it should fail fast and specifically. Verified stage
+list: `stylua · selene · rojo · require · reachability · lune`.
 
-- **Persistence / restart** (receipt re-grant, DataStore quota, cross-server locks) — needs
-  `SessionStore` (B2) *and* a real-DataStore Tier-2 lane. Labeled honestly; not caught.
-- **Semantic cross-service drift** that isn't a require error — e.g. `RestockService`'s hard-mirrored
-  `ISLAND_IDS = {1..5}` going stale when the islands catalog grows. Resolves fine (invisible to T0.5),
-  each unit test internally consistent. Needs a separate **cross-service-constant invariant** check.
-- **Dead-but-valid wiring** — `tickAutoCollect` exposed but driven from no Heartbeat. T0.5 sees a valid
-  module; T1 calls the ticker directly and passes. Needs a separate **"exposed-but-never-driven"** lint.
-  (T2 also surfaces it as a behavioral absence.)
+### 6.1 Why it belongs to T1, not a new rung
 
-**Legitimately human (never automated, by design — `FACTORY.md` §5):** fun & feel; presentation &
-aesthetics; real input / world interaction; multi-client replication & live exploits; asset trust; and
-the fenced **publish / `git push`** (`FACTORY-LOOP.md` §4 invariant 2: the only path to Publish runs
-through the human gate). The ladder changes **when** the loop may reach that human — not who pushes.
+A reachability failure means the game's *logic* is inert — which is exactly what T1 claims to certify.
+T0.5's label is specifically require-resolution, and adding a rung reopens the `RUNGS` contract that
+`tier_ladder_spec` asserts on. So T1 is `statusOf({"lune", "reachability"})` — both stages must be
+green.
+
+### 6.2 The eight rules
+
+Each anchors its subject discovery on a **core-owned location** (present the moment a game is
+scaffolded), never a per-game name — a per-game subject manifest was rejected, because the defect class
+is "a value was added and never wired" and a manifest asks the same agent, in the same turn, from the
+same misunderstanding, to declare the thing they just forgot to wire. **An empty manifest scores 100%.**
+
+| rule | subject discovery | catches |
+|---|---|---|
+| `seam-read` | `context.<field> = <Ident>` inside a `Start(context)` body, then every `function <Ident>.<method>` | a tuning curve read only by the file that defines it — `CAPACITY = 50` beside a persisted backpack level |
+| `seam-installed` | a seam-shaped table with no `context.<field> =` install site | a seam defined and never wired to `ctx` |
+| `catalog-id-read` | keys of a `local CATALOG` table literal + `upgrades["<id>"]` string literals | the four inert upgrades — each id appeared exactly twice, once in the catalog and once in a validator, never in a rule |
+| `currency-sink` | keys of `currencies = {…}` in `Migrations.default` | Prisms: granted, persisted, shown in the HUD, decremented by nothing |
+| `view-field-read` | `Types.toView`'s projected fields, **recursed one level** into `PlayerData` | `boostExpiresUnix` / `lastClaimUnix` / `resetsAtUnix` / `dayNumber` replicated to nobody |
+| `banned-player-type` | `type(player) == "table"` | the empty leaderboard in every live server, forever, green in every test |
+| `legacy-globals` | statement-boundary `wait`/`spawn`/`delay` | **defence-in-depth only — duplicates selene.** Its greenness is not coverage |
+| `presentation-floor` | `leaderstats` · `Lighting` · `Sound` · Tween | **WARN-only** — see 6.4 |
+
+The one-level recursion in `view-field-read` is **mandatory, not optional**: all five fields
+`Types.toView` projects are **wholesale-copied tables**, so a naive rule checks five table names and
+calls itself complete while `stats.lifetimeStardust` rides along invisibly.
+
+### 6.3 Non-vacuity by construction — there are no thresholds to relax
+
+Deliberately **no numeric constants** (`server > 10`, `checked >= 8` and friends were deleted: they
+were one game's current *size*, and their failure path is being relaxed to `> 0`, which is vacuity
+wearing a counter). Instead:
+
+- **Presence:** at least one `.luau` under each mount `default.project.json` declares. Zero mounts →
+  FAIL.
+- **Maturity carve-out:** below `gate-sample.detect(gameDir).hasRealFeatures`, rules R1–R5 report a
+  **third state, `not-applicable`** — tallied separately, never counted as a pass. A fresh scaffold must
+  pass, or `new-game` is broken for every future game.
+- **At or above maturity, zero subjects is a hard FAIL:** *"discovery found no `<subjects>`: either the
+  convention drifted or this gate is now blind."*
+- **Monotonic baseline** (`tests/tier0/reachability-baseline.json`): a *drop* in subject count without
+  a live waiver is a FAIL. 16 seams → 2 is the same lie as zero. An absent baseline is a WARN plus the
+  command to write one, never a FAIL. `M.run` never writes anything.
+- **Every subject count is printed numerically** on line 1, so a coverage collapse is visible to a
+  reader skimming one line.
+
+### 6.4 Waivers, and why `presentation-floor` is only a WARN
+
+Per-game exemptions live in `<gameDir>/tests/verification-allow.json`, keyed `file::Table.method` —
+**bare method names are rejected**, because keying by bare name meant exempting `tuningFor` exempted
+*every* `tuningFor` in the game. Every entry needs a dated `expiresUnix` (missing/expired → the entry is
+invalid → **fail the rule it names**; `> 30 days` → FAIL; **matched nothing this run → FAIL**), and
+every active waiver is echoed into the gate output *and* the evidence JSON. A waiver is never invisible.
+The defeat-blocker: `playtest-pass.js` refuses green if `git status --porcelain` on that file is dirty —
+an agent cannot trip a RED and waive it in the same turn.
+
+`presentation-floor` is **WARN-only, in its own output section**, for a reason worth writing down: **a
+presence check is satisfied by the code that DELETES the thing.** `Ambience.apply` *removes* `Sky` and
+`Atmosphere`, and the substring `child:IsA("Sky")` satisfies a presence assertion perfectly. It proves a
+token is in the tree; it never proves the token reaches a player. Making it FAIL factory-wide would
+block every build on the rule most likely to degrade into token-stuffing.
+
+### 6.5 What it catches / misses — measured, not claimed
+
+**Proven RED** (§11 has the full ledger): four independent ways of aiming the gate at nothing — emptied
+catalog, `src/` moved away, deleted `default.project.json`, non-existent `gameDir` — all go red, two of
+them via two mechanisms at once. Orphaning a **uniquely-named** seam method goes red with exact
+`file:line` and a copy-pasteable waiver subject.
+
+**Measured misses — do not treat these as covered:**
+
+- **R4 `currency-sink` is file-level, not currency-level.** Removing the game's only Prism purchase —
+  the literal Prisms defect, restored — stayed **GREEN**, because a file that merely *mentions* Prisms
+  in a read-only balance echo and separately spends *Stardust* satisfies the sink test.
+- **R1 `seam-read` matches a bare method name across files.** Three seams publish `multiplierFor`; any
+  one being live marks all three read.
+- **R3 `catalog-id-read` counts display code as a read.** One surviving `elseif upgradeId == "magnet"`
+  inside a shop label-preview kept a fully inert upgrade green.
+- **The stage boolean has only two states.** `not-applicable` is honest in the prose and in `counts`,
+  but the stage returns `ok = true`, so an immature game reads green to any machine.
 
 ---
 
-## 7. Recommended sequence + how it slots into the roadmap
+## 7. T2.5 — the automated AI playtest (`run-in-roblox`, edit mode)
+
+`.claude/skills/lib/templates/tier2/playtest.server.luau` + `AUTHORING.md`, forked into
+`<gameDir>/tests/tier2/`, driven by `.claude/workflows/playtest-pass.js`.
+
+### 7.1 The inversion: a phase body returns nothing
+
+In the predecessor a phase was `function(): (boolean, any)` — **the author computed green themselves**,
+and every vacuity defect in the corpus is an author returning `true` having observed nothing. So the
+body now returns **nothing at all** and the harness derives the result from probe state:
+
+```
+phase.ok = (failedAssertions == 0) and (#unmeasurable == 0)
+           and (subjectsDeclared >= minSubjects)
+           and (deltas >= 1 or spec.deltasRequired == false)
+```
+
+`probe:delta(label, read, act, expect)` — **the harness calls `read()` on both sides**, so the author
+cannot snapshot themselves and re-read the value they just wrote from the same buffer. `probe:expect`
+is a shape check and explicitly **cannot** satisfy the delta requirement. `probe:unmeasurable(label,
+why)` is the *only* channel for "I could not check this" and it **disqualifies green** — replacing three
+forbidden shapes that shipped: `"NOT a defect"` in a pass string, and `bootstrapParity = "UNCHECKED"`
+in two scripts.
+
+### 7.2 Three verdict states — the whole point
+
+```
+red    any gating phase not ok · roster mirror ≠ phases.json (two-sided) · bootstrap mirror
+       unreadable or still nil · a blindTo cites a limit measured as LIFTED · an expired /
+       over-30-day / matched-nothing waiver
+parked all gating pass, but a non-gating phase failed · any unverified entry · any phase
+       still named "example-"
+green  otherwise.   ok == (verdict == "green"), always. A mismatch is malformed → red.
+```
+
+The third state exists because the old lane published `"ok": true` on a build where all four shop
+upgrades did nothing, every island was freely walkable, and rebirth cut income 93% — while the
+assertion that *found* it (`capacityBefore: 50, capacityAfter: 50`) sat in a sibling field contributing
+nothing to the verdict. A second reporting channel cannot fix that. Only a third verdict state can.
+
+### 7.3 The lane's measured limits, re-measured every run and **inverted**
+
+`serverClockAdvances = false` · `physicsSteps = false` · `hasLocalPlayer = false`, plus `game.JobId ==
+""`. The `lane-limits` phase goes **RED when a limit LIFTS** — a release that starts stepping physics is
+an invitation to build rungs currently declared impossible and must interrupt a human rather than pass
+quietly. **Comments rot; assertions do not.** A phase declaring `requiresLimit` on a limit measured as
+absent is *refused and recorded unmeasurable*, never run — which is how the deleted pacing rung
+(30 successes / 290 rate-shed of 320 dispatches: **exactly the burst size**, because a frozen clock
+never refills the bucket) became a mechanism instead of a judgement call.
+
+### 7.4 The evidence contract
+
+One line, **last**, prefixed `##T25-EVIDENCE## ` — because `HttpService:JSONEncode` key order is
+unspecified and the previously documented recipe (`grep -E '^\{"ok"' | tail -1 > …`) was **broken three
+ways**: the artifact begins `{"verdict"`, the pipeline's exit status is `tail`'s (always 0, so a total
+failure looked like success), and `>` truncates the last good artifact before you know the run produced
+any. The committed `.json` is sentinel-free. The roster lives in a committed `phases.json` for readers
+*and* as an inline mirror the harness emits, because **a `run-in-roblox` standalone script cannot read
+the filesystem** — the ingest does the two-sided set-diff.
+
+### 7.5 Falsification is required, not suggested
+
+`playtest-pass.js` returns **`T2.5-unfalsified`** unless `last-falsification.json` records an observed
+RED for **every** gating phase, produced against the **same `scriptSha256`** as the harness on disk (a
+proof against a since-edited harness proves nothing), with `reverted: true`. Staleness is a live problem
+here, not a theoretical one: commit `8aa53ce` exists solely because a green artifact predated the fix it
+claimed to verify and **every reader accepted it.**
+
+### 7.6 Measured limits of the harness itself — read this before trusting a T2.5-green
+
+**Nine of eleven adversarial attacks produced a green or unreported verdict.** A five-phase all-gating
+roster reported `verdict: "green", ok: true` while touching the game nowhere, asserting the **root
+pattern itself**, claiming 999 subjects and checking one, and asserting `"unchanged"` about a balance
+that changed by −75. The structural diagnosis: *the harness took the verdict away from the author and
+left them the subject* — `probe:delta` mandates that **a** read happen, never asks **what** was read.
+Ranked open work in `docs/AI-PLAYTEST-METHOD.md` §8; the P0 is that `probe.delta` projects `expect.field`
+**after** `act()` runs, so a live-table read (`ctx.data:get(player)`, the dominant idiom here) makes
+`direction = "unchanged"` an unconditional pass.
+
+---
+
+## 8. T2.7 — the agent-driven live Studio pass (`/engine-pass`)
+
+`.claude/skills/engine-pass/SKILL.md`. Evidence under `<gameDir>/tests/engine-pass/`.
+
+**Deliberately not T3.** `RUNGS` reserves T3 for the *human* playtest (`automatable = false`), and an
+agent driving Studio still cannot see fun, cannot contend two clients, and `game.JobId` is `""`.
+`tests/tier3/` stays reserved and unused.
+
+**The ten steps, each fail-closed.** Session selection (zero Studios listed → the pass is **UNRUN**,
+never "assume it is fine") · **Rojo self-sync over HTTP** — `HttpService.HttpEnabled = true`, `GET
+/api/rojo` → `rootInstanceId`, `GET /api/read/<id>` → a flat instance map carrying
+`Properties.Source.String`; ~46 scripts in about a second, and **no human presses Connect** · provenance
+(any `mismatchCount > 0` ⇒ `T2.7-hybrid-place`, **cannot be green** — the factory's best in-engine proof
+had to ship with exactly that caveat) · **name-shadow detection, rename-never-delete** (a `Shared`
+*Folder* from another project shadowed the game's `Shared` *ModuleScript* and `require` resolved to the
+wrong instance) · boot + console **where an empty console is a FAILURE** (each probe declares the lines
+that must APPEAR; the JoinRetry fix prints `[JoinRetry]` *specifically so green is observable*, because
+a working fix and a missing fix otherwise produce an identical empty console) · a server-authority delta
+probe · **driving the real `RemoteFunction` from the CLIENT context — the only rung that can see client
+wiring at all** · an edit-mode world build for a controlled camera · the measured-gotcha register · **the
+screenshot protocol** · the evidence artifact.
+
+**The screenshot protocol is the part that is easiest to get wrong.** State the assertion *before*
+capturing; record `pass` / `fail` / **`cannot-tell`**; `cannot-tell` is **not a pass**; an image with no
+assertion string is dropped and pushes its phase red. Three of the five defects this loop found were
+invisible in every log — the blank-texture `Sky` rendering no stars, the 110-stud `AlwaysOnTop`
+billboards, and `22 total, 0 visible, 22 parked`. **The correct sky config was a deletion, and the
+version with more code in it looked worse. Screenshots decided that; reasoning did not.**
+(`docs/AI-PLAYTEST-METHOD.md` §3.)
+
+**Do not reuse T2.5's lane measurements here.** The frozen clock / no-physics / no-LocalPlayer limits are
+properties of the `run-in-roblox` **edit** lane, measured there. Anything claimed about Play mode must be
+measured in Play mode and appended to `<gameDir>/tests/engine-pass/ENGINE-FACTS.md` with the experiment
+that produced it.
+
+**Status: the loop is proven, the skill is UNPROVEN.** The sync/probe/screenshot loop was driven end to
+end and produced five real fixes (`6b5dbee`). The *skill* has never been executed — no
+`games/collect-sim/tests/engine-pass/` directory exists. What would prove it: `/engine-pass
+games/collect-sim` against a live Studio, **plus** the mandatory falsification run (rename one mounted
+script in the place first; the pass must report `T2.7-unrun (hybrid or unverified place)` and **must not
+proceed to screenshots**).
+
+---
+
+## 9. Honest limits + what stays human
+
+Even with all six automatable rungs, classes remain below them:
+
+- **Persistence / restart** (receipt re-grant, DataStore quota, cross-server locks) — B2's
+  `SessionStore` is built and verified against real storage, but **JobId uniqueness and cross-server
+  exclusion still need live players**: `game.JobId` is `""` in Studio, in Play mode, and under
+  `run-in-roblox`, so cross-server exclusion is untestable **by construction** on every rung below T3.
+- **Semantic cross-service drift** that isn't a require error — e.g. `RestockService`'s hard-mirrored
+  `ISLAND_IDS = {1..5}` going stale when the islands catalog grows. Resolves fine (invisible to T0.5),
+  each unit test internally consistent. Needs a separate **cross-service-constant invariant** check.
+  *(Partially addressed: `gate-reachability`'s `catalog-id-read` sees an id nothing reads, but not two
+  catalogs that have drifted apart.)*
+- **Dead-but-valid wiring** — `tickAutoCollect` exposed but driven from no Heartbeat. T0.5 sees a valid
+  module; T1 calls the ticker directly and passes. **Now partly caught:** `seam-read` fails a seam
+  method no other file references, and T2/T2.5 surface it as a behavioural absence.
+- **Whether a gap is jumpable.** Physics does not step in the `run-in-roblox` lane, so `traversal` is a
+  raycast proxy. T2.7 in Play mode and T3 are the only rungs that can answer it.
+- **The rungs' own blind spots**, which are the useful list — see `docs/AI-PLAYTEST-METHOD.md` §2.
+
+**Legitimately human (never automated, by design — `FACTORY.md` §5): FUN, first and foremost** — that is
+what the six rungs beneath it exist to protect. Plus presentation & aesthetic judgement (T2.7 can prove
+the stars render; it cannot prefer them); real input / world interaction; multi-client replication &
+live exploits; asset trust; and the fenced **publish / `git push`** (`FACTORY-LOOP.md` §4 invariant 2:
+the only path to Publish runs through the human gate). The ladder changes **when** the loop may reach
+that human, and **what he spends the first minute on** — not who pushes.
+
+---
+
+## 10. Recommended sequence + how it slots into the roadmap
 
 1. **L1 — `gate-require.luau`** (protected-config). Lowest cost (~250–350 lines reusing `fs`+`serde`
    already in `gauntlet.luau`, one line to wire), fully autonomous, fence-clean. **Catches the class
@@ -421,22 +694,62 @@ make the graded condition mean *"boots and the loop is reachable,"* not *"passes
 
 ---
 
-## 8. Decisions + open questions
+## 11. Status ledger — what has been observed RED, and what has not
+
+Doctrine: **a gate never observed RED is not known to work.** This section is the record, not the plan.
+Every row was produced by an actual run. The full narrative is in `docs/AI-PLAYTEST-METHOD.md` §7–§8.
+
+| Rung / machinery | Built | Observed RED | Honest status |
+|---|---|---|---|
+| T0, T0.5, T1 (Lune) | ✅ | ✅ | in production since `0aa4d1e` |
+| **T1 reachability — vacuity defence** | ✅ | ✅ **four independent ways** (empty catalog, `src/` removed, no `default.project.json`, missing `gameDir`) | strongest single result in the build |
+| T1 reachability — `seam-read`, unique name | ✅ | ✅ | works |
+| T1 reachability — `seam-read`, **colliding** method name | ✅ | ❌ **GREEN on a real orphan** | rule matches a bare method name; needs `Ident.method` |
+| T1 reachability — `catalog-id-read` | ✅ | ⚠️ only in strengthened form | one display-only `elseif` kept an inert upgrade green |
+| T1 reachability — `currency-sink` | ✅ | ⚠️ only in strengthened form | sink test is file-level, not currency-level |
+| T2 boot smoke | ✅ | ✅ | `last-smoke.json` present |
+| **T2.5 harness** | ✅ | ⚠️ **2 of 11 attacks** | see §7.6 — the *shape* of the verdict is fixed; green-by-vacuity is not closed |
+| `playtest-pass.js` | ✅ | ❌ **never executed** | run its §C.8 acceptance cases, especially test 3 |
+| **T2.7 loop** | ✅ | ✅ (found 5 defects, `6b5dbee`) | proven ad hoc |
+| **T2.7 skill** (`/engine-pass`) | ✅ | ❌ **never executed** | no `tests/engine-pass/` artifacts exist anywhere |
+| `games/collect-sim` at T1 | — | — | **RED right now:** `tier-status.luau` reports `highest=T0.5 \| in-progress (T1 red), NOT ready` (6 reachability FAIL, no allowlist) |
+
+**The one blocker needing a human decision.** `gate-reachability` is red on the untouched
+`games/collect-sim`, and since it is a gauntlet stage, so is that game's gauntlet. All six findings are
+**true positives against the rule as written** (verified by grep). But `walkSpeedFor` *is* read — by
+`humanoid.WalkSpeed = UpgradesSeam:walkSpeedFor(d)` two lines below, **in the same file** — and R1's
+contract is cross-*file*. So single-file-consumed seams would need a waiver renewed forever, and
+**30-day waivers renewed forever are exactly how allowlists rot into blanket suppression.** Either
+author `games/collect-sim/tests/verification-allow.json`, or narrow R1. Not an agent's call.
+
+---
+
+## 12. Decisions + open questions
 
 **Decided:**
 
 - **L1 ships as protected-config** (§3.5) — the gate that defines "green" is not editable by the agents
   it grades. *(Adding `gate-require.luau` + `gauntlet.luau` to `PROTECTED_FENCE_FILES` remains the one
-  human-only follow-up; `tier-ladder.luau` should join them when that lands — the handoff verdict must
-  not be agent-editable either.)*
+  human-only follow-up; `tier-ladder.luau` and now `gate-reachability.luau` should join them when that
+  lands — the handoff verdict must not be agent-editable either.)*
 - ~~**Plan first, build later**~~ — **done: L1 + L2 are built, L3 is built in park-mode** (see the status
   block at the top). This document is now both the design rationale and the record of what shipped.
+- ~~**L3 activation: stand up the Studio MCP bridge now, or activate later?**~~ — **done. The bridge is
+  live and driven** (§8). `run-in-roblox` is on PATH, so T2 and T2.5 run unattended too.
+- **The live-Studio pass is `T2.7`, not `T3`.** `RUNGS` reserves T3 for a human; an agent driving Studio
+  is not a human playtest. `tests/tier3/` stays reserved and unused.
+- **Per-game waiver allowlists** (`<gameDir>/tests/verification-allow.json`) rather than a protected
+  factory-level file — exemptions must be reviewable beside the game — **plus** a mechanical
+  defeat-blocker: a waiver added in the same turn as the RED makes the lane red.
 
 **Open (for a future build pass):**
 
-- **L3 activation:** stand up the Studio MCP bridge now, or ship L3 in park-mode and activate later?
+- **The T2.5 P0 fixes** (§7.6 / `AI-PLAYTEST-METHOD.md` §8) — the aliased-read bug, the name-keyed
+  structural exemption, and the game-contact instrument. Until they land, a `T2.5-green` means *the
+  measurements that were taken passed*, not *the game works*.
+- **The three `gate-reachability` rule defects** in §6.5.
+- **`not-applicable` as a third stage state.** Today an immature game returns a green stage boolean.
 - **Open Cloud carve-out:** leave fenced (default), or design a narrow execute-only allowlist as a
   separate human-owned decision?
 - **Tier labels:** raw `T0..T3`, or friendlier names in the portfolio funnel?
-- **Adjacent lints:** build the cross-service-constant and exposed-but-never-driven checks now, or accept
-  the gap until B2?
+- **Adjacent lints:** the cross-service-constant invariant check is still unbuilt.

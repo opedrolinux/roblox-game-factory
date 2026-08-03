@@ -1,0 +1,543 @@
+<title>The factory, as it stands</title>
+
+<style>
+  :root {
+    --ground:   #f2f5f9;
+    --panel:    #ffffff;
+    --sunk:     #e7ecf3;
+    --rule:     #ccd6e2;
+    --rule-soft:#e1e8f0;
+    --text:     #161d26;
+    --muted:    #5c6a7c;
+    --faint:    #8494a6;
+
+    --amber:   #b97514;
+    --green:   #1f7d5a;
+    --red:     #b8453a;
+    --violet:  #5b50c9;
+
+    --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:   #0c1017;
+      --panel:    #131a23;
+      --sunk:     #0f151d;
+      --rule:     #27323f;
+      --rule-soft:#1c242f;
+      --text:     #dce4ee;
+      --muted:    #8494a6;
+      --faint:    #64748a;
+
+      --amber:   #e5a13a;
+      --green:   #4bbf8d;
+      --red:     #e07365;
+      --violet:  #9b91f5;
+    }
+  }
+
+  :root[data-theme="light"] {
+    --ground:#f2f5f9; --panel:#ffffff; --sunk:#e7ecf3; --rule:#ccd6e2; --rule-soft:#e1e8f0;
+    --text:#161d26; --muted:#5c6a7c; --faint:#8494a6;
+    --amber:#b97514; --green:#1f7d5a; --red:#b8453a; --violet:#5b50c9;
+  }
+  :root[data-theme="dark"] {
+    --ground:#0c1017; --panel:#131a23; --sunk:#0f151d; --rule:#27323f; --rule-soft:#1c242f;
+    --text:#dce4ee; --muted:#8494a6; --faint:#64748a;
+    --amber:#e5a13a; --green:#4bbf8d; --red:#e07365; --violet:#9b91f5;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 0 clamp(1rem, 4vw, 2.5rem); }
+
+  /* ---- masthead ---------------------------------------------------- */
+
+  .masthead {
+    padding: clamp(3rem, 9vw, 6rem) 0 clamp(2rem, 5vw, 3.5rem);
+    border-bottom: 1px solid var(--rule);
+  }
+  .stamp {
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--amber);
+    display: flex;
+    flex-wrap: wrap;
+    gap: .4rem 1.2rem;
+    margin-bottom: 1.6rem;
+  }
+  .stamp span { display: inline-flex; align-items: center; gap: .5rem; }
+  .stamp span::before {
+    content: "";
+    width: 6px; height: 6px;
+    background: currentColor;
+    transform: rotate(45deg);
+    flex: none;
+  }
+  h1 {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: clamp(1.9rem, 6vw, 3.4rem);
+    line-height: 1.04;
+    letter-spacing: -.02em;
+    margin: 0 0 1.1rem;
+    text-wrap: balance;
+  }
+  .lede {
+    font-size: clamp(1.02rem, 2.2vw, 1.2rem);
+    color: var(--muted);
+    max-width: 60ch;
+    margin: 0;
+  }
+  .lede strong { color: var(--text); font-weight: 600; }
+
+  /* ---- section chrome ---------------------------------------------- */
+
+  section { padding: clamp(2.6rem, 6vw, 4.5rem) 0; border-bottom: 1px solid var(--rule); }
+  .sec-head { display: flex; align-items: baseline; gap: 1rem; margin-bottom: .5rem; flex-wrap: wrap; }
+  .sec-num {
+    font-family: var(--mono);
+    font-size: .72rem;
+    letter-spacing: .2em;
+    color: var(--faint);
+    border: 1px solid var(--rule);
+    padding: .18rem .5rem;
+    flex: none;
+  }
+  h2 {
+    font-family: var(--mono);
+    font-size: clamp(1.1rem, 2.6vw, 1.45rem);
+    font-weight: 700;
+    letter-spacing: -.01em;
+    margin: 0;
+  }
+  .sec-sub { color: var(--muted); margin: .55rem 0 2rem; max-width: 66ch; font-size: .96rem; }
+  .sec-sub strong { color: var(--text); font-weight: 600; }
+
+  /* ---- corner-ticked panel (technical-drawing crop marks) ---------- */
+
+  .panel {
+    position: relative;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    padding: 1.15rem 1.25rem;
+  }
+  .panel::before, .panel::after {
+    content: "";
+    position: absolute;
+    width: 9px; height: 9px;
+    border: 1px solid var(--amber);
+    opacity: .55;
+    pointer-events: none;
+  }
+  .panel::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; }
+  .panel::after  { bottom: -1px; right: -1px; border-left: 0; border-top: 0; }
+
+  /* ---- I. the three layers ----------------------------------------- */
+
+  .layers {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 1px; background: var(--rule); border: 1px solid var(--rule);
+  }
+  @media (max-width: 760px) { .layers { grid-template-columns: 1fr; } }
+  .layer { background: var(--panel); padding: 1.3rem 1.25rem 1.45rem; }
+  .layer-tag {
+    font-family: var(--mono); font-size: .68rem; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--faint); margin-bottom: .7rem;
+  }
+  .layer-path {
+    font-family: var(--mono); font-size: 1.02rem; font-weight: 700;
+    color: var(--amber); margin-bottom: .2rem;
+  }
+  .layer-what { font-size: .93rem; color: var(--muted); margin: 0 0 1rem; }
+  .layer ul { list-style: none; margin: 0; padding: 0; display: grid; gap: .3rem; }
+  .layer li {
+    font-family: var(--mono); font-size: .78rem; color: var(--text);
+    padding-left: .95rem; position: relative; line-height: 1.5;
+  }
+  .layer li::before {
+    content: ""; position: absolute; left: 0; top: .6em;
+    width: 5px; height: 1px; background: var(--faint);
+  }
+  .layer li em { font-style: normal; color: var(--faint); }
+
+  /* ---- II. the line ------------------------------------------------ */
+
+  .scroller { overflow-x: auto; padding-bottom: .6rem; -webkit-overflow-scrolling: touch; }
+  .line {
+    display: flex; align-items: stretch;
+    min-width: 940px; border: 1px solid var(--rule); background: var(--panel);
+  }
+  .stn {
+    flex: 1 1 0; min-width: 0; padding: .95rem .8rem 1.1rem;
+    border-right: 1px solid var(--rule-soft);
+    display: flex; flex-direction: column; gap: .35rem;
+  }
+  .stn:last-child { border-right: 0; }
+  .stn-i { font-family: var(--mono); font-size: .64rem; letter-spacing: .14em; color: var(--faint); }
+  .stn-n { font-family: var(--mono); font-size: .82rem; font-weight: 700; line-height: 1.25; }
+  .stn-w { font-size: .74rem; color: var(--muted); line-height: 1.45; }
+  .stn.human {
+    background: color-mix(in srgb, var(--violet) 10%, var(--panel));
+    border-left: 2px solid var(--violet); border-right-color: var(--violet);
+  }
+  .stn.human .stn-i, .stn.human .stn-n { color: var(--violet); }
+  .stn.gate { background: color-mix(in srgb, var(--amber) 9%, var(--panel)); }
+  .stn.gate .stn-i { color: var(--amber); }
+
+  .line-key {
+    display: flex; flex-wrap: wrap; gap: .5rem 1.4rem; margin-top: 1rem;
+    font-family: var(--mono); font-size: .72rem; color: var(--muted);
+  }
+  .line-key span { display: inline-flex; align-items: center; gap: .45rem; }
+  .swatch { width: 10px; height: 10px; flex: none; border: 1px solid var(--rule); display: inline-block; }
+  .sw-m { background: var(--panel); }
+  .sw-g { background: color-mix(in srgb, var(--amber) 45%, transparent); border-color: var(--amber); }
+  .sw-h { background: color-mix(in srgb, var(--violet) 45%, transparent); border-color: var(--violet); }
+
+  /* ---- III. the ladder --------------------------------------------- */
+
+  .ladder { position: relative; border: 1px solid var(--rule); background: var(--panel); }
+  .ladder::before, .ladder::after {
+    content: ""; position: absolute; top: 0; bottom: 0; width: 1px;
+    background: var(--rule); pointer-events: none; z-index: 2;
+  }
+  .ladder::before { left: 1.5rem; }
+  .ladder::after  { left: 4.4rem; }
+
+  .rung { display: grid; grid-template-columns: 4.4rem 1.1fr 1fr; border-top: 1px solid var(--rule); }
+  .rung:first-child { border-top: 0; }
+  .rung-id {
+    font-family: var(--mono); font-size: .78rem; font-weight: 700;
+    padding: .85rem .5rem .85rem .55rem; color: var(--faint);
+    background: var(--sunk); text-align: right;
+  }
+  .rung-body { padding: .85rem 1rem; border-left: 1px solid var(--rule); }
+  .rung-name { font-family: var(--mono); font-size: .88rem; font-weight: 700; margin-bottom: .28rem; }
+  .rung-run { font-family: var(--mono); font-size: .71rem; color: var(--faint); margin-bottom: .45rem; word-break: break-word; }
+  .rung-proves { font-size: .85rem; color: var(--muted); margin: 0; }
+  .rung-proves b { color: var(--green); font-weight: 600; }
+  .rung-blind {
+    padding: .85rem 1rem;
+    background: var(--sunk); border-left: 1px solid var(--rule-soft);
+    font-size: .82rem; color: var(--muted);
+  }
+  .blind-tag {
+    font-family: var(--mono); font-size: .62rem; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--red); display: block; margin-bottom: .3rem;
+  }
+  .rung.human .rung-id,
+  .rung.human .rung-name,
+  .rung.human .rung-blind,
+  .rung.human .blind-tag { color: var(--violet); }
+  .rung.new .rung-id { color: var(--amber); }
+  .rung.new .rung-name::after {
+    content: "NEW"; font-size: .58rem; letter-spacing: .14em; vertical-align: .35em;
+    margin-left: .5rem; color: var(--amber); border: 1px solid var(--amber); padding: .05rem .3rem;
+  }
+  @media (max-width: 760px) {
+    .ladder::before, .ladder::after { display: none; }
+    .rung { grid-template-columns: 1fr; }
+    .rung-id { text-align: left; padding: .55rem 1rem; }
+    .rung-body, .rung-blind { border-left: 0; }
+  }
+
+  /* ---- IV. fence + state ------------------------------------------- */
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start; }
+  @media (max-width: 760px) { .two { grid-template-columns: 1fr; } }
+
+  .fence-list { list-style: none; margin: .8rem 0 0; padding: 0; display: grid; gap: .7rem; }
+  .fence-list li {
+    font-family: var(--mono); font-size: .8rem; padding-left: 1.4rem;
+    position: relative; color: var(--text);
+  }
+  .fence-list li::before {
+    content: "\2715"; position: absolute; left: 0; top: 0; color: var(--red); font-size: .8rem;
+  }
+  .fence-list li em {
+    font-style: normal; color: var(--faint); display: block;
+    font-family: var(--sans); font-size: .8rem; line-height: 1.45; margin-top: .1rem;
+  }
+
+  .metrics {
+    display: grid; grid-template-columns: repeat(2, 1fr);
+    gap: 1px; background: var(--rule); border: 1px solid var(--rule); margin-top: .9rem;
+  }
+  .metric { background: var(--panel); padding: .9rem 1rem; }
+  .metric-v {
+    font-family: var(--mono); font-size: 1.5rem; font-weight: 700; line-height: 1.1;
+    font-variant-numeric: tabular-nums; color: var(--green);
+  }
+  .metric-k {
+    font-family: var(--mono); font-size: .66rem; letter-spacing: .13em;
+    text-transform: uppercase; color: var(--faint); margin-top: .3rem;
+  }
+  .metric-note { font-size: .86rem; color: var(--muted); margin: 1rem 0 0; }
+
+  /* ---- closing ------------------------------------------------------ */
+
+  .closing { padding: clamp(2.5rem, 6vw, 4rem) 0 clamp(3.5rem, 8vw, 6rem); }
+  .closing p { max-width: 64ch; color: var(--muted); font-size: 1.02rem; }
+  .closing p strong { color: var(--text); font-weight: 600; }
+  .closing code { font-family: var(--mono); font-size: .9em; color: var(--amber); }
+  .pull {
+    font-family: var(--mono); font-size: clamp(1rem, 2.4vw, 1.25rem); line-height: 1.5;
+    color: var(--text); border-left: 2px solid var(--amber); padding: .2rem 0 .2rem 1.2rem;
+    margin: 0 0 1.8rem; max-width: 58ch; text-wrap: pretty;
+  }
+</style>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="stamp">
+      <span>roblox-game-factory</span>
+      <span>2 aug 2026</span>
+      <span>main &middot; clean</span>
+    </div>
+    <h1>The factory,<br>as it stands</h1>
+    <p class="lede">
+      Three layers, one assembly line, and a ladder of gates that each have to go green before the next
+      is allowed to run. <strong>The last rung is you.</strong> Everything below it exists so that by the
+      time a game reaches you, the only question left is whether it&rsquo;s fun.
+    </p>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">I</span><h2>What it&rsquo;s made of</h2></div>
+    <p class="sec-sub">
+      The factory copies rather than shares. Every game is a full fork of the engine, so one game can
+      never break another &mdash; and a fix in one has to be deliberately carried back.
+    </p>
+
+    <div class="layers">
+      <div class="layer">
+        <div class="layer-tag">Layer 1 &mdash; the machinery</div>
+        <div class="layer-path">.claude/</div>
+        <p class="layer-what">The robots and the safety rails. This is the part that builds games.</p>
+        <ul>
+          <li>skills/ <em>&mdash; new-game, build-features, build-game</em></li>
+          <li>skills/lib/ <em>&mdash; gauntlet, gate-require, tier-status</em></li>
+          <li>workflows/ <em>&mdash; 8 lanes: decompose, contract-pass, fan-out, integration-gate, adversarial-review, grade&hellip;</em></li>
+          <li>hooks/ <em>&mdash; the fence, plus auto-format</em></li>
+        </ul>
+      </div>
+      <div class="layer">
+        <div class="layer-tag">Layer 2 &mdash; the engine</div>
+        <div class="layer-path">core/</div>
+        <p class="layer-what">The parts every game starts from: networking, saving, session locking, the service framework.</p>
+        <ul>
+          <li>26 source files</li>
+          <li>105 / 105 tests green</li>
+          <li>forked into each game, never linked</li>
+        </ul>
+      </div>
+      <div class="layer">
+        <div class="layer-tag">Layer 3 &mdash; the products</div>
+        <div class="layer-path">games/</div>
+        <p class="layer-what">The actual games. One real one so far, carried all the way to a human playtest.</p>
+        <ul>
+          <li>collect-sim <em>&mdash; 46 source, 32 test files</em></li>
+          <li>422 / 422 tests green</li>
+          <li>verified in a live Studio session</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">II</span><h2>The line</h2></div>
+    <p class="sec-sub">
+      A one-page spec goes in the left, a built and gated game comes out the right. It pauses for a human
+      exactly twice &mdash; once to approve the plan <em>before</em> any real code is written, and once at
+      the end to play it and land it.
+    </p>
+
+    <div class="scroller">
+      <div class="line">
+        <div class="stn"><div class="stn-i">00</div><div class="stn-n">spec</div><div class="stn-w">one page: loop, economy, features, success criteria</div></div>
+        <div class="stn"><div class="stn-i">01</div><div class="stn-n">new-game</div><div class="stn-w">fork the engine, cut a staging branch</div></div>
+        <div class="stn"><div class="stn-i">02</div><div class="stn-n">decompose</div><div class="stn-w">spec &rarr; features + contract changes</div></div>
+        <div class="stn"><div class="stn-i">03</div><div class="stn-n">contract&#8209;pass</div><div class="stn-w">shared schema + migrations; nothing committed yet</div></div>
+        <div class="stn human"><div class="stn-i">&#9733; HUMAN</div><div class="stn-n">approve</div><div class="stn-w">you read the plan and the real diff before code is written</div></div>
+        <div class="stn"><div class="stn-i">04</div><div class="stn-n">fan&#8209;out</div><div class="stn-w">one agent per feature, in parallel</div></div>
+        <div class="stn"><div class="stn-i">05</div><div class="stn-n">merge</div><div class="stn-w">green features land; re-gated after each</div></div>
+        <div class="stn gate"><div class="stn-i">06 GATE</div><div class="stn-n">integration</div><div class="stn-w">fresh cross-feature tests on the whole game</div></div>
+        <div class="stn gate"><div class="stn-i">07 GATE</div><div class="stn-n">adversarial</div><div class="stn-w">hunt exploits and races until dry</div></div>
+        <div class="stn gate"><div class="stn-i">08 GATE</div><div class="stn-n">finalize</div><div class="stn-w">sample removed &middot; honest tier &middot; graded done</div></div>
+        <div class="stn human"><div class="stn-i">&#9733; HUMAN</div><div class="stn-n">land</div><div class="stn-w">you play it, then you push</div></div>
+      </div>
+    </div>
+
+    <div class="line-key">
+      <span><i class="swatch sw-m"></i> machine, unattended</span>
+      <span><i class="swatch sw-g"></i> gate &mdash; refuses to pass work along</span>
+      <span><i class="swatch sw-h"></i> human judgment, queued not auto-done</span>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">III</span><h2>The ladder</h2></div>
+    <p class="sec-sub">
+      Each rung only runs if the one below it is green, and a game&rsquo;s honest status is the highest rung
+      it has actually reached &mdash; never a bare &ldquo;ready.&rdquo; The right-hand column is the useful
+      one: <strong>what that rung physically cannot see.</strong> Every rung exists because something
+      expensive got past the rung below it.
+    </p>
+
+    <div class="ladder">
+
+      <div class="rung">
+        <div class="rung-id">T0</div>
+        <div class="rung-body">
+          <div class="rung-name">Static</div>
+          <div class="rung-run">stylua &middot; selene &middot; rojo build</div>
+          <p class="rung-proves">It <b>compiles into a place file</b>, formatted and lint-clean.</p>
+        </div>
+        <div class="rung-blind"><span class="blind-tag">blind to</span>Whether a single script in that place ever loads. Building is not running.</div>
+      </div>
+
+      <div class="rung">
+        <div class="rung-id">T0.5</div>
+        <div class="rung-body">
+          <div class="rung-name">Requires</div>
+          <div class="rung-run">gate-require.luau</div>
+          <p class="rung-proves">Every <b>import resolves inside Roblox</b>, not just on disk.</p>
+        </div>
+        <div class="rung-blind"><span class="blind-tag">blind to</span>What any of that code does. Added after a game passed 313 tests and then did not boot at all.</div>
+      </div>
+
+      <div class="rung new">
+        <div class="rung-id">T0.6</div>
+        <div class="rung-body">
+          <div class="rung-name">Reachability</div>
+          <div class="rung-run">walks the source as text &mdash; no engine needed</div>
+          <p class="rung-proves">Every value the player pays for is <b>actually read by something</b>.</p>
+        </div>
+        <div class="rung-blind"><span class="blind-tag">blind to</span>Whether the read produces the right number. Added after upgrades costing 9,625 changed nothing, with every test green.</div>
+      </div>
+
+      <div class="rung">
+        <div class="rung-id">T1</div>
+        <div class="rung-body">
+          <div class="rung-name">Logic</div>
+          <div class="rung-run">422 tests, under a plain file loader</div>
+          <p class="rung-proves">The <b>economy and state machines are correct</b>.</p>
+        </div>
+        <div class="rung-blind"><span class="blind-tag">blind to</span>A character that never spawned, a save that hasn&rsquo;t loaded, and the Roblox half of every dual-runtime file.</div>
+      </div>
+
+      <div class="rung">
+        <div class="rung-id">T2</div>
+        <div class="rung-body">
+          <div class="rung-name">Boots</div>
+          <div class="rung-run">run-in-roblox &mdash; a real DataModel</div>
+          <p class="rung-proves">It <b>starts</b>: services run, the network wire is real.</p>
+        </div>
+        <div class="rung-blind"><span class="blind-tag">blind to</span>The entire client. This lane was once green while building literally nothing.</div>
+      </div>
+
+      <div class="rung new">
+        <div class="rung-id">T2.5</div>
+        <div class="rung-body">
+          <div class="rung-name">Machine playtest</div>
+          <div class="rung-run">verdict: red / parked / green</div>
+          <p class="rung-proves">Buying a thing <b>measurably changes the thing it governs</b> &mdash; walk speed 16 &rarr; 17.6 on a real character, island 2 paying exactly 2.00&times;.</p>
+        </div>
+        <div class="rung-blind"><span class="blind-tag">blind to</span>No player camera, no physics, frozen clock. It declares this in every result it prints, so a green can&rsquo;t be over-read.</div>
+      </div>
+
+      <div class="rung new">
+        <div class="rung-id">T2.7</div>
+        <div class="rung-body">
+          <div class="rung-name">Engine pass</div>
+          <div class="rung-run">live Studio &mdash; play, probe, screenshot</div>
+          <p class="rung-proves">It is <b>actually there, and visible</b>. Found 5 defects every offline lane missed &mdash; three of them only visible in a picture.</p>
+        </div>
+        <div class="rung-blind"><span class="blind-tag">blind to</span>Whether any of it is enjoyable. It can tell you the sky renders no stars; it cannot tell you the game is boring.</div>
+      </div>
+
+      <div class="rung human">
+        <div class="rung-id">T3</div>
+        <div class="rung-body">
+          <div class="rung-name">You</div>
+          <div class="rung-run">a person plays it</div>
+          <p class="rung-proves">Whether it is <b>fun</b>.</p>
+        </div>
+        <div class="rung-blind"><span class="blind-tag">the only rung that can</span>Nothing below here can answer this, and pretending otherwise is how the factory wasted your time before.</div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head"><span class="sec-num">IV</span><h2>The fence, and where things stand</h2></div>
+    <p class="sec-sub">
+      The factory runs for hours unattended, which only works because there is a hard list of things it may
+      never do on its own. Those get queued for you instead of done.
+    </p>
+
+    <div class="two">
+      <div class="panel">
+        <div class="layer-tag">Never, without you</div>
+        <ul class="fence-list">
+          <li>git push<em>Landing code is yours. It can commit locally; it cannot publish.</em></li>
+          <li>network calls<em>No uploading, no fetching, nothing outside the repo.</em></li>
+          <li>real money<em>No purchases, no publishing to Roblox, no account actions.</em></li>
+          <li>edit its own fence<em>The guard protects its own config, so it can&rsquo;t widen its permissions.</em></li>
+          <li>destructive git<em>Recovery is forward-only &mdash; revert, never reset or force.</em></li>
+        </ul>
+      </div>
+
+      <div class="panel">
+        <div class="layer-tag">collect-sim &mdash; current state</div>
+        <div class="metrics">
+          <div class="metric"><div class="metric-v">422</div><div class="metric-k">game tests green</div></div>
+          <div class="metric"><div class="metric-v">105</div><div class="metric-k">engine tests green</div></div>
+          <div class="metric"><div class="metric-v">T2.7</div><div class="metric-k">highest rung reached</div></div>
+          <div class="metric"><div class="metric-v">71</div><div class="metric-k">defects fixed</div></div>
+        </div>
+        <p class="metric-note">
+          66 from the audit your playtest triggered, plus 5 more found by driving a live Studio session.
+          It is now waiting on the one rung a machine can&rsquo;t climb.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="closing">
+  <div class="wrap">
+    <p class="pull">
+      The three rungs marked NEW all exist because something expensive got past the rung below them.
+      That is the only good reason to ever add one.
+    </p>
+    <p>
+      Right now those three live inside <strong>collect-sim</strong> rather than in the factory &mdash; they
+      were built to rescue one game. Hoisting them into <code>.claude/</code>, so that every future game is
+      born with them instead of earning them the hard way, is the work in flight.
+    </p>
+  </div>
+</div>
