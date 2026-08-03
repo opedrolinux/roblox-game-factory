@@ -4,25 +4,49 @@ Every game the factory touches, and where it is in the funnel. The factory write
 here; the human reads this to decide what needs attention and what to kill or scale.
 
 ## Funnel stages
-`spec → building → verified-local-T1 → engine-smoked-T2 → awaiting-human-gate-T3 → soft-launch → measuring → scaled | killed`
+`spec → building → verified-local-T1 → engine-smoked-T2 → machine-playtested-T2.5 → studio-verified-T2.7 → awaiting-human-gate-T3 → soft-launch → measuring → scaled | killed`
 
-The `verified-local` stage is split into **honest verification tiers** (`docs/VERIFICATION-LADDER.md`),
-because "passes the Lune gauntlet" is *not* "boots in Roblox":
-- **`verified-local-T1`** — logic correct under the file loader (T0 static + T0.5 require-resolution + T1
-  Lune tests all green). **NOT engine-booted.** This is as far as the automatable lane reaches when the
-  engine lane (Studio MCP / Open Cloud) is unconnected — T2 is then recorded `blocked-on-human`.
-- **`engine-smoked-T2`** — the real place was booted; services Start; the core loop ran on the live wire.
+**The ladder is SEVEN rungs, and `T3` is not the one above `T2`.** Two automatable rungs sit between
+them — miss them and you will hand a game to the human early, which is the exact conflation
+`docs/VERIFICATION-LADDER.md` §1 exists to prevent. The `verified-local` stage is split into **honest
+verification tiers**, because "passes the Lune gauntlet" is *not* "boots in Roblox", and "boots" is not
+"a player can reach it":
+
+- **`verified-local-T1`** — logic correct under the file loader (T0 static + T0.5 require-resolution +
+  T1 Lune tests + the reachability gate, all green). **NOT engine-booted.** This is as far as the
+  offline lane reaches; with no engine lane provisioned, every rung above is `blocked-on-human`.
+- **`engine-smoked-T2`** — the real place was booted under `run-in-roblox`; services Start; the core
+  loop ran on the live wire. `<gameDir>/tests/tier2/last-smoke.json`.
+- **`machine-playtested-T2.5`** — the automated AI playtest ran in `run-in-roblox`'s **edit-mode** lane:
+  the scene is not obviously broken. **Blind to the entire client** (no LocalPlayer), to physics (it
+  does not step) and to anything time-gated (server clock frozen). A green here means *"not obviously
+  broken"*, not *"ready to play"*. `<gameDir>/tests/tier2/last-playtest.json`.
+- **`studio-verified-T2.7`** — `/engine-pass <gameDir>` drove a **live Studio session**: synced the tree
+  over Rojo's read API, booted it, probed the server *and* drove the game's **real remote gateway from
+  the client context**, and captured screenshots each carrying a written assertion (`cannot-tell` is not
+  a pass). **The only automatable rung that can see client wiring at all, or how the game LOOKS** — the
+  loop found five defects invisible to 421 green Tier-1 tests and to every offline lane (`6b5dbee`).
+  `<gameDir>/tests/engine-pass/last-studio.json`.
 - **`awaiting-human-gate-T3`** — everything automatable is green/blocked-on-human; waiting on the human
-  playtest (fun, feel, presentation, input, world) and the publish decision.
+  playtest (fun first of all, feel, presentation judgement, real input) and the publish decision.
 
-A game's stage is the **highest contiguous green rung** — never a bare "verified". The loop will not move
-a game to `awaiting-human-gate-T3` while a cheaper automatable rung (T0..T2) is still red or un-run.
+**T2.5 and T2.7 are different lanes, not one flag.** T2 and T2.5 both ride `run-in-roblox`
+(declare with `GATE_ENGINE_LANE=1`); T2.7 needs a live Studio session with the MCP bridge
+(`GATE_STUDIO_LANE=1`). A lane that was never declared is **unavailable**, so its rung reads
+`blocked-on-human` rather than green — "`run-in-roblox` is on PATH but no Studio is open" is a state a
+single boolean could not express.
+
+A game's stage is the **highest contiguous green rung** — never a bare "verified". The loop will not
+move a game to `awaiting-human-gate-T3` while a cheaper automatable rung (T0..T2.7) is still red or
+un-run. **Do not read a game's stage off this table and trust it — ask the machine:**
+`lune run .claude/skills/lib/tier-status.luau <gameDir>`. That aggregator is the authority; this column
+is a summary a human wrote and can go stale.
 
 ## Games
 
 | Game | Codename | Stage | Waiting on | Notes |
 |---|---|---|---|---|
-| Collect Simulator | stardust | **engine-smoked-T2** | the human playtest (T3) — fun, feel, and multi-server lock contention | First game. Spec: `specs/collect-sim.md`. All of build-game v1 (10 features), the boot fix + T0.5 require gate, the verification ladder and **B2 real persistence** are now merged and pushed on `main` (344/344 game, 105/105 core). **T2 green as of 2026-07-30** — `run-in-roblox` drives a real DataModel headlessly, so the boot smoke (boot-probe / wire-present / core-loop / assert-no-error) runs **unattended**; evidence at `games/collect-sim/tests/tier2/last-smoke.json`. **Persistence separately verified against real Roblox storage** in a published place: 3/3 write→release→reload cycles with data intact, and 4 of 5 `TODO(verify)` engine assumptions confirmed by observation (`tests/tier2/ENGINE-FACTS.md`). **Still unverified and untestable from Studio:** `game.JobId` uniqueness (it is `""` in every Studio mode, so the GUID fallback is what actually runs) and cross-server lock exclusion — one session cannot contend with itself. **Not publish-safe yet:** the B2 security suite (rate limiting / validators / violation tracking) is unbuilt and every boot warns about it. **Greybox presentation merged** (`12252e0`) — the merge itself exposed a T2-only defect (an unguarded post-write `FireClient` turned a committed Sell into `Err(Internal)`), caught by the in-engine smoke while 352 Lune tests stayed green. **T2.5 automated playtest built** (`43cc008`, 7 gating phases, evidence at `tests/tier2/last-playtest.json`) — and it caught that the T2 smoke had been running against a Workspace with **zero parts**, so every prior world assertion passed vacuously. **known-red, reported outside the pass/fail:** `upgrade-effects` — buying the backpack upgrade deducts Stardust and changes nothing (`CAPACITY` is a module constant no handler reconciles). **The T2.5 lane is blind to the entire client** (edit mode, no LocalPlayer) and to all physics and time-gated behaviour (server clock frozen) — a green there is not "ready to play". **That blindspot then produced a real defect and its proof:** a 10-agent client audit found the offline claim was firing before `loadSession` finished and losing the grant *permanently* (autosave rewrites the away-window within 60s), fixed by `JoinRetry.once` (`e984d84`); because no rung can see client wiring, it was verified by driving Studio directly — same published place, same build, minutes apart: the pre-fix run logged `claim failed: NoData` and stopped, the post-fix run recovered **54 Stardust** on the data push, with exactly one retry despite the write-push loop. Details in `tests/tier2/ENGINE-FACTS.md`. |
+| Collect Simulator | stardust | **engine-smoked-T2** | **not the human yet** — two automatable rungs are still open above it: T2.5 must be re-run to mint a provenance-carrying artifact, then T2.7 (`/engine-pass`), which is blocked on **one human action** — enabling the MCP server in Studio's Assistant Settings | First game. Spec: `specs/collect-sim.md`. All of build-game v1 (10 features), the boot fix + T0.5 require gate, the verification ladder and **B2 real persistence** are now merged and pushed on `main` (344/344 game, 105/105 core). **T2 green as of 2026-07-30** — `run-in-roblox` drives a real DataModel headlessly, so the boot smoke (boot-probe / wire-present / core-loop / assert-no-error) runs **unattended**; evidence at `games/collect-sim/tests/tier2/last-smoke.json`. **Persistence separately verified against real Roblox storage** in a published place: 3/3 write→release→reload cycles with data intact, and 4 of 5 `TODO(verify)` engine assumptions confirmed by observation (`tests/tier2/ENGINE-FACTS.md`). **Still unverified and untestable from Studio:** `game.JobId` uniqueness (it is `""` in every Studio mode, so the GUID fallback is what actually runs) and cross-server lock exclusion — one session cannot contend with itself. **Not publish-safe yet:** the B2 security suite (rate limiting / validators / violation tracking) is unbuilt and every boot warns about it. **Greybox presentation merged** (`12252e0`) — the merge itself exposed a T2-only defect (an unguarded post-write `FireClient` turned a committed Sell into `Err(Internal)`), caught by the in-engine smoke while 352 Lune tests stayed green. **T2.5 automated playtest built** (`43cc008`, 7 gating phases, evidence at `tests/tier2/last-playtest.json`) — and it caught that the T2 smoke had been running against a Workspace with **zero parts**, so every prior world assertion passed vacuously. **known-red, reported outside the pass/fail:** `upgrade-effects` — buying the backpack upgrade deducts Stardust and changes nothing (`CAPACITY` is a module constant no handler reconciles). **The T2.5 lane is blind to the entire client** (edit mode, no LocalPlayer) and to all physics and time-gated behaviour (server clock frozen) — a green there is not "ready to play". **That blindspot then produced a real defect and its proof:** a 10-agent client audit found the offline claim was firing before `loadSession` finished and losing the grant *permanently* (autosave rewrites the away-window within 60s), fixed by `JoinRetry.once` (`e984d84`); because no rung can see client wiring, it was verified by driving Studio directly — same published place, same build, minutes apart: the pre-fix run logged `claim failed: NoData` and stopped, the post-fix run recovered **54 Stardust** on the data push, with exactly one retry despite the write-push loop. Details in `tests/tier2/ENGINE-FACTS.md`. **Where it actually stands as of 2026-08-03** — `tier-status` reports `highest=T2 | in-progress (T2.5 red), NOT ready`. The T2.5 red is **staleness, not failure**: the recorded artifact carries no `provenance` block (it predates `0a80218`), so nothing says which tree it ran against, and an artifact that cannot name its own tree is not evidence. **T2.7 is `awaiting-engine-pass`** — the sync/probe/screenshot loop is proven ad hoc (five defects, `6b5dbee`), but the `/engine-pass` skill has never completed a run. Attempted 2026-08-03: Studio was open on the place and `rojo serve` confirmed `projectName: "collect-sim"` on port 34875 — **two of three prerequisites green** — but `list_roblox_studios` returned `[]`, because the **MCP server is not enabled in Studio's Assistant Settings**. That is the single human action blocking this game's first T2.7 run. The skill degraded honestly and refused to fall back to `run-in-roblox`. Log + the exact next steps: `tests/engine-pass/RUNBOOK.md`. |
 
 ## Decision log
 - 2026-06-14 — Factory bootstrapped (Phase A: structure). Greenfield, not based on prior templates.

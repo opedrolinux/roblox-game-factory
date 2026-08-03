@@ -298,9 +298,12 @@ if ! run-in-roblox --place ../../.verify_tmp/t25.rbxlx \
       --script tests/tier2/playtest.server.luau > ../../.verify_tmp/t25.out; then
   echo "run-in-roblox exited non-zero — the artifact is NOT valid; T2.5 is RED" >&2; exit 1
 fi
-grep -m1 '^##T25-EVIDENCE## ' ../../.verify_tmp/t25.out \
+count=$(grep -c '^##T25-EVIDENCE## ' ../../.verify_tmp/t25.out)
+[ "$count" -eq 1 ] || { echo "expected exactly 1 sentinel line, found $count — RED" >&2; exit 1; }
+grep '^##T25-EVIDENCE## ' ../../.verify_tmp/t25.out \
   | sed 's/^##T25-EVIDENCE## //' > ../../.verify_tmp/t25.json
-lune run -e 'require("@lune/serde").decode("json", require("@lune/fs").readFile(".verify_tmp/t25.json"))' \
+# `node -e` is available; `lune run -e` IS NOT (see below).
+node -e 'JSON.parse(require("fs").readFileSync(".verify_tmp/t25.json","utf8"))' \
   && mv ../../.verify_tmp/t25.json tests/tier2/last-playtest.json
 ```
 
@@ -315,6 +318,14 @@ so it could not have produced its own evidence file:
 3. **Never `>` straight onto the artifact** — that truncates the last good evidence before you know the
    run produced any.
 4. **Parse before you move.** The committed `.json` is sentinel-free JSON only.
+
+> **`lune run -e` DOES NOT EXIST in lune 0.10.4** — measured 2026-08-03, and measured again before
+> that in `templates/tier2/AUTHORING.md` §"BROKEN #2". It exits `1` with `Failed to resolve script at
+> path '…\-e'`, so any `lune run -e … && mv …` **never fires the `mv`**: the previous, usually green,
+> artifact silently survives. Use `node -e` (present, v24) or a real script file. This document
+> published the dead recipe in two places for weeks *after* the fact was written down elsewhere —
+> which is the propagation failure, not a typo. If you measure a tool fact, grep the repo for every
+> place that repeats the wrong version.
 
 **No sentinel line at all is RED, never "absent."**
 
@@ -350,13 +361,30 @@ Artifacts land in `games/<slug>/tests/engine-pass/`: `last-studio.json`, `screen
 `ENGINE-FACTS.md`. Verify one mechanically:
 
 ```sh
-lune run -e 'local fs=require("@lune/fs"); local serde=require("@lune/serde"); \
- local d=serde.decode("json", fs.readFile("games/<slug>/tests/engine-pass/last-studio.json")); \
- assert(d.tier==2.7 and d.ok==(d.verdict=="green")); \
- for _,p in d.phases do assert(p.subjects and p.subjects>0, p.name) end; \
- assert(#d.screens>=6); for _,s in d.screens do assert(s.assertion~="" and s.verdict~=nil) end; \
- assert(d.provenance.mismatchCount==0); print("T2.7 artifact well-formed")'
+# `node -e` is available (v24); `lune run -e` is NOT — see the box above.
+node -e '
+const d=JSON.parse(require("fs").readFileSync("games/<slug>/tests/engine-pass/last-studio.json","utf8"));
+const bad=m=>{console.error("RED: "+m);process.exit(1)};
+if(d.tier!==2.7) bad("tier is "+d.tier);
+if(d.ok!==(d.verdict==="green")) bad("ok/verdict disagree");                       // reader rule 1
+for(const p of d.phases)
+  if(p.applicable!==false && !(p.subjects>0)) bad("zero-subject phase: "+p.name);  // reader rule 2
+const ran=d.phases.map(p=>p.name).sort(), ros=[...d.roster].sort();
+if(JSON.stringify(ran)!==JSON.stringify(ros)) bad("roster != phases that ran");    // reader rule 3, BOTH ways
+if(d.screens.length<6) bad("only "+d.screens.length+" screens");
+for(const s of d.screens){                                                          // reader rule 4
+  if(!s.assertion) bad("screen with no written assertion: "+s.shot);
+  if(d.verdict==="green" && s.verdict!=="pass") bad("green claimed but screen "+s.shot+" is "+s.verdict);
+}
+if(d.provenance.mismatchCount!==0) bad("hybrid place: mismatchCount="+d.provenance.mismatchCount); // rule 5
+console.log("T2.7 artifact well-formed");'
 ```
+
+**This reader was falsified before it was published** (2026-08-03): control green, then six mutations
+each aimed at the defect its rule exists for — a zero-subject `world-present` (the vacuity that hid the
+missing `WorldService`), `ok`/`verdict` disagreement, `mismatchCount=2` (the hybrid place `e984d84` had
+to ship as), a `cannot-tell` laundered into a green, an unrostered phase (which a one-sided set check
+would miss), and a screenshot with an empty assertion. All six went red.
 
 **Screenshots are an instrument, not decoration.** State the assertion *before* capturing; record
 `pass` / `fail` / **`cannot-tell`**; `cannot-tell` is **not a pass**; an image with no assertion string

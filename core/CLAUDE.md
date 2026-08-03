@@ -39,6 +39,33 @@ lune run tests/run.luau   # Tier-1 unit tests
 A PostToolUse hook runs stylua + selene on each edited `.luau` and feeds failures back — fix them
 in the **same turn**. A feature that can't go green is **parked** for human review, never merged.
 
+## The verification ladder — SEVEN rungs, and the gauntlet is only the first three
+
+Green above is **T1**. It is not "works". The ladder (`docs/VERIFICATION-LADDER.md`) exists because this
+game's ancestor passed 313 Lune tests and **did not boot in Roblox at all**:
+
+| rung | claim | how to run it |
+|---|---|---|
+| T0 | formats, lints, compiles to a place | `stylua --check .` · `selene src` · `rojo build` |
+| T0.5 | every `require` resolves *inside Roblox* | `gate-require` (gauntlet stage) |
+| T1 | logic correct under simulation + nothing written-never-read | `lune run tests/run.luau` · `gate-reachability` |
+| T2 | the place boots, the loop runs on the live wire | `run-in-roblox` → `tests/tier2/smoke.server.luau` |
+| T2.5 | the scene is not obviously broken (machine playtest, **edit mode**) | `run-in-roblox` → `tests/tier2/playtest.server.luau` |
+| **T2.7** | **live Studio: the real client wire, and how it LOOKS** | **`/engine-pass games/{{GAME_SLUG}}`** |
+| T3 | a person plays it and it is **fun** | a human — never automated |
+
+**Do not skip from T2.5 to the human.** T2.5 runs with no LocalPlayer, no stepping physics and a frozen
+server clock, so *the entire client is unverified there* — HUD, motes, prompts, the client bootstrap.
+**T2.7 is the only automatable rung that can see client wiring or pixels**, and it earns its place: the
+defect that lost offline earnings *permanently* was invisible to every rung below it.
+
+Never assert a tier from a feeling or from a green test count. Ask the aggregator, which reports the
+**highest contiguous green rung** and refuses handoff while a cheaper automatable rung is red or un-run:
+
+```sh
+lune run .claude/skills/lib/tier-status.luau games/{{GAME_SLUG}}
+```
+
 ## Read first: the factory's known failure modes
 
 Before writing a feature, skim **`docs/LEARNINGS.md`** — the cross-game checklist of every real bug class

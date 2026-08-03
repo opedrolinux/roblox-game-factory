@@ -31,12 +31,22 @@ T2.7 is deliberately **not** T3. An agent driving Studio still cannot see fun, c
 clients, and `game.JobId` is `""`. `games/<slug>/tests/tier3/` stays reserved for the human rung and
 this pass never writes there.
 
-> **HANDOFF (docs, not owned by this skill):** `docs/VERIFICATION-LADDER.md` line 138 (§2) and line 350
-> (§5.2) both still assert the `Roblox_Studio` bridge "exposes zero tools". **That is false as of
-> 2026-08.** `list_roblox_studios`, `set_active_studio`, `get_studio_state`, `execute_luau`,
-> `start_stop_play`, `get_console_output`, `screen_capture` and `wait_job_finished` are all live —
-> this skill is built on them. The doc needs correcting, and `.claude/skills/lib/tier-ladder.luau`
-> needs a `T2.7` rung admitted (HANDOFF-2). Neither is edited here.
+> **HANDOFF-1 and HANDOFF-2 are both CLOSED (2026-08-03).** They read, when written: the
+> `VERIFICATION-LADDER.md` claim that the `Roblox_Studio` bridge "exposes zero tools" is false, and
+> `tier-ladder.luau` needs a `T2.7` rung admitted. Both are now done — the ladder doc strikes the dead
+> claim through in place (§2, §5.2) with the correction at its head, and `RUNGS` carries
+> `{ id = "T2.7", label = "agent-driven live Studio pass", automatable = true }` with a **per-rung lane
+> map** (`GATE_ENGINE_LANE` declares T2 + T2.5; `GATE_STUDIO_LANE` declares T2.7 — one boolean could not
+> express "`run-in-roblox` is on PATH but no Studio is open"). The bridge tools this skill is built on —
+> `list_roblox_studios`, `set_active_studio`, `get_studio_state`, `execute_luau`, `start_stop_play`,
+> `get_console_output`, `screen_capture`, `wait_job_finished` — are live.
+>
+> **Where T2.7 is written down, for the next agent who has to find it:** `FACTORY.md` §8 (definition of
+> done) · `docs/VERIFICATION-LADDER.md` §8 (the design + the ten steps) · `docs/TESTING.md` §10.3 (how to
+> run it + the artifact shape) · `portfolio/README.md` (the funnel stage `studio-verified-T2.7`) ·
+> `core/CLAUDE.md` and every game's `CLAUDE.md` (the seven-rung table) · `docs/factory-status.html` (the
+> board). If you are adding a rung, that is the list to update — a rung that exists only in its own
+> skill file gets skipped, which is what happened to this one.
 
 ## Usage
 
@@ -443,13 +453,33 @@ With Studio open on the collect-sim place and `rojo serve` running in `games/col
 Then verify the artifact mechanically (from the repo root):
 
 ```sh
-lune run -e 'local fs=require("@lune/fs"); local serde=require("@lune/serde"); \
- local d=serde.decode("json", fs.readFile("games/collect-sim/tests/engine-pass/last-studio.json")); \
- assert(d.tier==2.7 and d.ok==(d.verdict=="green")); \
- for _,p in d.phases do assert(p.subjects and p.subjects>0, p.name) end; \
- assert(#d.screens>=6); for _,s in d.screens do assert(s.assertion~="" and s.verdict~=nil) end; \
- assert(d.provenance.mismatchCount==0); print("T2.7 artifact well-formed")'
+# `node -e` is available (v24). `lune run -e` DOES NOT EXIST in lune 0.10.4 — it exits 1 with
+# "Failed to resolve script at path '…\-e'", so `… && mv` never fires and the previous (usually
+# green) artifact silently survives. This recipe used to be written that way and could never have
+# run. Measured 2026-08-03; the same fact was already recorded in templates/tier2/AUTHORING.md.
+node -e '
+const d=JSON.parse(require("fs").readFileSync("games/collect-sim/tests/engine-pass/last-studio.json","utf8"));
+const bad=m=>{console.error("RED: "+m);process.exit(1)};
+if(d.tier!==2.7) bad("tier is "+d.tier);
+if(d.ok!==(d.verdict==="green")) bad("ok/verdict disagree");                       // reader rule 1
+for(const p of d.phases)
+  if(p.applicable!==false && !(p.subjects>0)) bad("zero-subject phase: "+p.name);  // reader rule 2
+const ran=d.phases.map(p=>p.name).sort(), ros=[...d.roster].sort();
+if(JSON.stringify(ran)!==JSON.stringify(ros)) bad("roster != phases that ran");    // reader rule 3, BOTH ways
+if(d.screens.length<6) bad("only "+d.screens.length+" screens");
+for(const s of d.screens){                                                          // reader rule 4
+  if(!s.assertion) bad("screen with no written assertion: "+s.shot);
+  if(d.verdict==="green" && s.verdict!=="pass") bad("green claimed but screen "+s.shot+" is "+s.verdict);
+}
+if(d.provenance.mismatchCount!==0) bad("hybrid place: mismatchCount="+d.provenance.mismatchCount); // rule 5
+console.log("T2.7 artifact well-formed");'
 ```
+
+**Falsified before publication** (2026-08-03) — control green, then six mutations each aimed at the
+defect its rule exists for: a zero-subject `world-present` (the vacuity that hid the missing
+`WorldService`), `ok`/`verdict` disagreement, `mismatchCount=2` (the hybrid place `e984d84` shipped as),
+a `cannot-tell` laundered into a green, an unrostered phase (a one-sided set check misses it), and a
+screenshot with an empty assertion. All six went red. A reader never observed red is not known to work.
 
 ## Related
 

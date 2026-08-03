@@ -200,6 +200,7 @@
   }
   .r-pass   { --lamp: var(--go);   --pill-bg: var(--go-bg); }
   .r-unrun  { --lamp: var(--hand); --pill-bg: var(--hand-bg); }
+  .r-work   { --lamp: var(--work);  --pill-bg: var(--work-bg); }
   .r-idle   { --lamp: var(--steel); --pill-bg: transparent; }
   .r-idle .pill { border: 1px dashed var(--rule); }
 
@@ -288,7 +289,7 @@
 <div class="wrap">
 
   <header>
-    <p class="eyebrow">Roblox Game Factory · status read 30 Jul 2026</p>
+    <p class="eyebrow">Roblox Game Factory · status read 3 Aug 2026</p>
     <h1>It runs in the engine now. The remaining unknowns need real players.</h1>
     <p class="lede">
       The last version of this page said the machine stopped at a line it could not cross, and that
@@ -307,7 +308,7 @@
           Every pipeline stage is built and proven on a real game. The in-engine test rung, designed
           but parked for weeks awaiting a human, is now automated and runs unattended.
         </span>
-        <span class="metric">Persistence landed · two engine rungs automated · 13 pipeline tools</span>
+        <span class="metric">Persistence landed · two engine rungs automated · a third (T2.7) built and proven ad hoc · 13 pipeline tools</span>
       </div>
       <div class="verdict v-game">
         <span class="who">Collect Sim</span>
@@ -316,7 +317,7 @@
           Ten features and a walkable world, booted in a real DataModel, saves proven against real
           storage, and a machine playtest confirming the scene is not obviously broken.
         </span>
-        <span class="metric">422 / 422 tests · T2.5 GREEN on rebuilt phases · 66-defect audit remediated · 5 more found by playing it in Studio · awaiting human playtest</span>
+        <span class="metric">422 / 422 tests · 66-defect audit remediated · 5 more found by playing it in Studio · <strong>tier-status says T2, not T3</strong>: the T2.5 artifact predates provenance and T2.7 is unrun</span>
       </div>
     </div>
   </section>
@@ -326,9 +327,10 @@
       <p class="eyebrow">The centre of the question</p>
       <h2>How far up the ladder we've climbed</h2>
       <p class="lede" style="font-size:.95rem;margin-top:.15rem">
-        Each rung is a stronger claim than the one below it. The machine now climbs four of the five
-        by itself. The fence has moved down one rung — and what sits above it now genuinely cannot
-        be automated, rather than merely not having been.
+        Each rung is a stronger claim than the one below it. There are <strong>seven</strong>, and the
+        one above T2.5 is <em>not</em> the human — two automatable rungs sit between the boot smoke and
+        a person. The machine climbs five of them unattended; the sixth needs only that somebody has
+        Studio open, not that somebody judges anything.
       </p>
     </div>
 
@@ -359,11 +361,17 @@
         <span class="pill">Green</span>
       </div>
 
+      <div class="rung r-work">
+        <span class="tid">T2.7</span>
+        <span class="what">An agent drives a <em>live</em> Studio session — the real client wire, and how it LOOKS<small>/engine-pass · rojo self-sync over HTTP · client-context remote probe · screenshots carrying written assertions</small></span>
+        <span class="pill">Loop proven · skill unrun</span>
+      </div>
+
       <div class="fence">
         <span class="mark">━━</span>
         <span class="txt">
-          The fence — and it has moved down two rungs
-          <span>T2 and T2.5 both used to sit above this line. A pinned tool (run-in-roblox) drives a real DataModel headlessly, so the boot smoke and the machine playtest now run unattended. Publishing, pushing and account actions remain permanently human-only by design (FACTORY.md §4).</span>
+          The fence — and it has moved down three rungs
+          <span>T2, T2.5 and T2.7 all used to sit above this line. A pinned tool (run-in-roblox) drives a real DataModel headlessly, so the boot smoke and the machine playtest run unattended; the live-Studio pass runs on one human action — opening Studio — and no human judgement. Publishing, pushing and account actions remain permanently human-only by design (FACTORY.md §4).</span>
         </span>
       </div>
 
@@ -394,6 +402,41 @@
       <strong>54 Stardust</strong> on the data push, retrying exactly once even though the recovered
       claim itself triggers another push. That last part matters: the obvious one-line fix is an
       infinite remote loop here.
+    </p>
+
+    <p class="note">
+      <strong>T2.7 is the rung built from that lesson, and it is why the ladder has seven rungs.</strong>
+      "Drive Studio directly" stopped being a heroic one-off and became
+      <code>/engine-pass&nbsp;&lt;gameDir&gt;</code>: ten fail-closed steps that sync the working tree into the
+      place over Rojo's read API — <em>nobody presses Connect</em> — boot it, probe the server, drive the
+      game's real <code>RemoteFunction</code> <em>from the client context</em>, and photograph it. Three of
+      the five defects that loop found were invisible in every log: a blank-texture sky rendering no stars,
+      110-stud billboards, and <code>22 total, 0 visible, 22 parked</code>. So the screenshot protocol is
+      the strict part — the assertion is written <em>before</em> the capture, and
+      <code>cannot-tell</code> is not a pass. The correct sky config turned out to be a
+      <em>deletion</em>, and the version with more code in it looked worse; screenshots decided that,
+      reasoning did not.
+    </p>
+
+    <p class="note">
+      <strong>Honest status of that rung: the loop is proven, the skill is not.</strong> It was run
+      today and got two prerequisites deep before stopping. Studio was open on the place; <code>rojo
+      serve</code> answered on port <strong>34875</strong> — not the default, which is why the step
+      discovers the port instead of assuming it — and identified itself as <code>projectName:
+      "collect-sim"</code>, so the pass was pointed at the right tree. Then
+      <code>list_roblox_studios</code> returned an empty list: <strong>the MCP server is not enabled in
+      Studio's Assistant Settings.</strong> Zero sessions means UNRUN, so it reported
+      <code>awaiting-engine-pass</code> and refused to fall back to <code>run-in-roblox</code> and call
+      that T2.7 — a different lane with different blind spots. One toggle stands between this game and
+      its first live pass.
+    </p>
+
+    <p class="note">
+      It stays amber even after that, until it has been made to <em>fail on purpose</em>: rename one
+      mounted script in the place, and the pass must report <code>T2.7-unrun (hybrid or unverified
+      place)</code> with a non-zero mismatch count and never reach the screenshots. A gate never
+      observed red is not known to work — three of the machine playtest's own first results turned out
+      to be bugs in the harness rather than in the game.
     </p>
 
     <p class="note">

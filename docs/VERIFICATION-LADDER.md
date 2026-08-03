@@ -711,7 +711,7 @@ Every row was produced by an actual run. The full narrative is in `docs/AI-PLAYT
 | **T2.5 harness** | ✅ | ⚠️ **2 of 11 attacks** | see §7.6 — the *shape* of the verdict is fixed; green-by-vacuity is not closed |
 | `playtest-pass.js` | ✅ | ❌ **never executed** | run its §C.8 acceptance cases, especially test 3 |
 | **T2.7 loop** | ✅ | ✅ (found 5 defects, `6b5dbee`) | proven ad hoc |
-| **T2.7 skill** (`/engine-pass`) | ✅ | ❌ **never executed** | no `tests/engine-pass/` artifacts exist anywhere |
+| **T2.7 skill** (`/engine-pass`) | ✅ | ⚠️ **STEP 0 only** | **attempted 2026-08-03 on `collect-sim`; blocked at STEP 0.** Studio was open on the place and `rojo serve` confirmed `projectName: "collect-sim"` on port 34875, but `list_roblox_studios` returned `[]` — the MCP server is not enabled in Studio's Assistant Settings. The skill degraded to `awaiting-engine-pass` and refused to fall back to `run-in-roblox`, which is STEP 0 working. **The falsification run is still outstanding**, so the pass as a whole is not known to work. Log: `games/collect-sim/tests/engine-pass/RUNBOOK.md` |
 | `games/collect-sim` at T1 | — | — | **RED right now:** `tier-status.luau` reports `highest=T0.5 \| in-progress (T1 red), NOT ready` (6 reachability FAIL, no allowlist) |
 
 **The one blocker needing a human decision.** `gate-reachability` is red on the untouched

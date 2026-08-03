@@ -94,6 +94,14 @@ is "there is nothing here yet". Rules start biting as soon as the first real ser
    `BOOTSTRAP_MIRROR` from `src/server/init.server.luau`, delete `example-delta` from **both** the
    harness `ROSTER` and `tests/tier2/phases.json`, and add spec-derived gating phases. Until then the
    lane reports red/parked, which is the honest answer.
+5. **Then run T2.7 — `/engine-pass games/<slug>` — before going anywhere near the human.** The
+   scaffolder emits no artifacts for this rung (the pass creates `tests/engine-pass/` itself), which is
+   exactly why it gets forgotten. **T2.5 is not the top of the automatable ladder.** It runs in edit
+   mode with no LocalPlayer, so the whole client is unverified there; T2.7 drives a live Studio session
+   and is the only automatable rung that can see client wiring or how the game looks. Skipping it is
+   the conflation `docs/VERIFICATION-LADDER.md` §1 exists to prevent. `lune run
+   .claude/skills/lib/tier-status.luau games/<slug>` is the authority on which rung a game is actually
+   on — never a test count.
 
 ## Internals & self-test
 
