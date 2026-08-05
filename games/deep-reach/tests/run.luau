@@ -37,6 +37,7 @@ local SPEC_PATHS = {
 	-- (AMENDMENT A10a: ./unit/sample.spec is DELETED with the sample service it covered.)
 	"./unit/salvage.spec", -- [feature: salvage core] the independent gate's spec-derived tests
 	"./unit/selene_guard.spec",
+	"./unit/structures.spec", -- [feature: structures shop] the independent gate's spec-derived tests
 	"./unit/session_lock.spec",
 	"./unit/validation.spec",
 }

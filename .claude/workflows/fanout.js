@@ -76,7 +76,16 @@ const FIXER_SCHEMA = {
     },
     changedFiles: { type: 'array', items: { type: 'string' } },
     rootCause: { type: 'string' },
-    stillBroken: { type: 'array', items: { type: 'string' }, description: 'anything not closed (empty if fully fixed + green)' },
+    // NARROW ON PURPOSE. This field decides whether the loop closes or PARKS, so anything put here
+    // that is not an open defect parks a fixed feature. It was originally described as "anything not
+    // closed", which fixers reasonably read as a catch-all and filled with the declared known-red
+    // stage and with design notes — parking three features whose bugs were closed. Residual context
+    // belongs in `notes`, which decides nothing.
+    stillBroken: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'ONLY gate findings from THIS report that remain OPEN. Empty means every finding is closed. Do NOT list: an orchestrator-declared known-red gauntlet stage, follow-up work for another feature or batch, design notes, or anything you decided not to do — those go in `notes`. A non-empty value here PARKS the feature for human review.',
+    },
     notes: { type: 'string' },
   },
   required: ['fixed', 'gauntletOk', 'luneResult', 'regressionTest', 'changedFiles', 'stillBroken'],
@@ -97,6 +106,10 @@ DO, IN ORDER (falsify-first):
 1. REPRODUCE: add a regression test to ${dir}/tests/unit/${f.name}.spec.luau that FAILS on the CURRENT (buggy) implementation — run the gauntlet and CONFIRM it is RED. If you cannot make it fail, the bug may be misdiagnosed — report that in stillBroken instead of forcing a fix.
 2. FIX: apply the MINIMAL implementation change to ${dir}/src/server/services/${f.name}/ that restores the invariant (e.g. clamp to a cap, move an operand inside the transform, derive a value server-side). Do NOT weaken any existing gate test. Do NOT edit src/shared or init.server (report a needed contract amendment instead).
 3. PROVE: re-run the gauntlet — the new regression test must now be GREEN and the full suite must pass (no regression). Report the falsifiability (what the test asserts that was RED before and GREEN after).
+
+WHAT \`stillBroken\` MEANS — it decides whether this feature ships or is PARKED for a human, so put ONLY genuinely-open findings from the bug list above in it. Empty means "every finding above is closed", and that is the normal successful outcome. A known-red gauntlet stage, work that belongs to another feature or a later batch, a design note, a UI consequence, anything you judged out of scope — NONE of those are open findings; put them in \`notes\`, which decides nothing. Parking a feature whose bugs are closed costs more than reporting a residual clearly.
+
+IF THE BUG IS ALREADY FIXED when you arrive (an earlier round of this same loop may have landed it), do NOT invent a change to look busy, and do NOT take the green on faith either — that is the exact failure this loop exists to prevent. Verify it yourself: revert the fix, watch the named test go RED, restore it, watch it go GREEN. Then report fixed=false with an EMPTY stillBroken and the falsification you ran. That is a correct, complete outcome.
 
 HARD CONSTRAINTS: do NOT run git / commit / stage. Run stylua on edited files (self-heal). VERIFY with: lune run .claude/skills/lib/gauntlet.luau ${dir} — iterate until {"ok":true,...}.${allowGauntletRedStages.length ? `
 

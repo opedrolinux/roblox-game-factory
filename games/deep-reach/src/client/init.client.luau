@@ -34,6 +34,9 @@ local controllers = {
 	-- [salvage] the BottomLeft rate/stored/capacity readout + the BottomCenter collect button
 	require(Client.controllers.salvage.SalvageController),
 	require(Client.controllers.daily.DailyController), -- [daily] streak badge + claim (zero authority)
+	-- [structures] the RightPanel shop catalog + the BottomRight opener (zero authority: every price,
+	-- level and effect reading on it came off a structures.fetch / structures.buy reply)
+	require(Client.controllers.structures.StructuresController),
 	-- [leaderboard] the in-world greybox board + the LeftPanel standings list (zero authority)
 	require(Client.controllers.leaderboard.LeaderboardController),
 }
