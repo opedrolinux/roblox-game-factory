@@ -26,7 +26,9 @@ if (typeof input === 'string') {
     input = {}
   }
 }
-const gameDir = (input && input.gameDir) || 'games/collect-sim'
+// No game default: silently auditing the WRONG game is worse than failing here.
+const gameDir = input && input.gameDir
+if (!gameDir) throw new Error('adversarial-review: args must supply {gameDir}.')
 const vectors = (input && input.vectors) || []
 const maxRounds = (input && input.maxRounds) || 3
 const dryRoundsToStop = (input && input.dryRoundsToStop) || 2
@@ -65,12 +67,29 @@ const VERDICT_SCHEMA = {
   required: ['refuted', 'reasoning'],
 }
 
-const LENSES = [
-  { key: 'economy-race', prompt: `the ECONOMY-RACE lens: interleaved / spam-duplicated requests across DIFFERENT features racing the ONE shared currencies.Stardust / currencies.Prisms — sell vs buy vs island-unlock vs rebirth vs offline-claim vs monetization-grant. Reason about every ctx.data:update yield boundary under the per-player FIFO lock: can any interleaving double-spend, dupe a currency, mint from nothing, or lose a write? Read CollectionService (Sell empties backpack before the yield + the consolidated formula), the data layer (DataService.update / MockStore FIFO lock), and every economy mutator.` },
-  { key: 'server-authority', prompt: `the SERVER-AUTHORITY lens: can a client spoof ANY server-owned value via a crafted payload? Try smuggling a price, a mote/island multiplier, an elapsed time, a grant amount, an island id it does not own, a receipt amount, a rebirth count. Verify every action's validate() copies NOTHING trust-bearing out of the raw payload and that every value (cost, multiplier, elapsed, grant, threshold) is server-derived. Read Net.dispatch (the validate->handler pipeline) + every action's validate.` },
-  { key: 'time-gate', prompt: `the TIME-GATE lens: every time-based feature must use ONLY the server clock (ctx.clock), never client/os time. Try to forge offline elapsed (a tampered client clock), bypass the daily cooldown, or game the restock day boundary. Reason about clock:unix() (persist-safe) vs clock:mono() (never persisted) usage, the offline lastSeenUnix base across a leave/rejoin (does loadSession preserve it?), the daily 20h cooldown + 48h reset, and the restock math.floor(now/86400) rollover. Read OfflineService, DailyStreakService, RestockService, and DataService's lifecycle writes to lastSeenUnix.` },
-  { key: 'dupe-replay', prompt: `the DUPE / REPLAY / IDEMPOTENCY lens: can a purchase be double-granted or a receipt replayed? Can a gamepass effect be granted without ownership, or an island/upgrade flag set without paying? Verify ProcessReceipt records the receipt id in the ledger and grants exactly once even under interleaved redelivery; verify flags['gamepass.*'] / flags['island.*'] are only set via the paid/owned path. Read MonetizationService (the receipts ledger + ProcessReceipt), IslandsService (the flag set), and how the Sell/auto-collect retrofits read those flags.` },
+// GAME-AGNOSTIC lenses. Each names the CLASS of defect to hunt, not any one game's nouns; the
+// hunter is told to enumerate this game's actual services first. args.lenses overrides / extends
+// (e.g. to add a lens for a mechanic unique to a game, like a gated-progression bypass).
+const DEFAULT_LENSES = [
+  {
+    key: 'economy-race',
+    prompt: `the ECONOMY-RACE lens: interleaved / spam-duplicated requests across DIFFERENT features racing the SAME shared currency balance(s). First list every service that mutates a currency, then reason about every ctx.data:update yield boundary under the per-player FIFO lock: can any interleaving double-spend, dupe a currency, mint from nothing, or lose a write? Pay special attention to any handler that captures or zeroes state BEFORE its yield and restores it after a failure — and to any handler that reads a balance, yields, then writes based on the STALE read. Read the data layer (DataService.update + the store's FIFO lock) and every economy mutator.`,
+  },
+  {
+    key: 'server-authority',
+    prompt: `the SERVER-AUTHORITY lens: can a client spoof ANY server-owned value via a crafted payload? Enumerate every registered action, then try to smuggle a price, a multiplier, an elapsed time, a grant amount, an id the player does not own, a receipt amount, a tier/level/count. Verify each action's validate() copies NOTHING trust-bearing out of the raw payload, that ownership is asserted where an action names a target, and that every consequential value (cost, rate, multiplier, elapsed, grant, threshold) is DERIVED server-side from persisted state. Read Net.dispatch (the validate->handler pipeline) + every action's validate.`,
+  },
+  {
+    key: 'time-gate',
+    prompt: `the TIME-GATE lens: every time-based feature must use ONLY the injected server clock (ctx.clock), never client time and never a raw os.time in a handler. Enumerate every time-dependent behavior (cooldowns, streaks, offline/idle accrual, daily rollovers, timed boosts, respawn/restock windows) and try to forge or bypass each: a tampered client-supplied elapsed, a cooldown bypass by re-ordering or re-claiming, a day-boundary straddle, a boost whose expiry is session-only rather than persisted. Reason about clock:unix() (persist-safe, comparable across sessions) vs clock:mono() (monotonic, NEVER persisted), and about the accrual base across a real leave/rejoin — does a lifecycle write on JOIN clobber the away-window base before it is read?`,
+  },
+  {
+    key: 'dupe-replay',
+    prompt: `the DUPE / REPLAY / IDEMPOTENCY lens: can a purchase be double-granted or a receipt replayed? Can an entitlement/effect be granted without ownership, or an unlock flag set without paying? Verify the receipt handler records the receipt id in the persisted ledger and grants EXACTLY once even under interleaved redelivery of the same receipt (the classic: check-ledger, yield, grant, write-ledger). Verify every entitlement flag is only ever set on the paid/owned server path — never from a client action — and that every consumer of such a flag reads the persisted value rather than a session cache that a rejoin could desynchronize.`,
+  },
 ]
+const lenses = (input && input.lenses && input.lenses.length ? input.lenses : DEFAULT_LENSES)
+const LENSES = lenses
 
 phase('Hunt')
 const seen = new Set()
@@ -90,7 +109,7 @@ while (round < maxRounds && dryRounds < dryRoundsToStop) {
       agent(`Independent ADVERSARIAL EXPLOIT HUNTER (round ${round}) on the WHOLE integrated game at ${gameDir}. Reading + reasoning ONLY — do NOT edit or run anything. The per-feature gates already cleared each service alone; your job is to BREAK the integrated whole through ${lens.prompt}
 
 Spec "No open exploit" vectors to specifically attempt: [${vectors.join(' | ')}].
-Read ${gameDir}/src/shared/Net.luau (dispatch + Gate), ${gameDir}/src/server/data/* (the lock + lifecycle), ${gameDir}/src/server/services/* (every feature), and ${gameDir}/tests/integration/ + tests/unit/economy_race.spec.luau (how interleaving is forced here). Try HARD to find a REAL exploit that breaks a server-authoritative / economy / time-gate / idempotency invariant. For each: the concrete attack, the invariant broken, and the suspected file/function. If after a genuine attempt you find none through this lens, return findings: []. Do NOT invent low-value nitpicks.${seenList}`,
+START by listing ${gameDir}/src/server/services/ so you are hunting over THIS game's real surface, not an assumed one. Then read ${gameDir}/src/shared/Net.luau (dispatch + Gate), ${gameDir}/src/server/data/* (the lock + the join/leave lifecycle), every service under ${gameDir}/src/server/services/*, and ${gameDir}/tests/integration/ + ${gameDir}/tests/unit/economy_race.spec.luau (how interleaving is forced here). Try HARD to find a REAL exploit that breaks a server-authoritative / economy / time-gate / idempotency invariant. For each: the concrete attack, the invariant broken, and the suspected file/function. If after a genuine attempt you find none through this lens, return findings: []. Do NOT invent low-value nitpicks.${seenList}`,
         { label: `hunt:${lens.key}#${round}`, phase: 'Hunt', schema: FINDING_SCHEMA, effort: 'high' }
       )
     )

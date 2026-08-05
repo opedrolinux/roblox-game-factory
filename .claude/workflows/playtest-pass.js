@@ -66,7 +66,10 @@ if (typeof input === 'string') {
     input = {}
   }
 }
-const gameDir = (input && input.gameDir) || 'games/collect-sim'
+// No game default: a T2.5 verdict attributed to the wrong game is exactly the laundering this
+// whole file exists to prevent.
+const gameDir = input && input.gameDir
+if (!gameDir) throw new Error('playtest-pass: args must supply {gameDir}.')
 const slug = gameDir.split('/').filter(Boolean).pop() || 'game'
 const specPath = (input && input.specPath) || `specs/${slug}.md`
 const mode = (input && input.mode) || 'author'

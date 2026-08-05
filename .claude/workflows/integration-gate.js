@@ -28,9 +28,21 @@ if (typeof input === 'string') {
     input = {}
   }
 }
-const gameDir = (input && input.gameDir) || 'games/collect-sim'
-const specPath = (input && input.specPath) || 'specs/collect-sim.md'
+// No game defaults: silently gating the WRONG game is worse than failing here.
+const gameDir = input && input.gameDir
+const specPath = input && input.specPath
+if (!gameDir || !specPath) throw new Error('integration-gate: args must supply {gameDir, specPath}.')
 const features = (input && input.features) || []
+// GAME-AGNOSTIC: the cross-feature obligations below come from the approved plan, not from any
+// one game's nouns. Each falls back to a spec-derived instruction when the caller omits it.
+const coreLoop = (input && input.coreLoopSteps) || []
+const seams = (input && input.seams) || [] // [{ name, consumer, effect }]
+const lifetimeField = (input && input.lifetimeField) || ''
+const earnPaths = (input && input.earnPaths) || []
+const nonEarnPaths = (input && input.nonEarnPaths) || []
+const analyticsEvents = (input && input.analyticsEvents) || []
+const sharedBalance = (input && input.sharedBalance) || 'the shared soft-currency balance'
+const reentry = (input && input.reentryHooks) || []
 log(`integration-gate: ${gameDir}; whole-game cross-feature gate over [${features.join(', ')}]. Authors integration tests from the spec success criteria; reports failing criteria as integration bugs. Commits nothing.`)
 
 const AUTHOR_SCHEMA = {
@@ -65,6 +77,28 @@ const criteriaText = (input && input.successCriteria && input.successCriteria.le
   ? input.successCriteria.map((c, i) => `  ${i + 1}. ${c}`).join('\n')
   : '  (read them from the spec\'s "## Success criteria" section)'
 
+// The minimum cross-feature coverage, expressed in THIS game's terms via the plan-supplied args.
+const COVERAGE_CONTRACT = `- CORE LOOP, END TO END: one player traverses the game's whole core loop in a single test${
+  coreLoop.length ? `: ${coreLoop.join(' -> ')}` : ' (derive the exact step sequence from the spec\'s "## Core loop" section)'
+}, and the loop-completion analytics event fires at the end of it. Assert the traversal actually PROGRESSES — the balance/state must move the right way at every step, so a step that silently no-ops fails the test.
+- EVERY SEAM ACTUALLY REACHES ITS CONSUMER: a multiplier/bonus/gate provided by one feature must demonstrably change the OUTPUT of the feature that consumes it. ${
+  seams.length
+    ? seams.map((s) => `Prove: ${s.name} -> ${s.consumer} (${s.effect}).`).join(' ')
+    : 'Enumerate every ctx seam a service reads and prove each one changes the consumer\'s result when set.'
+} This is the written-never-read class of defect: assert the DELTA in the consumer's observable output, NEVER that a persisted field changed.
+${
+  lifetimeField
+    ? `- LIFETIME/AGGREGATE COUNTER ON ALL EARNS, NEVER ON SPEND/RESET: ${lifetimeField} rises on EVERY earn path${earnPaths.length ? ` (${earnPaths.join(', ')})` : ''} — exactly once each, no double-count — and does NOT rise on${nonEarnPaths.length ? ` ${nonEarnPaths.join(', ')}` : ' any spend, unlock or prestige/reset path'}, and a prestige/reset must not ZERO it.`
+    : '- Any lifetime/aggregate counter the spec implies rises on every earn path exactly once and never on a spend/reset.'
+}
+- SHARED-BALANCE RACE ACROSS FEATURES: interleaved / spam-duplicated actions from DIFFERENT features racing ${sharedBalance} (use the economy_race coroutine technique) must never double-spend it or dupe any currency it buys. The per-feature gates cannot see this: each proved its own service alone.
+- RE-ENTRY LIFECYCLE (the per-feature gates CANNOT test this at all): simulate a player who EARNS, then LEAVES (releaseSession — which stamps the last-seen timestamp), then time passes on the server clock, then REJOINS (loadSession), then claims.${
+  reentry.length ? ` Cover each re-entry hook: ${reentry.join('; ')}.` : ''
+} They MUST receive what the away-window earned them. If they receive ZERO, that is an integration bug — a lifecycle write on JOIN clobbering the accrual base before it is read — so leave it RED and report it in failingCriteria with the suspected location. Also assert the claim does not race session load: a claim issued the instant the player joins must not be served against half-loaded data.
+- ANALYTICS TAXONOMY END-TO-END: over one full session every event the spec mandates${
+  analyticsEvents.length ? ` (${analyticsEvents.join(', ')})` : ''
+} fires through the single shared emitter — assert the emitted payloads, not merely that the emitter exists.`
+
 // ---- PHASE 1: AUTHOR ----
 phase('Author')
 const author = await agent(`You are the INDEPENDENT INTEGRATION GATE for the whole game at ${gameDir}. The per-feature gates proved each service alone; you prove the FEATURES WORK TOGETHER, by standing up the WHOLE game and testing the spec's SUCCESS CRITERIA end-to-end. You did not build any feature. Try to find where the integration is broken.
@@ -73,16 +107,11 @@ You are at repo root. READ FIRST:
 1. ${specPath} — the "## Success criteria" section is your test contract (the gradable done-conditions):
 ${criteriaText}
 2. ${gameDir}/src/server/Context.luau (how the full ServerContext is built — every service + ctx seam), ${gameDir}/src/server/init.server.luau (the bootstrap: service registration order + the join/leave lifecycle), ${gameDir}/src/server/data/DataService.luau (loadSession / releaseSession / saveSession — the join/leave lifecycle that writes timestamps.lastSeenUnix; STUDY when lastSeenUnix is written).
-3. The Tier-1 harness + the per-feature specs to learn how each action is driven: ${gameDir}/tests/lib/{testkit,assert,mocks}.luau; ${gameDir}/tests/unit/economy_race.spec.luau (THE coroutine+yielding-store interleave technique for the shared-balance race); and the existing per-feature specs (collection/shop/daily/islands/leaderboard/monetization/offline/restock/rebirth) for each action's shape + the seam wiring.
-4. ${gameDir}/src/shared/Net.luau (Net.Actions + dispatch) and the feature services in ${gameDir}/src/server/services/* (so you drive the REAL handlers + seams through the REAL Net.dispatch over a REAL DataService + MockStore).
+3. The Tier-1 harness + the per-feature specs to learn how each action is driven: ${gameDir}/tests/lib/{testkit,assert,mocks}.luau; ${gameDir}/tests/unit/economy_race.spec.luau (THE coroutine+yielding-store interleave technique for the shared-balance race); and EVERY existing per-feature spec under ${gameDir}/tests/unit/ (list the directory — do not assume which exist) for each action's shape + the seam wiring.
+4. ${gameDir}/src/shared/Net.luau (Net.Actions + dispatch) and every feature service in ${gameDir}/src/server/services/* (so you drive the REAL handlers + seams through the REAL Net.dispatch over a REAL DataService + MockStore). The built features are: [${features.join(', ')}].
 
-THEN author ${gameDir}/tests/integration/ (a new dir) integration spec(s) — stand up the WHOLE game in Tier-1 (build the full context / register every service so the ctx seams ctx.islands/ctx.restock/ctx.monetization/ctx.analytics are all LIVE, not nil) and test the success criteria END-TO-END with REAL, falsifiable assertions. Register the spec(s) in ${gameDir}/tests/run.luau. Cover at minimum:
-- CORE LOOP: a single player traverses collect -> sell -> buy an upgrade -> unlock island 2 -> rebirth, and a loop_completed analytics event fires at the rebirth. Assert the traversal actually progresses (balance moves the right way at each step).
-- MULTIPLIERS ACTUALLY REACH SELL: with islands wired, unlocking a richer island makes a subsequent Sell pay MORE (the island multiplier reaches the consolidated Sell formula via ctx.islands:multiplierFor(d)); with the 2x gamepass flag set, Sell pays double; on today's restock vein the bonus applies. (These prove the contract-pass Sell amendment + the seams compose.)
-- LIFETIME ON ALL EARNS, NEVER ON SPEND/RESET: stats.lifetimeStardust rises on sell, daily claim, offline claim, and a monetization Stardust-pack grant — and does NOT rise on a shop buy, an island unlock, or a rebirth reset (and rebirth does not RESET it).
-- SHARED-BALANCE RACE: interleaved/spam-duplicated sell + buy + unlock + rebirth against the ONE shared currencies.Stardust (the economy_race technique) never double-spends Stardust or dupes Prisms.
-- RE-ENTRY LIFECYCLE (the per-feature gates CANNOT test this): simulate a player who EARNS, then LEAVES (releaseSession — which stamps lastSeenUnix), then time passes on the server clock, then REJOINS (loadSession), then claims offline -> they MUST receive the offline grant for the elapsed-away window. If they get ZERO, that is an integration bug (a lifecycle timestamp issue) — leave it RED + report it in failingCriteria with the suspected location.
-- ANALYTICS TAXONOMY END-TO-END: over a full session the 7 events fire through the single ctx.analytics (session_start/session_end via the lifecycle, loop_completed, currency_earned, currency_spent, progression, purchase).
+THEN author integration spec(s) under ${gameDir}/tests/integration/ (a new dir) — stand up the WHOLE game in Tier-1 (build the full context / register EVERY service so that every ctx seam is LIVE, not nil — a seam left nil silently turns this into a per-feature test) and test the success criteria END-TO-END with REAL, falsifiable assertions. Register the spec(s) in ${gameDir}/tests/run.luau. Cover at minimum:
+${COVERAGE_CONTRACT}
 
 HARD CONSTRAINTS: do NOT edit any src/ implementation — if a success criterion does not hold, leave the test RED and report it in failingCriteria (do NOT patch the impl to make it pass; that is the orchestrator's falsify-first fix). Do NOT run git. Run stylua on files you create. VERIFY with: lune run .claude/skills/lib/gauntlet.luau ${gameDir} — report the lune total; a RED you intentionally leave for a real integration bug makes gauntletOk false, which is expected — call it out clearly. Return the StructuredOutput.`, { label: 'integration:author', phase: 'Author', schema: AUTHOR_SCHEMA, effort: 'high' })
 
@@ -92,8 +121,19 @@ log(`integration-gate: author wrote ${author ? author.testCount : 0} test(s); co
 phase('Review')
 const specForCritics = author ? author.specRelPath : `${gameDir}/tests/integration/`
 const [coverage, redteam] = await parallel([
-  () => agent(`Read-only COVERAGE review of the whole-game INTEGRATION suite at ${gameDir} (do NOT run or edit). Read ${specForCritics}, the spec's "## Success criteria" in ${specPath}, and the feature services. Decide whether EVERY success criterion is covered by a REAL end-to-end integration assertion (not a per-feature unit re-test): the core-loop traversal + loop_completed; multipliers reaching Sell; lifetime on all 4 earns + never on spend/reset; the shared-balance cross-feature race; the offline leave->rejoin->claim lifecycle; the full analytics taxonomy. List any criterion missing or only superficially touched. verdict: pass / gaps / fail. Put specifics in uncoveredCriteria; rationale in notes.`, { label: 'integration:coverage', phase: 'Review', schema: CRITIC_SCHEMA }),
-  () => agent(`Independent INTEGRATION RED-TEAM of the whole game at ${gameDir} (reading + reasoning; do NOT edit). The per-feature gates already cleared each service alone — your job is the CROSS-FEATURE bugs they could not see. Read ${gameDir}/src/server/data/DataService.luau (the join/leave lifecycle + when timestamps.lastSeenUnix is written — does loadSession on JOIN clobber the offline base?), ${gameDir}/src/server/services/collection/CollectionService.luau (the consolidated Sell formula consuming ctx.islands/ctx.restock/ctx.monetization), and every feature service + ${specForCritics}. Reason hard about: (a) the offline accrual base across a real leave/rejoin — does offline ever actually PAY, or does a lifecycle write zero the window? (b) lifetimeStardust: is it incremented EXACTLY once per earn across all paths, and never on a spend/reset? any double-count or miss? (c) the shared Stardust balance under interleavings that mix DIFFERENT features (sell vs unlock vs rebirth) — any double-spend / Prism dupe across the per-player FIFO lock? (d) do the island/2x/restock multipliers actually reach Sell, or is a seam passed nil / never wired? (e) does any analytics event fail to fire end-to-end? For each real cross-feature bug: title, severity, concrete evidence (the interleaving or lifecycle sequence), and the suspected file/function. verdict: pass (no real integration bug) / fail (>=1). Findings in integrationBugs.`, { label: 'integration:redteam', phase: 'Review', schema: CRITIC_SCHEMA, effort: 'high' }),
+  () => agent(`Read-only COVERAGE review of the whole-game INTEGRATION suite at ${gameDir} (do NOT run or edit). Read ${specForCritics}, the spec's "## Success criteria" in ${specPath}, and the feature services under ${gameDir}/src/server/services/. Decide whether EVERY success criterion is covered by a REAL end-to-end integration assertion — not a per-feature unit re-test, and not an assertion that would still pass if the feature under test were replaced by its stub. The required coverage is:
+${COVERAGE_CONTRACT}
+List any criterion missing or only superficially touched. verdict: pass / gaps / fail. Put specifics in uncoveredCriteria; rationale in notes.`, { label: 'integration:coverage', phase: 'Review', schema: CRITIC_SCHEMA }),
+  () => agent(`Independent INTEGRATION RED-TEAM of the whole game at ${gameDir} (reading + reasoning; do NOT edit). The per-feature gates already cleared each service ALONE — your job is the CROSS-FEATURE bugs they could not see. START by listing ${gameDir}/src/server/services/ so you review this game's real surface. Then read ${gameDir}/src/server/data/DataService.luau (the join/leave lifecycle — WHEN is the last-seen timestamp written, and does loadSession on JOIN clobber the accrual base before anything reads it?), every feature service, and ${specForCritics}.
+
+Reason hard about:
+(a) ACCRUAL ACROSS A REAL REJOIN — does any away-window/offline grant ever actually PAY, or does a lifecycle write zero the window? Does a client controller that calls the server from its Start() race session load (the grant is then lost PERMANENTLY, because the next autosave erases the away window)?
+(b) any LIFETIME/AGGREGATE counter: incremented EXACTLY once per earn across all paths, never on a spend/reset, never zeroed by a prestige — any double-count or miss?
+(c) the SHARED BALANCE (${sharedBalance}) under interleavings that mix DIFFERENT features — any double-spend or currency dupe across the per-player FIFO lock?
+(d) do the ctx SEAMS actually reach their consumers, or is one passed nil / registered too late / never wired, so a purchased effect is inert? Check each consumer reads the seam rather than a hardcoded constant sitting next to it.
+(e) does any mandated analytics event fail to fire end-to-end?
+(f) does any post-write side effect (an emit, a client push) run UNGUARDED after a committed write, so its failure turns a successful transaction into an error?
+For each real cross-feature bug: title, severity, concrete evidence (the exact interleaving or lifecycle sequence), and the suspected file/function. verdict: pass (no real integration bug) / fail (>=1). Findings in integrationBugs.`, { label: 'integration:redteam', phase: 'Review', schema: CRITIC_SCHEMA, effort: 'high' }),
 ])
 
 const failing = (author && author.failingCriteria) || []

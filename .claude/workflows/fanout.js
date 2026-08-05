@@ -36,7 +36,9 @@ if (typeof input === 'string') {
     input = {}
   }
 }
-const gameDir = (input && input.gameDir) || 'games/collect-sim'
+// No game default: silently building into the WRONG game is worse than failing here.
+const gameDir = input && input.gameDir
+if (!gameDir) throw new Error('fanout: args must supply {gameDir, buildFeaturesPath, features}.')
 const buildFeaturesPath = input && input.buildFeaturesPath
 const autoFixRounds = (input && input.autoFixRounds) || 2
 const features = (input && input.features) || []
@@ -78,7 +80,7 @@ function fixerPrompt(dir, f, bugs) {
   const bugList = (bugs || [])
     .map((b, i) => `  ${i + 1}. [${b.severity || 'n/a'}] ${b.title || b.case || 'bug'} — ${b.evidence || b.why || ''} (spec: ${b.specReference || 'n/a'})`)
     .join('\n')
-  return `You are an INDEPENDENT FIXER for the "${f.name}" feature of the Roblox game at ${dir}. The independent test gate found a REAL bug (the builder + 2 other critics missed it). Close it FALSIFY-FIRST — the same discipline that closed Collection core's cap-bypass.
+  return `You are an INDEPENDENT FIXER for the "${f.name}" feature of the Roblox game at ${dir}. The independent test gate found a REAL bug (the builder + 2 other critics missed it). Close it FALSIFY-FIRST: a fix whose test was never observed RED is not known to fix anything.
 
 THE BUG(S) the economy red-team / gate found:
 ${bugList || '  (see the gate report; reproduce the failing case from the spec)'}

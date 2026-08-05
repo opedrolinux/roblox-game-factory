@@ -35,7 +35,9 @@ if (typeof input === 'string') {
     input = {}
   }
 }
-const gameDir = (input && input.gameDir) || 'games/collect-sim'
+// No game default: a T2 smoke verdict attributed to the wrong game is a false green.
+const gameDir = input && input.gameDir
+if (!gameDir) throw new Error('smoke-gate: args must supply {gameDir}.')
 const pastedResult = input && input.result
 
 // ── INGEST MODE: a human pasted the JSON line back from a Studio run ──────────────────────────────

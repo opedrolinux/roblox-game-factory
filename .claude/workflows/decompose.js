@@ -44,75 +44,117 @@ if (typeof input === 'string') {
     input = {}
   }
 }
-const gameDir = (input && input.gameDir) || 'games/collect-sim'
-const specPath = (input && input.specPath) || 'specs/collect-sim.md'
+// No game defaults: silently planning the WRONG game is worse than failing here.
+const gameDir = input && input.gameDir
+const specPath = input && input.specPath
+if (!gameDir || !specPath) {
+  throw new Error(`decompose: args must supply {gameDir, specPath} (got gameDir=${JSON.stringify(gameDir)}, specPath=${JSON.stringify(specPath)}).`)
+}
 const builtFeatures = (input && input.builtFeatures) || []
 const currentSchemaVersion = (input && input.currentSchemaVersion) || 2
 const note = (input && input.note) || ''
 log(`decompose: ${specPath} -> plan REMAINING features for ${gameDir}; already built: [${builtFeatures.join(', ')}]; schema v${currentSchemaVersion}.`)
 
 // ---- structured-output schema for the planner ----
+//
+// KEEP THIS SCHEMA TERSE. A schema with long per-field descriptions is rejected upstream with
+// "output schema too large to classify safely" — the agent then never runs and the workflow
+// returns the same {plan:null} shape a genuine no-op would. The FIELD CONTRACT block in the
+// planner prompt below carries the semantics instead; the prompt has no size limit.
 
 const PLAN_SCHEMA = {
   type: 'object',
   properties: {
     features: {
       type: 'array',
-      description: 'one entry per REMAINING feature (exclude the already-built ones)',
+      description: 'one entry per REMAINING feature. See FIELD CONTRACT in the prompt.',
       items: {
         type: 'object',
         properties: {
-          name: { type: 'string', description: 'hyphen-free lowercase dir/spec stem (^[a-z][a-z0-9]*$). Becomes services/<name>/ AND tests/unit/<name>.spec — it is a Luau require segment, so NO hyphens (e.g. "islands", "rebirth", "offline", "leaderboard", "monetization").' },
-          serviceName: { type: 'string', description: 'PascalCase module table name ending in Service (e.g. "IslandsService").' },
-          specTitle: { type: 'string', description: 'the spec\'s human title for this feature, verbatim, for traceability (e.g. "Islands & unlocks").' },
-          specSlice: { type: 'string', description: 'the verbatim spec text this feature owns — the Features bullet PLUS the Progression/economy, re-entry, monetization, and Success-criteria lines that pertain to it. This is the ONLY context its builder + test gate receive, so it must be self-contained and DISJOINT from other slices.' },
-          successCriteria: { type: 'array', items: { type: 'string' }, description: 'the exact Success-criteria bullet(s) from the spec this feature must satisfy.' },
-          order: { type: 'number', description: 'build order within the remaining set (1-based, unique).' },
-          dependsOn: { type: 'array', items: { type: 'string' }, description: 'names of OTHER features (built OR planned) whose contract/behavior this needs first. Use the hyphen-free names. May be empty.' },
-          hasUI: { type: 'boolean', description: 'true if the feature needs a client controller/GUI (shop UI, HUD badge, leaderboard GUI).' },
-          contractClass: { type: 'string', enum: ['append-only', 'class-B-migration'], description: 'append-only = adds only Net.Actions/Result.Codes and/or rides an EXISTING seam (flags/receipts/analytics, a new currencies MAP key, timestamps.lastSeenUnix) — NO migration. class-B-migration = introduces a genuinely NEW persisted field of fixed shape (not a map key, not a reserved seam) -> needs a Migrations step + CURRENT_SCHEMA_VERSION bump + a self-verifying round-trip test.' },
-          seamRationale: { type: 'string', description: 'WHY this contractClass: name the exact existing seam reused (and why it fits) OR the exact new field + why no existing seam can carry it. This is the most error-prone judgment — be explicit.' },
+          name: { type: 'string' },
+          serviceName: { type: 'string' },
+          specTitle: { type: 'string' },
+          specSlice: { type: 'string' },
+          successCriteria: { type: 'array', items: { type: 'string' } },
+          order: { type: 'number' },
+          dependsOn: { type: 'array', items: { type: 'string' } },
+          hasUI: { type: 'boolean' },
+          contractClass: { type: 'string', enum: ['append-only', 'class-B-migration'] },
+          seamRationale: { type: 'string' },
         },
         required: ['name', 'serviceName', 'specTitle', 'specSlice', 'successCriteria', 'order', 'dependsOn', 'hasUI', 'contractClass', 'seamRationale'],
       },
     },
     contractDeltas: {
       type: 'object',
-      description: 'every shared-contract change the serial contract pass must write ONCE before fan-out, so parallel features never collide on src/shared.',
+      description: 'every shared-contract change the serial contract pass writes ONCE before fan-out.',
       properties: {
-        netActions: { type: 'array', items: { type: 'object', properties: { key: { type: 'string', description: 'Net.Actions key, PascalCase (e.g. "Rebirth")' }, value: { type: 'string', description: 'the stable wire string (e.g. "rebirth.do")' }, feature: { type: 'string' }, comment: { type: 'string' } }, required: ['key', 'value', 'feature'] } },
-        resultCodes: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, feature: { type: 'string' }, why: { type: 'string' } }, required: ['name', 'feature', 'why'] }, description: 'new Result.Codes (only if no existing code fits — reuse OutOfRange/Insufficient/OnCooldown/NotOwner/etc. first).' },
-        currencyKeys: { type: 'array', items: { type: 'object', properties: { key: { type: 'string' }, feature: { type: 'string' }, why: { type: 'string' } }, required: ['key', 'feature', 'why'] }, description: 'new keys in the currencies MAP (e.g. "Prisms"). These need NO migration — the currencies map is open by design.' },
-        typesFields: { type: 'array', items: { type: 'object', properties: { field: { type: 'string', description: 'dotted path in PlayerData, e.g. "stats.lifetimeStardust" or a new top-level "rebirths"' }, shape: { type: 'string', description: 'Luau type, e.g. "number" or "{ count: number, multiplier: number }"' }, persisted: { type: 'boolean' }, clientFacing: { type: 'boolean', description: 'true => also add to PlayerView + Types.toView' }, ridesSeam: { type: 'string', description: 'name of the existing seam it rides (flags/receipts/analytics/currencies/timestamps) or "NEW" if a genuinely new fixed-shape field' }, feature: { type: 'string' }, why: { type: 'string' } }, required: ['field', 'shape', 'persisted', 'clientFacing', 'ridesSeam', 'feature'] } },
-        migrations: { type: 'array', items: { type: 'object', properties: { fromVersion: { type: 'number' }, toVersion: { type: 'number' }, addsField: { type: 'string' }, feature: { type: 'string' }, why: { type: 'string' } }, required: ['fromVersion', 'toVersion', 'addsField', 'feature'] }, description: 'one per class-B feature. toVersion must = fromVersion+1; the sequence must start at the current schema version and be contiguous across the class-B features (ordered by build order).' },
+        netActions: { type: 'array', items: { type: 'object', properties: { key: { type: 'string' }, value: { type: 'string' }, feature: { type: 'string' }, comment: { type: 'string' } }, required: ['key', 'value', 'feature'] } },
+        resultCodes: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, feature: { type: 'string' }, why: { type: 'string' } }, required: ['name', 'feature', 'why'] } },
+        currencyKeys: { type: 'array', items: { type: 'object', properties: { key: { type: 'string' }, feature: { type: 'string' }, why: { type: 'string' } }, required: ['key', 'feature', 'why'] } },
+        typesFields: { type: 'array', items: { type: 'object', properties: { field: { type: 'string' }, shape: { type: 'string' }, persisted: { type: 'boolean' }, clientFacing: { type: 'boolean' }, ridesSeam: { type: 'string' }, feature: { type: 'string' }, why: { type: 'string' } }, required: ['field', 'shape', 'persisted', 'clientFacing', 'ridesSeam', 'feature'] } },
+        migrations: { type: 'array', items: { type: 'object', properties: { fromVersion: { type: 'number' }, toVersion: { type: 'number' }, addsField: { type: 'string' }, feature: { type: 'string' }, why: { type: 'string' } }, required: ['fromVersion', 'toVersion', 'addsField', 'feature'] } },
       },
       required: ['netActions', 'resultCodes', 'currencyKeys', 'typesFields', 'migrations'],
     },
     contractPassExtras: {
       type: 'object',
-      description: 'CROSS-CUTTING wiring the SERIAL contract pass performs BEYOND pure src/shared deltas — INCLUDING edits to ALREADY-BUILT/merged service files (high blast radius: the human diff-reviews these). This is where a concern that must hook EVERY earn/spend path (analytics emission, a lifetime/aggregate counter) is owned, instead of being (impossibly) wired by a feature builder that cannot touch already-merged code. Use empty arrays if a game truly has none.',
+      description: 'cross-cutting wiring the SERIAL contract pass owns beyond src/shared.',
       properties: {
-        sharedServices: { type: 'array', items: { type: 'object', properties: { name: { type: 'string', description: 'hyphen-free dir stem for an INFRASTRUCTURE service the contract pass stands up (e.g. "analytics")' }, serviceName: { type: 'string' }, purpose: { type: 'string', description: 'e.g. "emit the analytics taxonomy via ctx.analytics; fire session_start/session_end on the join/leave lifecycle"' } }, required: ['name', 'serviceName', 'purpose'] }, description: 'infra services the contract pass creates (NOT feature slices — they own no spec feature; they provide a ctx seam every feature uses).' },
-        retrofits: { type: 'array', items: { type: 'object', properties: { file: { type: 'string', description: 'path to an ALREADY-BUILT file the contract pass must edit, e.g. games/collect-sim/src/server/services/collection/CollectionService.luau' }, change: { type: 'string', description: 'the exact minimal edit, e.g. "in the Sell transform, after crediting Stardust, increment stats.lifetimeStardust by the same amount and emit currency_earned"' }, why: { type: 'string' } }, required: ['file', 'change', 'why'] }, description: 'edits to code OUTSIDE src/shared that no feature builder may make (already-merged services). EVERY such edit is listed so the human review sees the full blast radius.' },
-        emitPoints: { type: 'array', items: { type: 'object', properties: { event: { type: 'string', description: 'the analytics event name, e.g. "currency_earned"' }, where: { type: 'string', description: 'where it fires, e.g. "collection Sell handler (retrofit)" or "islands UnlockIsland handler"' }, owner: { type: 'string', description: 'who writes the emit: a feature name, or "contract-pass" for a retrofit/infra emit' } }, required: ['event', 'where', 'owner'] }, description: 'the FULL analytics taxonomy: one entry per event the spec mandates, each mapped to its fire-point + owner. The validator checks every spec-required event appears here.' },
-        earnPaths: { type: 'array', items: { type: 'string' }, description: 'the EXHAUSTIVE list of paths that must increment any lifetime/aggregate earn counter (e.g. ["collection Sell", "daily claim", "offline claim", "monetization stardust-pack grant"]) — and, by omission, what must NOT (spend/reset paths). Lets the validator check completeness.' },
+        sharedServices: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, serviceName: { type: 'string' }, purpose: { type: 'string' } }, required: ['name', 'serviceName', 'purpose'] } },
+        retrofits: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, change: { type: 'string' }, why: { type: 'string' } }, required: ['file', 'change', 'why'] } },
+        emitPoints: { type: 'array', items: { type: 'object', properties: { event: { type: 'string' }, where: { type: 'string' }, owner: { type: 'string' } }, required: ['event', 'where', 'owner'] } },
+        earnPaths: { type: 'array', items: { type: 'string' } },
       },
       required: ['sharedServices', 'retrofits', 'emitPoints', 'earnPaths'],
     },
-    buildBatches: { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: 'dependency-ordered batches of INDEPENDENT feature names: every feature appears exactly once, all features appear, and no feature precedes any feature in its dependsOn. Each batch is a set the fan-out can build in parallel.' },
-    planNotes: { type: 'string', description: 'cross-feature contention to watch (e.g. sell+buy+rebirth racing one Stardust balance), ordering rationale, and anything the contract pass / integration gate must know.' },
+    buildBatches: { type: 'array', items: { type: 'array', items: { type: 'string' } } },
+    planNotes: { type: 'string' },
   },
   required: ['features', 'contractDeltas', 'contractPassExtras', 'buildBatches', 'planNotes'],
 }
 
+// The semantics the schema descriptions used to carry. Injected into the planner prompt.
+const FIELD_CONTRACT = `FIELD CONTRACT (what each field of the StructuredOutput must contain — the schema itself is deliberately terse):
+
+features[] — one entry per REMAINING feature (exclude anything already built):
+- name: hyphen-free lowercase, ^[a-z][a-z0-9]*$. Becomes services/<name>/ AND tests/unit/<name>.spec, and it is a Luau require SEGMENT (services.<name>.<Service>) — a hyphen BREAKS the dot-require.
+- serviceName: PascalCase module table name ending in "Service".
+- specTitle: the spec's human title for this feature, VERBATIM, for traceability.
+- specSlice: the verbatim spec text this feature owns — its Features bullet PLUS the progression/economy, re-entry, monetization and Success-criteria lines that pertain to it. THIS IS THE ONLY CONTEXT ITS BUILDER AND TEST GATE RECEIVE, so it must be self-contained and DISJOINT from every other slice.
+- successCriteria: the exact "## Success criteria" bullet(s) this feature must satisfy.
+- order: build order within the remaining set — 1-based, unique, a 1..N permutation.
+- dependsOn: names of OTHER features (planned or already built) whose contract/behavior this needs first. May be empty.
+- hasUI: true if it needs a client controller/GUI (a shop UI, a HUD badge, a leaderboard board).
+- contractClass: "append-only" = adds only Net.Actions/Result.Codes and/or rides an EXISTING open seam (the currencies MAP, flags, receipts, upgrades, analytics, timestamps.lastSeenUnix) — NO migration. "class-B-migration" = introduces a genuinely NEW persisted field of fixed shape that no seam can carry -> needs a Migrations step + a CURRENT_SCHEMA_VERSION bump + a self-verifying round-trip test.
+- seamRationale: WHY that contractClass — name the exact seam reused and why it fits, OR the exact new field and why no open seam can carry it. This is the most error-prone judgment in the plan; be explicit.
+
+contractDeltas — every src/shared change, written ONCE by the serial contract pass so parallel builders never collide:
+- netActions[]: {key: PascalCase Net.Actions key, value: the stable wire string, feature, comment?}.
+- resultCodes[]: ONLY if no existing Result.Code fits — reuse BadPayload/BadType/OutOfRange/Insufficient/OnCooldown/NotOwner/RateLimited/Rejected/NoData/Internal first, and say in the "why" field which existing codes you considered.
+- currencyKeys[]: new keys in the currencies MAP. These need NO migration — that map is open by design.
+- typesFields[]: {field: dotted path in PlayerData (e.g. "stats.lifetimeX" or a new top-level "plot"), shape: the Luau type, persisted, clientFacing (true => also add to PlayerView + Types.toView), ridesSeam: the open seam it rides or "NEW" for a genuinely new fixed-shape field, feature, why}.
+- migrations[]: one per class-B feature (or owned by "contract-pass" for a cross-cutting field no single slice owns). toVersion MUST equal fromVersion+1, and the sequence must be contiguous starting at the current schema version, ordered by build order.
+
+contractPassExtras — the cross-cutting wiring the SERIAL pass performs BEYOND pure src/shared deltas, INCLUDING edits to already-built/merged service files (the human diff-reviews these, so the blast radius must be complete). A concern that must hook EVERY earn/spend path cannot be owned by a feature builder, because those points live in OTHER features:
+- sharedServices[]: INFRASTRUCTURE services the pass stands up (they own no spec feature; they provide a ctx seam every feature uses — e.g. the analytics emitter).
+- retrofits[]: {file: a path under the game's src/ that already exists, change: the exact minimal edit, why}. EVERY edit to already-built code goes here.
+- emitPoints[]: the FULL analytics taxonomy — one entry per spec-mandated event, each mapped to {event, where it fires, owner: a feature name or "contract-pass"}. The validator checks the taxonomy is complete.
+- earnPaths[]: the EXHAUSTIVE list of paths that must increment any lifetime/aggregate EARN counter — and by omission, what must not (spend/reset paths).
+
+buildBatches — dependency-ordered batches of INDEPENDENT feature names: every planned feature appears EXACTLY once, all appear, and no feature sits in a batch at or before any feature in its dependsOn. Each batch is a set the fan-out builds in parallel.
+
+planNotes — the cross-feature contention to watch (name THIS game's shared soft-currency balance and every feature that mutates it — earn, spend and reset paths racing one balance), the ordering rationale, and anything the contract pass or the integration gate must know.`
+
+// Terse for the same reason as PLAN_SCHEMA — the semantics live in the skeptic prompt.
 const VALIDATION_SCHEMA = {
   type: 'object',
   properties: {
-    coverageVerdict: { type: 'string', enum: ['complete', 'gaps', 'fail'], description: 'complete = every remaining spec feature + every success criterion is owned by exactly one feature slice.' },
-    uncoveredSpecItems: { type: 'array', items: { type: 'object', properties: { item: { type: 'string' }, why: { type: 'string' } } }, description: 'spec features / success criteria / re-entry hooks no slice owns (e.g. the daily rich-vein "Restock", the loop_completed integration assertion, analytics taxonomy).' },
-    overlaps: { type: 'array', items: { type: 'object', properties: { featureA: { type: 'string' }, featureB: { type: 'string' }, sharedResponsibility: { type: 'string' } } }, description: 'pairs whose slices claim the SAME responsibility (a collision the fan-out would build twice).' },
-    contractErrors: { type: 'array', items: { type: 'object', properties: { kind: { type: 'string', enum: ['missing-delta', 'wrong-contract-class', 'needless-migration', 'missing-migration', 'wrong-version', 'invented-result-code'] }, feature: { type: 'string' }, detail: { type: 'string' } } }, description: 'specSlice references a Net.Action/field/code not in contractDeltas (missing-delta); a feature marked append-only that actually adds a new fixed field (missing-migration / wrong-contract-class); a class-B feature that could ride an existing seam (needless-migration); a migration version that is wrong/non-contiguous; a Result.Code invented when an existing one fits.' },
-    dependencyIssues: { type: 'array', items: { type: 'object', properties: { feature: { type: 'string' }, issue: { type: 'string' } } }, description: 'wrong/missing dependsOn (e.g. Leaderboard needs lifetime-Stardust accrual wired by whoever owns sell; Rebirth depends on the currencies/upgrades it resets).' },
+    coverageVerdict: { type: 'string', enum: ['complete', 'gaps', 'fail'] },
+    uncoveredSpecItems: { type: 'array', items: { type: 'object', properties: { item: { type: 'string' }, why: { type: 'string' } } } },
+    overlaps: { type: 'array', items: { type: 'object', properties: { featureA: { type: 'string' }, featureB: { type: 'string' }, sharedResponsibility: { type: 'string' } } } },
+    contractErrors: { type: 'array', items: { type: 'object', properties: { kind: { type: 'string', enum: ['missing-delta', 'wrong-contract-class', 'needless-migration', 'missing-migration', 'wrong-version', 'invented-result-code'] }, feature: { type: 'string' }, detail: { type: 'string' } } } },
+    dependencyIssues: { type: 'array', items: { type: 'object', properties: { feature: { type: 'string' }, issue: { type: 'string' } } } },
     notes: { type: 'string' },
   },
   required: ['coverageVerdict', 'uncoveredSpecItems', 'overlaps', 'contractErrors', 'dependencyIssues', 'notes'],
@@ -126,12 +168,16 @@ const planPrompt = `You are the DECOMPOSE PLANNER for the Roblox game at ${gameD
 
 You are at repo root. READ, IN FULL, BEFORE PLANNING:
 1. ${specPath} — the game spec. The "## Features (fan-out list)" section enumerates every feature; the "## Success criteria" section is the done-condition. Plan ONLY the features still unbuilt.
-2. ALREADY BUILT (do NOT re-plan these; their service dirs already exist): [${builtFeatures.join(', ')}]. Read them to learn the established patterns and what the spine already provides:
-   - ${gameDir}/src/server/services/collection/CollectionService.luau (the contract-defining collect/sell core; the Stardust balance every economy feature shares)
-   - ${gameDir}/src/server/services/shop/UpgradesShopService.luau, ${gameDir}/src/server/services/daily/DailyStreakService.luau
-3. THE SHARED CONTRACTS you will propose deltas to (read every one — your contractDeltas must name the REAL surfaces):
+2. ${
+    builtFeatures.length
+      ? `ALREADY BUILT (do NOT re-plan these; their service dirs already exist): [${builtFeatures.join(', ')}]. Read EVERY ONE of ${builtFeatures
+          .map((b) => `${gameDir}/src/server/services/${b}/`)
+          .join(', ')} to learn the established patterns, the contract surfaces they already registered, and which shared balance/seams they already mutate.`
+      : `NOTHING IS BUILT YET — this is a freshly scaffolded game. The ONLY service under ${gameDir}/src/server/services/ is the deletable \`sample\` smoke-test of the wiring (build-game DELETES it once real features land; do NOT plan around it, do NOT let any feature depend on it, and never plan a feature named "sample"). Plan the FULL feature set from the spec. The earliest batch therefore has to establish this game's core persisted data shape and its core loop from scratch — expect the contract-defining features the spec marks as such to be batch 0.`
+  }
+3. THE SHARED CONTRACTS you will propose deltas to (read every one — your contractDeltas must name the REAL surfaces; enumerate what each ACTUALLY contains today rather than assuming):
    - ${gameDir}/src/shared/Types.luau — PlayerData. CRITICAL design intent: it ships RESERVED SEAMS so features add logic, not schema. The OPEN seams are: \`currencies: { [string]: number }\` (a MAP — a new currency like Prisms is just a new KEY, NO migration), \`flags: { [string]: boolean }\` (per-player booleans — island-unlock flags, gamepass-effect flags ride here), \`receipts: { [string]: boolean }\` (idempotency ledger — monetization receipts ride here), \`analytics: { lastEventUnix }?\`, \`upgrades: { [string]: number }\`, and \`timestamps.lastSeenUnix\` (already written on save/release — the offline-earnings base). \`CURRENT_SCHEMA_VERSION\` is ${currentSchemaVersion}.
-   - ${gameDir}/src/shared/Net.luau — Net.Actions (existing keys: Sample, Collect, Sell, BuyUpgrade, Daily) and Net.dispatch (the ONE pipeline).
+   - ${gameDir}/src/shared/Net.luau — read Net.Actions and list the keys that EXIST TODAY (a fresh scaffold has only \`Sample\`); every action a specSlice invokes that is not already there must appear in contractDeltas.netActions. Net.dispatch is the ONE inbound pipeline.
    - ${gameDir}/src/shared/Result.luau — Result.Codes (existing: BadPayload, BadType, OutOfRange, Insufficient, OnCooldown, NotOwner, RateLimited, UnknownAction, NoData, Internal, Rejected, SessionLocked, LockStolen). REUSE these — only propose a new code if NONE fits.
    - ${gameDir}/src/shared/Migrations.luau — steps[] + default(). A class-B feature adds a step (i -> i+1) that MUST stamp the new version, and default() must seed the new field.
 4. ${gameDir}/CLAUDE.md — the engineering contract (server-authoritative, concurrency-safe economy, server clock, data-only-through-the-layer, idempotent purchases).
@@ -139,12 +185,14 @@ You are at repo root. READ, IN FULL, BEFORE PLANNING:
 PLANNING RULES:
 - name: hyphen-free lowercase (^[a-z][a-z0-9]*$) — it is a Luau require segment (services.<name>.<Service>). Hyphens BREAK the dot-require. Map "Islands & unlocks" -> name "islands", serviceName "IslandsService"; "Rebirth/prestige" -> "rebirth"/"RebirthService"; etc. NONE may collide with a built name [${builtFeatures.join(', ')}].
 - DISJOINT slices: every feature owns its own services/<name>/ ONLY. No two slices may claim the same responsibility. If the spec couples two things, assign each line to exactly one feature and wire the dependency via dependsOn.
-- SEAM OVER MIGRATION (the highest-value judgment): before marking a feature class-B-migration, check whether an OPEN seam carries its state. Prisms -> currencies map KEY (append-only). Per-island unlocks -> flags booleans (append-only). Gamepass effects + receipts -> flags + the receipts ledger (append-only). Offline earnings -> reads the EXISTING timestamps.lastSeenUnix (append-only unless it needs its own cap/claim timestamp). Only a genuinely NEW fixed-shape field with no seam (e.g. a rebirth COUNT, a lifetime-Stardust total that the spent-down currencies.Stardust cannot represent) is class-B. For EACH feature, justify the contractClass in seamRationale by naming the exact seam or the exact new field.
+- SEAM OVER MIGRATION (the highest-value judgment): before marking a feature class-B-migration, check whether an OPEN seam carries its state. A second/prestige CURRENCY -> a new key in the currencies MAP (append-only). Per-thing unlock booleans, and gamepass EFFECT flags -> the flags map (append-only). Purchase idempotency -> the receipts ledger (append-only). Purchased LEVELS/COUNTS of a named upgradable -> the upgrades map (append-only). Offline accrual -> reads the EXISTING timestamps.lastSeenUnix (append-only unless it genuinely needs its OWN claim timestamp). Only a genuinely NEW fixed-shape field that no seam can carry is class-B: e.g. a prestige COUNT, or a LIFETIME earned total (the spent-down currency balance cannot represent it), or a per-player OWNED-PLOT/slot identity, or a structured record the maps cannot express. For EACH feature, justify the contractClass in seamRationale by naming the exact seam or the exact new field — and say why the seam does NOT fit when you choose class-B.
 - migrations: order class-B features by build order; versions contiguous starting at ${currentSchemaVersion} (first class-B: ${currentSchemaVersion} -> ${currentSchemaVersion + 1}, next: ${currentSchemaVersion + 1} -> ${currentSchemaVersion + 2}, ...). toVersion = fromVersion + 1 always.
 - CROSS-CUTTING CONCERNS -> contractPassExtras, NOT a feature slice: a concern that must hook EVERY earn/spend path (analytics emission across the whole taxonomy; a lifetime/aggregate counter incremented on every earn) CANNOT be owned by a feature builder, because the earn/spend points live in OTHER features — including ALREADY-BUILT, already-merged services a builder may not touch. Own these in contractPassExtras: stand up the infra service(s) (sharedServices, e.g. an analytics emitter on the ctx seam), list EVERY edit to an already-built file (retrofits — full blast radius for the human review), map EVERY spec-mandated analytics event to a fire-point+owner (emitPoints — the validator checks the taxonomy is complete), and give the EXHAUSTIVE earn-path list (earnPaths). Individual features still emit their OWN domain events (e.g. progression on unlock/rebirth, purchase on a receipt) THROUGH the shared emitter — so a feature slice never stands up analytics itself (that would build it twice). A feature whose data is produced cross-cuttingly (e.g. a leaderboard that RANKS a lifetime counter) then only READS the contract-pass-provided field and has NO false dependency on the built services.
-- dependsOn + buildBatches: respect that the economy features all mutate the shared Stardust balance (note the contention); order so contract-defining/foundational features come first. buildBatches must partition ALL planned features (each once) with no feature before a dependency.
+- dependsOn + buildBatches: identify this game's SHARED soft-currency balance and note in planNotes that every economy feature mutates it (the cross-feature contention the integration gate will race). Order so contract-defining/foundational features (the ones the spec marks contract-defining, and anything the rest read) come first. buildBatches must partition ALL planned features (each once) with no feature before a dependency.
 ${note ? `\nEXTRA STEERING: ${note}\n` : ''}
-Return the StructuredOutput PLAN_SCHEMA. Be exhaustive: a missing contractDelta or a wrong contractClass misleads the entire downstream build.`
+${FIELD_CONTRACT}
+
+Return the StructuredOutput. Be exhaustive: a missing contractDelta or a wrong contractClass misleads the entire downstream build.`
 
 const plan = await agent(planPrompt, { label: 'decompose:plan', phase: 'Plan', schema: PLAN_SCHEMA, effort: 'high' })
 
@@ -250,9 +298,9 @@ const planJson = JSON.stringify(plan, null, 2)
 const validatePrompt = `You are an INDEPENDENT SKEPTIC validating a decompose PLAN for the Roblox game at ${gameDir}. You did NOT write the plan. Re-read the spec FROM SCRATCH and try to find where the plan is WRONG or INCOMPLETE. Do not trust the plan's own justifications.
 
 You are at repo root. READ:
-1. ${specPath} — the spec. Independently enumerate the unbuilt features and EVERY success criterion + re-entry hook (offline, daily streak, the rich-vein "Restock"), and the analytics-event taxonomy.
+1. ${specPath} — the spec. Independently enumerate the unbuilt features and EVERY success criterion, EVERY re-entry hook the spec lists (offline accrual, the daily claim, any recurring restock/respawn event), and the analytics-event taxonomy. Build your list from the spec ALONE before you look at the plan, then diff.
 2. The shared contracts (so you can judge seam-vs-migration correctly): ${gameDir}/src/shared/Types.luau (note the OPEN seams: currencies MAP, flags, receipts, analytics, upgrades, timestamps.lastSeenUnix — design intent is to reuse these, NOT migrate), Net.luau, Result.luau, Migrations.luau. CURRENT_SCHEMA_VERSION = ${currentSchemaVersion}.
-3. Already built (excluded from the plan, correctly): [${builtFeatures.join(', ')}].
+3. ${builtFeatures.length ? `Already built (excluded from the plan, correctly): [${builtFeatures.join(', ')}].` : 'NOTHING is built yet — the game is a fresh scaffold whose only service is the deletable `sample`. So the plan must cover the ENTIRE feature list, and no feature may depend on `sample`.'}
 
 THE PLAN UNDER REVIEW:
 -----
@@ -260,14 +308,21 @@ ${planJson}
 -----
 
 Adversarially check and report:
-- COVERAGE: does every unbuilt spec feature AND every success criterion map to exactly one feature slice? Flag anything no slice owns — especially cross-cutting items (the loop_completed end-to-end assertion, the analytics taxonomy, the "Restock" rich-vein event, the no-open-exploit adversarial pass). Put these in uncoveredSpecItems.
+- COVERAGE: does every unbuilt spec feature AND every success criterion map to exactly one feature slice? Flag anything no slice owns — especially cross-cutting items (the loop_completed end-to-end assertion, the analytics taxonomy, any recurring restock/respawn event named only in a re-entry-hooks bullet and never in the feature list, the no-open-exploit adversarial pass). Put these in uncoveredSpecItems.
 - DISJOINTNESS: do any two slices claim the same responsibility (would be built twice)? overlaps.
 - SEAM-VS-MIGRATION (highest value): for EACH feature, is contractClass right? Flag a feature marked append-only that actually introduces a new fixed-shape persisted field (missing-migration/wrong-contract-class), AND a feature marked class-B-migration whose state could ride an existing open seam (needless-migration). Check migration versions are contiguous from v${currentSchemaVersion}. Flag any invented Result.Code that duplicates an existing one. contractErrors.
 - DELTAS: does every Net.Action / field / Result.Code a specSlice implies actually appear in contractDeltas? Missing ones = missing-delta.
-- DEPENDENCIES: are dependsOn correct (e.g. Rebirth resets currencies/upgrades + island flags so it depends on them)? NOTE: a concern owned by contractPassExtras (see below) is provided BEFORE fan-out, so a feature that only READS a contract-pass-provided field should have NO dependency on the built services — flag a FALSE dependency too. dependencyIssues.
+- DEPENDENCIES: are dependsOn correct (e.g. a prestige/reset feature RESETS the currencies/upgrades/flags other features own, so it depends on every one of them; a gated-progression feature depends on whatever produces the resource AND the rating that gates it)? NOTE: a concern owned by contractPassExtras (see below) is provided BEFORE fan-out, so a feature that only READS a contract-pass-provided field should have NO dependency on the built services — flag a FALSE dependency too. dependencyIssues.
 - CROSS-CUTTING (contractPassExtras): verify the plan OWNS every concern that hooks every earn/spend path. Check emitPoints against the spec's analytics taxonomy: every spec-mandated event (e.g. session_start, session_end, loop_completed, currency_earned, currency_spent, progression, purchase) MUST have an entry — any missing event is an uncoveredSpecItem. Check retrofits name REAL already-built files and cover what must change in them (e.g. the built Sell/daily handlers must increment the lifetime counter + emit currency_earned/currency_spent — if a lifetime field exists but no retrofit wires it into the built earn paths, that is the leaderboard-ships-broken gap → dependencyIssue or missing-delta). Check earnPaths is exhaustive (sell, daily, offline, and any monetization grant) and excludes spend/reset paths. Flag any feature slice that stands up its OWN analytics emitter instead of emitting through the shared one (a build-twice overlap).
 
-Return the StructuredOutput VALIDATION_SCHEMA. Be specific and cite the spec line or contract field.`
+RETURN the StructuredOutput. Field contract (the schema is deliberately terse):
+- coverageVerdict: "complete" only if every remaining spec feature AND every success criterion is owned by exactly one feature slice (or explicitly by contractPassExtras). Otherwise "gaps"; "fail" if the plan is unusable.
+- uncoveredSpecItems[]: {item, why} — spec features / success criteria / re-entry hooks / analytics events no slice owns.
+- overlaps[]: {featureA, featureB, sharedResponsibility} — pairs whose slices claim the SAME responsibility, which the fan-out would build twice.
+- contractErrors[]: {kind, feature, detail} where kind is one of: missing-delta (a specSlice references a Net.Action/field/code absent from contractDeltas), wrong-contract-class, missing-migration (marked append-only but actually adds a new fixed-shape field), needless-migration (marked class-B but an open seam carries it), wrong-version (non-contiguous / toVersion != fromVersion+1), invented-result-code (a new code where an existing one fits).
+- dependencyIssues[]: {feature, issue} — wrong, missing, or FALSE dependsOn.
+- notes: anything else the human gate should see.
+Be specific and cite the spec line or the contract field.`
 
 const validation = await agent(validatePrompt, { label: 'decompose:validate', phase: 'Validate', schema: VALIDATION_SCHEMA, effort: 'high' })
 

@@ -24,7 +24,8 @@
 //     gameDir: "games/collect-sim",
 //     features: [
 //       {
-//         name: "upgrades-shop",                 // kebab; also the services/<name>/ + tests/unit/<name>.spec dir/file stem
+//         name: "upgradesshop",                  // HYPHEN-FREE lowercase (it is a Luau require segment);
+//                                                //   also the services/<name>/ + tests/unit/<name>.spec stem
 //         serviceName: "UpgradesShopService",    // the module table name
 //         specSlice: "<the exact spec text for THIS feature + its success criteria>",
 //         contractSummary: "<which Net.Actions / Types fields the contract pass already wrote for it>",
@@ -52,7 +53,9 @@ if (typeof input === 'string') {
     input = {}
   }
 }
-const gameDir = (input && input.gameDir) || 'games/collect-sim'
+// No game default: silently building into the WRONG game is worse than failing here.
+const gameDir = input && input.gameDir
+if (!gameDir) throw new Error('build-features: args must supply {gameDir, features}.')
 const features = (input && input.features) || []
 log(`build-features: args type=${typeof args}; parsed ${features.length} feature(s) for ${gameDir}.`)
 
@@ -118,7 +121,7 @@ ${f.specSlice}
 -----
 3. The contract this feature builds on (already written): ${f.contractSummary}
 4. ${dir}/src/shared/Net.luau — the action registry (your action name constants are already in Net.Actions) and Net.dispatch (the ONE pipeline). ${dir}/src/shared/Result.luau — the EXACT Result.Codes names (never invent one — CLAUDE.md §10).
-5. ${dir}/src/server/services/sample/SampleService.luau and (if present) services/collection/CollectionService.luau — the concrete service pattern: a module returning a table with Start(context); build actions as closures over private state INSIDE Start(); register via context.net:register(action) (COLON syntax). ${dir}/src/server/data/DataService.luau — get/update/save; ctx.data:update runs the transform under the per-player FIFO lock and may YIELD.
+5. ${dir}/src/server/services/sample/SampleService.luau, plus any ALREADY-BUILT service under ${dir}/src/server/services/ (list that directory first; on a fresh game only \`sample\` and the contract pass's stubs exist) — the concrete service pattern: a module returning a table with Start(context); build actions as closures over private state INSIDE Start(); register via context.net:register(action) (COLON syntax). ${dir}/src/server/data/DataService.luau — get/update/save; ctx.data:update runs the transform under the per-player FIFO lock and may YIELD.
 
 THEN BUILD ${dir}/src/server/services/${f.name}/${f.serviceName}.luau (replacing any stub):
 - A module table { name = "${f.serviceName}" } with a Start(context) hook. Resolve deps through context (context.net, ctx.data, ctx.clock) — never sibling-require another service.

@@ -38,8 +38,10 @@ if (typeof input === 'string') {
     input = {}
   }
 }
-const gameDir = (input && input.gameDir) || 'games/collect-sim'
-const specPath = (input && input.specPath) || 'specs/collect-sim.md'
+// No game defaults: silently GRADING the wrong game would launder one game's verdict onto another.
+const gameDir = input && input.gameDir
+const specPath = input && input.specPath
+if (!gameDir || !specPath) throw new Error('grade: args must supply {gameDir, specPath}.')
 const qualityThreshold = (input && typeof input.qualityThreshold === 'number') ? input.qualityThreshold : 0.7
 log(`grade: ${gameDir} vs ${specPath}. Deterministic tier (tier-status) + an INDEPENDENT judge of the spec success criteria + the LLM-judge quality layer. Fail-closed: an Unknown is never counted as a pass.`)
 

@@ -5,20 +5,27 @@
 // disjoint service files and never collide on src/shared (BUILD-GAME-DESIGN.md §4b + §13).
 //
 // Decision #2 (cross-cutting = contract-pass infrastructure) expands this beyond pure src/shared:
-// it also stands up the analytics emitter and RETROFITS already-built/merged services (collection,
-// daily, shop) for lifetime accrual + analytics emission. Those built-code edits are the highest
-// blast radius — which is exactly why this is GUARDED (hard rules + gauntlet-green gates + an
-// independent verifier) and why the human reviews the real diff before any fan-out.
+// it also stands up the analytics emitter and RETROFITS already-built/merged services for the
+// cross-cutting hooks (lifetime accrual + analytics emission) that no feature builder can make,
+// because those earn/spend points live in OTHER, already-merged features. Those built-code edits
+// are the highest blast radius — which is exactly why this is GUARDED (hard rules + gauntlet-green
+// gates + an independent verifier) and why the human reviews the real diff before any fan-out.
 //
-// FOUR serial build phases, each gated gauntlet-green (early-abort on red so a broken base never
-// piles up), then an INDEPENDENT VERIFIER (maker != checker):
+// GAME-AGNOSTIC: every noun (fields, seams, services, retrofits, stubs, events) comes from the
+// `contract` arg built from the approved plan. Nothing here knows what game it is building. On a
+// FRESH scaffold there is nothing built yet, so contract.retrofits is empty and that phase is
+// skipped — the cross-cutting hooks are then owned by the feature builders via the plan's
+// emitPoints/earnPaths, which the fan-out passes into every builder prompt.
+//
+// FIVE serial phases, each gated gauntlet-green (early-abort on red so a broken base never piles
+// up), then an INDEPENDENT VERIFIER (maker != checker):
 //   1. schema    — Net.Actions, Types fields + PlayerView/toView, Migrations steps + default seeds,
 //                  CURRENT_SCHEMA_VERSION bump, new nil-safe ctx seams, + SELF-VERIFYING migration
 //                  round-trip tests (a broken step must fail them).
-//   2. analytics — stand up the AnalyticsService emitter on ctx.analytics + session_start/end.
-//   3. retrofits — the 4 edits to built collection/daily/shop (behavior-preserving when feature
-//                  seams are absent, so the existing tests stay green).
-//   4. stubs     — registered stub services for the 6 new features (+ identity-default ctx seams)
+//   2. analytics — stand up the emitter on ctx.analytics + the session_start/session_end lifecycle.
+//   3. retrofits — the named edits to already-built services (behavior-preserving when feature
+//                  seams are absent, so the existing tests stay green). SKIPPED when none.
+//   4. stubs     — registered stub services for the new features (+ identity-default ctx seams)
 //                  so the wire is complete and fan-out builders just replace the stub.
 //   5. verify    — an independent agent audits the whole diff vs the plan; reports discrepancies.
 //
@@ -31,12 +38,12 @@
 
 export const meta = {
   name: 'contract-pass',
-  description: 'build-game Workflow A.2: the SERIAL guarded contract pass. Writes every shared-contract delta the approved decompose plan foresaw (Net.Actions, Types fields, Migrations steps + self-verifying round-trip tests, schema-version bump, nil-safe ctx seams), stands up the analytics emitter, and retrofits the already-built collection/daily/shop services for lifetime accrual + analytics — in four serial gauntlet-green phases, then an independent verifier audits the whole diff vs the plan. Commits nothing; writes no feature logic.',
+  description: 'build-game Workflow A.2: the SERIAL guarded contract pass. Writes every shared-contract delta the approved decompose plan foresaw (Net.Actions, Types fields, Migrations steps + self-verifying round-trip tests, schema-version bump, nil-safe ctx seams), stands up the analytics emitter, retrofits any already-built services for cross-cutting accrual + analytics, and registers a stub per new feature — in serial gauntlet-green phases, then an independent verifier audits the whole diff vs the plan. Commits nothing; writes no feature logic.',
   phases: [
     { title: 'Schema', detail: 'Net.Actions, Types fields + PlayerView/toView, Migrations steps + default seeds, version bump, nil-safe ctx seams, + self-verifying migration round-trip tests' },
-    { title: 'Analytics', detail: 'stand up the AnalyticsService emitter on ctx.analytics + session_start/session_end lifecycle' },
-    { title: 'Retrofits', detail: 'the 4 edits to built collection/daily/shop (behavior-preserving when feature seams absent)' },
-    { title: 'Stubs', detail: 'registered stub services for the 6 new features + identity-default ctx seams' },
+    { title: 'Analytics', detail: 'stand up the analytics emitter on ctx.analytics + the session_start/session_end lifecycle' },
+    { title: 'Retrofits', detail: 'the named edits to already-built services (behavior-preserving when feature seams absent); skipped on a fresh scaffold' },
+    { title: 'Stubs', detail: 'a registered stub service per new feature + identity-default ctx seams' },
     { title: 'Verify', detail: 'an independent agent audits the whole contract-pass diff against the approved plan' },
   ],
 }
@@ -50,37 +57,56 @@ if (typeof input === 'string') {
     input = {}
   }
 }
-const gameDir = (input && input.gameDir) || 'games/collect-sim'
+// No game default: silently writing the schema of the WRONG game is worse than failing here.
+const gameDir = input && input.gameDir
+if (!gameDir) throw new Error(`contract-pass: args must supply {gameDir, contract} (got gameDir=${JSON.stringify(gameDir)}).`)
 const contract = (input && input.contract) || {}
 const contractJson = JSON.stringify(contract, null, 2)
-log(`contract-pass: ${gameDir}; schema v${contract.fromSchemaVersion} -> v${contract.toSchemaVersion}; ${(contract.netActions || []).length} Net.Actions, ${(contract.typedFields || []).length} typed field(s), ${(contract.retrofits || []).length} retrofit(s), ${(contract.stubs || []).length} stub(s).`)
+
+const netActions = contract.netActions || []
+const typedFields = contract.typedFields || contract.typesFields || []
+const retrofitList = contract.retrofits || []
+const stubList = contract.stubs || []
+const migrationList = contract.migrations || []
+const seedList = contract.defaultSeeds || []
+const ctxSeams = contract.newCtxSeams || []
+const analyticsSpec = contract.analytics || {}
+const analyticsEvents = analyticsSpec.events || []
+
+log(
+  `contract-pass: ${gameDir}; schema v${contract.fromSchemaVersion} -> v${contract.toSchemaVersion}; ` +
+    `${netActions.length} Net.Action(s), ${typedFields.length} typed field(s), ${migrationList.length} migration(s), ` +
+    `${retrofitList.length} retrofit(s), ${stubList.length} stub(s), ${analyticsEvents.length} analytics event(s).`
+)
 
 // ---- shared guard rules every phase agent must obey ----
 const GUARD = `HARD GUARD RULES (every phase of the contract pass):
 - You are at repo root, on the staging branch. Do NOT run git. Do NOT commit or stage anything.
 - Write ONLY what this phase specifies. Do NOT implement feature LOGIC — the contract pass wires + stubs; feature builders fill logic later. (Exception: the named retrofits to already-built services, which ARE this pass's job.)
-- After each edit, run stylua on the files you wrote (a PostToolUse hook nags otherwise; heal with \`stylua <file>\`). Keep --!strict on every module.
-- VERIFY by running: lune run .claude/skills/lib/gauntlet.luau ${gameDir} — iterate until it ends {"ok":true,...}. Report the lune stage {"passed":X,"failed":Y,"total":Z}. The existing tests MUST NOT regress.
-- The approved contract spec (your single source of truth for WHAT to write):
+- After each edit, run stylua on the files you wrote (a PostToolUse hook nags otherwise; heal with "stylua <file>"). Keep --!strict on every module.
+- VERIFY by running: lune run .claude/skills/lib/gauntlet.luau ${gameDir} — iterate until it ends {"ok":true,...}. Report the lune stage {"passed":X,"failed":Y,"total":Z}. FIRST run it BEFORE you edit anything and note the baseline pass count: the existing tests MUST NOT regress, and you need the baseline to prove that.
+- The approved contract spec (your single source of truth for WHAT to write) — every noun you need is in here; do not invent fields, actions, seams or services it does not name:
 -----
 ${contractJson}
 -----`
 
-// ---- schemas ----
+// ---- schemas (kept terse: an over-large output schema is rejected by the safety classifier
+// before the agent ever runs, and the workflow then returns the same shape as a clean no-op) ----
 const SCHEMA_RESULT = {
   type: 'object',
   properties: {
     filesTouched: { type: 'array', items: { type: 'string' } },
     gauntletOk: { type: 'boolean' },
     luneResult: { type: 'string' },
-    currentSchemaVersion: { type: 'number', description: 'the value you set CURRENT_SCHEMA_VERSION to (must equal contract.toSchemaVersion)' },
+    baselineLune: { type: 'string' },
+    currentSchemaVersion: { type: 'number' },
     netActionsAdded: { type: 'array', items: { type: 'string' } },
     fieldsAdded: { type: 'array', items: { type: 'string' } },
-    migrationRoundTrip: { type: 'array', items: { type: 'object', properties: { step: { type: 'string', description: 'e.g. "v2->v3 rebirths"' }, testAdded: { type: 'boolean' }, falsifiability: { type: 'string', description: 'WHY the test is self-verifying: what it asserts that a broken/forgotten step would FAIL (e.g. "asserts schemaVersion==3 after migrate + rebirths present + preserves existing fields; an unstamped step would infinite-loop / a missing seed would nil")' } }, required: ['step', 'testAdded', 'falsifiability'] } },
-    defaultSeeds: { type: 'array', items: { type: 'string' }, description: 'the fresh-player Migrations.default fields you seeded (must include Prisms, rebirths, stats.lifetimeStardust)' },
+    migrationRoundTrip: { type: 'array', items: { type: 'object', properties: { step: { type: 'string' }, testAdded: { type: 'boolean' }, falsifiability: { type: 'string' } }, required: ['step', 'testAdded', 'falsifiability'] } },
+    defaultSeeds: { type: 'array', items: { type: 'string' } },
     ctxSeamsDeclared: { type: 'array', items: { type: 'string' } },
     notes: { type: 'string' },
-    blockers: { type: 'array', items: { type: 'string' }, description: 'anything that prevented a clean green (empty if fully green)' },
+    blockers: { type: 'array', items: { type: 'string' } },
   },
   required: ['filesTouched', 'gauntletOk', 'luneResult', 'currentSchemaVersion', 'netActionsAdded', 'fieldsAdded', 'migrationRoundTrip', 'defaultSeeds', 'blockers'],
 }
@@ -90,9 +116,9 @@ const ANALYTICS_RESULT = {
     filesTouched: { type: 'array', items: { type: 'string' } },
     gauntletOk: { type: 'boolean' },
     luneResult: { type: 'string' },
-    emitSeam: { type: 'string', description: 'the emit API you exposed, e.g. "ctx.analytics:emit(event, payload)"' },
-    lifecycleSites: { type: 'array', items: { type: 'string' }, description: 'where session_start / session_end fire' },
-    testable: { type: 'string', description: 'how a Tier-1 test can observe an emit (e.g. an in-memory event buffer the AnalyticsService exposes)' },
+    emitSeam: { type: 'string' },
+    lifecycleSites: { type: 'array', items: { type: 'string' } },
+    testable: { type: 'string' },
     notes: { type: 'string' },
     blockers: { type: 'array', items: { type: 'string' } },
   },
@@ -104,13 +130,13 @@ const RETROFIT_RESULT = {
     filesTouched: { type: 'array', items: { type: 'string' } },
     gauntletOk: { type: 'boolean' },
     luneResult: { type: 'string' },
-    sellBehaviorPreserved: { type: 'boolean', description: 'TRUE if the consolidated Sell formula is identical to the prior Sell when every feature seam is absent (all multipliers default 1) — the existing collection tests must still pass unchanged' },
+    behaviorPreserved: { type: 'boolean' },
     retrofitsApplied: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, what: { type: 'string' }, nilSafe: { type: 'boolean' } }, required: ['file', 'what'] } },
-    lifetimeOnlyOnEarns: { type: 'boolean', description: 'TRUE if stats.lifetimeStardust is incremented ONLY on earn paths (sell, daily) and NOT on the shop spend' },
+    lifetimeOnlyOnEarns: { type: 'boolean' },
     notes: { type: 'string' },
     blockers: { type: 'array', items: { type: 'string' } },
   },
-  required: ['filesTouched', 'gauntletOk', 'luneResult', 'sellBehaviorPreserved', 'retrofitsApplied', 'lifetimeOnlyOnEarns', 'blockers'],
+  required: ['filesTouched', 'gauntletOk', 'luneResult', 'behaviorPreserved', 'retrofitsApplied', 'lifetimeOnlyOnEarns', 'blockers'],
 }
 const STUBS_RESULT = {
   type: 'object',
@@ -118,7 +144,7 @@ const STUBS_RESULT = {
     filesTouched: { type: 'array', items: { type: 'string' } },
     gauntletOk: { type: 'boolean' },
     luneResult: { type: 'string' },
-    stubsCreated: { type: 'array', items: { type: 'object', properties: { service: { type: 'string' }, registeredActions: { type: 'array', items: { type: 'string' } }, seamProvided: { type: 'string', description: 'identity-default ctx seam this stub exposes, if any (e.g. "ctx.islands:multiplierFor(d) -> 1")' } }, required: ['service', 'registeredActions'] } },
+    stubsCreated: { type: 'array', items: { type: 'object', properties: { service: { type: 'string' }, registeredActions: { type: 'array', items: { type: 'string' } }, seamProvided: { type: 'string' } }, required: ['service', 'registeredActions'] } },
     registeredInInit: { type: 'boolean' },
     notes: { type: 'string' },
     blockers: { type: 'array', items: { type: 'string' } },
@@ -131,13 +157,13 @@ const VERIFY_RESULT = {
     verdict: { type: 'string', enum: ['pass', 'issues', 'fail'] },
     gauntletOk: { type: 'boolean' },
     netActionsComplete: { type: 'boolean' },
-    migrationsFalsifiable: { type: 'boolean', description: 'did you confirm each round-trip test genuinely fails if its step is broken/forgotten (reason about it; flip a thing mentally)?' },
+    migrationsFalsifiable: { type: 'boolean' },
     versionBumpCorrect: { type: 'boolean' },
     defaultSeedsComplete: { type: 'boolean' },
     retrofitsBehaviorPreserving: { type: 'boolean' },
     analyticsStoodUp: { type: 'boolean' },
     stubsRegistered: { type: 'boolean' },
-    featureLogicLeak: { type: 'boolean', description: 'TRUE if the contract pass wrote real feature LOGIC beyond wiring/stubs/named-retrofits (it should NOT have)' },
+    featureLogicLeak: { type: 'boolean' },
     discrepancies: { type: 'array', items: { type: 'object', properties: { area: { type: 'string' }, severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] }, detail: { type: 'string' } }, required: ['area', 'severity', 'detail'] } },
     notes: { type: 'string' },
   },
@@ -155,19 +181,32 @@ function aborted(label, r) {
 
 // ============================ PHASE 1: SCHEMA ============================
 phase('Schema')
-const schema = await agent(`You are the CONTRACT-PASS SCHEMA author for ${gameDir}. Write ALL shared schema deltas the approved plan specifies, plus self-verifying migration round-trip tests. This is the foundation every feature builds on — be exact.
+const schema = await agent(
+  `You are the CONTRACT-PASS SCHEMA author for ${gameDir}. Write ALL shared schema deltas the approved plan specifies, plus self-verifying migration round-trip tests. This is the foundation every feature builds on — be exact.
 
 ${GUARD}
 
-READ FIRST: ${gameDir}/src/shared/Types.luau (PlayerData + PlayerView + toView + CURRENT_SCHEMA_VERSION), ${gameDir}/src/shared/Migrations.luau (steps[] + default() + migrate() — study the existing v1->v2 step[1]: it MUST stamp the new version or migrate() infinite-loops), ${gameDir}/src/shared/Net.luau (Net.Actions + ActionContext seams: analytics?/monetization? are already reserved), ${gameDir}/src/server/Context.luau (ServerContext), ${gameDir}/tests/unit/migration.spec.luau (the existing round-trip test idioms), ${gameDir}/tests/unit/data.spec.luau if present (default()-shape assertions you may need to update).
+READ FIRST (in full):
+- ${gameDir}/src/shared/Types.luau — PlayerData + PlayerView + toView + CURRENT_SCHEMA_VERSION. Note which sub-tables are CLOSED literals (e.g. stats, timestamps) and which are OPEN maps (currencies, upgrades, flags, receipts).
+- ${gameDir}/src/shared/Migrations.luau — steps[] + default() + migrate(). Study the EXISTING steps: every step MUST stamp the new version or migrate() infinite-loops, and default() is a SEPARATE code site from the steps.
+- ${gameDir}/src/shared/Net.luau — Net.Actions + the ActionContext seam list.
+- ${gameDir}/src/server/Context.luau — ServerContext.
+- ${gameDir}/tests/unit/migration.spec.luau — the existing round-trip test idioms.
+- ${gameDir}/tests/unit/data.spec.luau if present — default()-shape assertions your new seeds may change.
 
-WRITE (per the contract spec above):
-1. Net.luau: add the ${(contract.netActions || []).length} Net.Actions entries (replace the reserved [B2] placeholder comments for Rebirth/Claim with the real entries). Add the new optional ctx seams ${JSON.stringify(contract.newCtxSeams || [])} to ActionContext (as \`<name>: any?\`) AND to ServerContext in Context.luau — nil in the spine, populated later by feature/stub services.
-2. Types.luau: add each typed field. PRECISION (from the plan, do EXACTLY): a TOP-LEVEL field (rebirths) goes on PlayerData AND PlayerView AND needs a toView line. A field that RIDES an existing closed sub-table (stats.lifetimeStardust) is added to the PlayerData.stats AND PlayerView.stats type literals ONLY — toView copies stats wholesale, so add NO toView line for it. Bump CURRENT_SCHEMA_VERSION to ${contract.toSchemaVersion}.
-3. Migrations.luau: add one steps[i] per migration (i = fromVersion). Each step MUST seed its field idempotently (preserve any existing value) AND STAMP schemaVersion = toVersion. Seed lifetimeStardust FLOORED at currencies.Stardust (math.floor). Update default() (the fresh-player blob) to ALSO seed the new fields (currencies.Prisms=0, rebirths=0, stats.lifetimeStardust=0) — default() is a SEPARATE code site from the steps.
-4. tests/unit/migration.spec.luau: add a SELF-VERIFYING round-trip test per new step. Each must assert that after migrate() on a prior-version blob: schemaVersion == the new CURRENT, the new field is present with the seeded value, AND all prior fields are preserved — so a forgotten stamp (infinite-loop), a missing seed (nil field), or a clobbered field would FAIL the test. Also add an idempotency assertion (re-migrating an already-current blob does not reset an advanced value).
+WRITE exactly what the contract spec above says, and nothing more:
+1. Net.luau: add the ${netActions.length} Net.Actions entries in contract.netActions (key -> wire string). If a reserved placeholder comment already stands in for one, replace it with the real entry. Add each new optional ctx seam in contract.newCtxSeams (${JSON.stringify(ctxSeams)}) to ActionContext as "<name>: any?" AND to ServerContext in Context.luau — nil in the spine, populated later by a stub/feature service.
+2. Types.luau: add each field in contract.typedFields. PRECISION — get this right per field:
+   - a NEW TOP-LEVEL field goes on PlayerData, and if clientFacing it ALSO goes on PlayerView AND needs its own line in Types.toView.
+   - a field that RIDES AN EXISTING CLOSED SUB-TABLE (e.g. "stats.<x>") is added to that sub-table's type literal on PlayerData AND (if clientFacing) on PlayerView — but toView copies that sub-table WHOLESALE, so add NO new toView line for it.
+   - a field that rides an OPEN MAP (a new currencies/upgrades/flags/receipts KEY) needs NO type change at all — only a default() seed.
+   Then bump CURRENT_SCHEMA_VERSION to ${contract.toSchemaVersion}.
+3. Migrations.luau: add one steps[i] per entry in contract.migrations (i = fromVersion). Each step MUST (a) seed its field IDEMPOTENTLY, preserving any existing value, and (b) STAMP schemaVersion = toVersion. Then update default() — the fresh-player blob — to ALSO seed every new field: ${JSON.stringify(seedList)}. A seed present in the steps but missing from default() means fresh players ship without the field; that is the classic gap.
+4. tests/unit/migration.spec.luau: add a SELF-VERIFYING round-trip test per new step. Each must assert that after migrate() on a prior-version blob: schemaVersion == the new CURRENT, the new field is present with the seeded value, AND all prior fields are preserved — so a forgotten stamp (infinite loop), a missing seed (nil field), or a clobbered field would FAIL the test. Add an idempotency assertion too (re-migrating an already-current blob must not reset an advanced value).
 
-Make the gauntlet green (existing 129 + your new tests; update any default()-shape assertion in data.spec that your new seeds change). Return the StructuredOutput.`, { label: 'contract:schema', phase: 'Schema', schema: SCHEMA_RESULT, effort: 'high' })
+Make the gauntlet green — the baseline tests you recorded BEFORE editing plus your new ones. If a default()-shape assertion legitimately changes because you added a seed, UPDATE it by ADDING the new expectation; never weaken an assertion to get green. Return the StructuredOutput (baselineLune = the pass count before you edited).`,
+  { label: 'contract:schema', phase: 'Schema', schema: SCHEMA_RESULT, effort: 'high' }
+)
 
 if (aborted('schema', schema)) {
   return { gameDir, ok: false, abortedAt: 'schema', schema, analytics: null, retrofits: null, stubs: null, verify: null }
@@ -176,61 +215,77 @@ log(`contract-pass: schema green. version=${schema.currentSchemaVersion}; fields
 
 // ============================ PHASE 2: ANALYTICS ============================
 phase('Analytics')
-const analytics = await agent(`You are the CONTRACT-PASS ANALYTICS author for ${gameDir}. Stand up the single analytics emitter every feature emits through (so the taxonomy is built exactly once, not per-feature).
+const analytics = await agent(
+  `You are the CONTRACT-PASS ANALYTICS author for ${gameDir}. Stand up the SINGLE analytics emitter every feature emits through, so the taxonomy is built exactly once instead of once per feature.
 
 ${GUARD}
 
-READ FIRST: ${gameDir}/src/server/services/sample/SampleService.luau (the service { name, Start(context) } pattern + context.net:register), ${gameDir}/src/server/Context.luau (ServerContext — ctx.analytics is the reserved seam to populate), ${gameDir}/src/server/init.server.luau (service registration + the player join/leave lifecycle), ${gameDir}/src/shared/Net.luau (ActionContext.analytics is already \`any?\`).
+READ FIRST: ${gameDir}/src/server/services/sample/SampleService.luau (the service { name, Start(context) } pattern + context.net:register), ${gameDir}/src/server/Context.luau (ServerContext — ctx.analytics is the reserved seam to populate), ${gameDir}/src/server/init.server.luau (service registration + the player join/leave lifecycle), ${gameDir}/src/shared/Net.luau (ActionContext.analytics is already optional).
 
-WRITE per the contract.analytics spec:
-- ${gameDir}/src/server/services/analytics/AnalyticsService.luau — a service { name = "AnalyticsService", Start(context) } that exposes the emit seam (contract.analytics.seam) and populates ctx.analytics so any handler can call it. Fire session_start on player join and session_end on player leave/release via the bootstrap lifecycle.
-- Make emits Tier-1 OBSERVABLE: expose an in-memory event buffer (or injectable sink) the AnalyticsService keeps, so a test can assert "event X fired with payload Y". Server-clock timestamp each event via ctx.clock:unix().
-- Wire ctx.analytics into ServerContext (Context.luau) + the ActionContext projection (NetServer), and register AnalyticsService in init.server.luau.
-- Do NOT make features emit yet (that is their job / the retrofit's job) — only stand up the emitter + the session lifecycle. Add a small Tier-1 test for the emitter itself (emit -> buffered + timestamped) so the seam is proven.
+WRITE per contract.analytics:
+- ${gameDir}/src/server/services/analytics/AnalyticsService.luau — a service { name = "<the serviceName in contract.analytics>", Start(context) } exposing the emit seam (${JSON.stringify(analyticsSpec.seam || 'ctx.analytics:emit(event, payload)')}) and populating ctx.analytics so ANY handler can call it. Fire the session lifecycle events the contract names (${JSON.stringify(analyticsSpec.lifecycle || ['session_start on join', 'session_end on leave/release'])}) from the bootstrap lifecycle.
+- Make emits TIER-1 OBSERVABLE: keep an in-memory event buffer (or an injectable sink) the service exposes, so a test can assert "event X fired with payload Y". Server-clock timestamp every event via ctx.clock:unix() — never client time, never os.time in a handler.
+- Wire ctx.analytics into ServerContext (Context.luau) AND the ActionContext projection (NetServer), and register the service in init.server.luau.
+- The FULL taxonomy this game must eventually emit is ${JSON.stringify(analyticsEvents)}. You are standing up the SEAM and the session lifecycle ONLY — do NOT make features emit their domain events here (that is each feature builder's job, or a named retrofit's). Building it here as well would build it twice.
+- Add a small Tier-1 test for the emitter itself (emit -> buffered + timestamped) so the seam is proven, not assumed.
 
-Gauntlet green. Return the StructuredOutput.`, { label: 'contract:analytics', phase: 'Analytics', schema: ANALYTICS_RESULT, effort: 'high' })
+Gauntlet green. Return the StructuredOutput.`,
+  { label: 'contract:analytics', phase: 'Analytics', schema: ANALYTICS_RESULT, effort: 'high' }
+)
 
 if (aborted('analytics', analytics)) {
   return { gameDir, ok: false, abortedAt: 'analytics', schema, analytics, retrofits: null, stubs: null, verify: null }
 }
 log(`contract-pass: analytics green. emit=${analytics.emitSeam}; lifecycle=[${(analytics.lifecycleSites || []).join(', ')}].`)
 
-// ============================ PHASE 3: RETROFITS ============================
+// ============================ PHASE 3: RETROFITS (skipped when none) ============================
 phase('Retrofits')
-const retrofits = await agent(`You are the CONTRACT-PASS RETROFIT author for ${gameDir}. Apply the named edits to ALREADY-BUILT, already-merged services. These are cross-cutting hooks no feature builder may make. Minimal, surgical, BEHAVIOR-PRESERVING.
+let retrofits = null
+if (retrofitList.length === 0) {
+  log('contract-pass: no retrofits in the contract (fresh scaffold — nothing is built yet). Skipping the retrofit phase; the cross-cutting earn/emit hooks are owned by the feature builders via the plan emitPoints/earnPaths.')
+  retrofits = { skipped: true, gauntletOk: true, filesTouched: [], retrofitsApplied: [], behaviorPreserved: true, lifetimeOnlyOnEarns: true, luneResult: 'n/a (skipped)', blockers: [] }
+} else {
+  retrofits = await agent(
+    `You are the CONTRACT-PASS RETROFIT author for ${gameDir}. Apply the named edits to ALREADY-BUILT, already-merged services. These are cross-cutting hooks no feature builder may make, because the code is outside their slice. Minimal, surgical, BEHAVIOR-PRESERVING.
 
 ${GUARD}
 
-READ FIRST: ${gameDir}/src/server/services/collection/CollectionService.luau (the Sell + Collect handlers + the backpack/economy concurrency pattern — study how Sell credits Stardust inside the ctx.data:update transform), ${gameDir}/src/server/services/daily/DailyStreakService.luau (the claim transform), ${gameDir}/src/server/services/shop/UpgradesShopService.luau (the BuyUpgrade transform + its rejectCode pattern), and how ctx.analytics:emit is called (from the analytics phase). Note the new player-data fields (rebirths, stats.lifetimeStardust) exist now and every player has them post-migration.
+READ FIRST, IN FULL, every file named in contract.retrofits: ${JSON.stringify(retrofitList.map((r) => r.file))}. Study how each one mutates player data inside its ctx.data:update transform (the concurrency-safe pattern), and how ctx.analytics:emit is called (from the analytics phase you just saw). The new player-data fields from the schema phase exist now and every player has them post-migration.
 
-APPLY the ${(contract.retrofits || []).length} retrofits in contract.retrofits EXACTLY:
-- collection Sell -> the CONSOLIDATED server-derived earn formula. CRITICAL: it MUST be behavior-IDENTICAL to the current Sell when every feature seam is absent — read the seams NIL-SAFELY so each multiplier defaults to 1 (e.g. \`local im = (ctx.islands and ctx.islands:multiplierFor(d)) or 1\`; same for restock; \`local sm = (ctx.monetization and ctx.monetization:stardustMultiplier(player.UserId)) or 1\`; \`local rm = 1 + (d.rebirths or 0) * REBIRTH_STEP\`). earned = baseSellValue * im * rm_restock * sm * rm. With stubs returning 1 and rebirths=0 this equals the current earned, so the existing 129 tests pass UNCHANGED. After crediting Stardust, increment stats.lifetimeStardust by the SAME earned inside the same transform, and after a successful update emit currency_earned via ctx.analytics.
-- collection Auto-Collect -> a minimal, concurrency-safe, clock-driven grant gated on flags["gamepass.autoCollect"] (motes through the same backpack/ctx.data:update path; deterministic via ctx.clock; off for non-holders). Keep it small + Tier-1 testable via the injected clock; if it genuinely cannot be made testable/minimal, record that in blockers rather than over-building.
-- daily claim -> after adding the reward to Stardust, increment stats.lifetimeStardust by the SAME reward + emit currency_earned.
-- shop BuyUpgrade -> on a successful purchase emit currency_spent (cost + upgradeId). Do NOT touch lifetimeStardust (spend != earn).
+APPLY the ${retrofitList.length} retrofit(s) in contract.retrofits EXACTLY as each "change" describes. Two invariants govern ALL of them:
 
-Make the gauntlet green WITHOUT changing existing test expectations (the retrofits are additive/behavior-preserving). If a built test needs updating because a field legitimately appears, prefer ADDING assertions over weakening. Return the StructuredOutput (set sellBehaviorPreserved + lifetimeOnlyOnEarns truthfully).`, { label: 'contract:retrofits', phase: 'Retrofits', schema: RETROFIT_RESULT, effort: 'high' })
+1. BEHAVIOR-PRESERVING under absent seams. Where a retrofit consolidates a formula that will later be influenced by not-yet-built features, read every such seam NIL-SAFELY so it defaults to the identity (a multiplier defaults to 1, an additive bonus to 0), e.g. "local m = (ctx.<seam> and ctx.<seam>:<method>(...)) or 1". With the stubs returning identity and the new counters at 0, the consolidated formula MUST equal the CURRENT behavior exactly — so every existing test passes UNCHANGED. That equality is the whole safety property of this phase.
 
-if (aborted('retrofits', retrofits)) {
-  return { gameDir, ok: false, abortedAt: 'retrofits', schema, analytics, retrofits, stubs: null, verify: null }
+2. EARN vs SPEND. Any lifetime/aggregate EARN counter is incremented ONLY on the earn paths the contract lists (contract.earnPaths = ${JSON.stringify(contract.earnPaths || [])}) and NEVER on a spend, reset or prestige path. Increment it inside the SAME ctx.data:update transform that credits the currency — never in a second, racing update. Emit the contract's event for that site AFTER the update succeeds, never before (a post-write emit that can itself fail must not turn a committed transaction into an error — guard it).
+
+Make the gauntlet green WITHOUT changing existing test expectations; the retrofits are additive. If a built test must change because a field legitimately appears, prefer ADDING assertions over weakening one. Return the StructuredOutput and set behaviorPreserved + lifetimeOnlyOnEarns TRUTHFULLY — a false claim here is worse than a red gauntlet.`,
+    { label: 'contract:retrofits', phase: 'Retrofits', schema: RETROFIT_RESULT, effort: 'high' }
+  )
+
+  if (aborted('retrofits', retrofits)) {
+    return { gameDir, ok: false, abortedAt: 'retrofits', schema, analytics, retrofits, stubs: null, verify: null }
+  }
+  log(`contract-pass: retrofits green. behaviorPreserved=${retrofits.behaviorPreserved}; lifetimeOnlyOnEarns=${retrofits.lifetimeOnlyOnEarns}.`)
 }
-log(`contract-pass: retrofits green. sellPreserved=${retrofits.sellBehaviorPreserved}; lifetimeOnlyOnEarns=${retrofits.lifetimeOnlyOnEarns}.`)
 
 // ============================ PHASE 4: STUBS ============================
 phase('Stubs')
-const stubs = await agent(`You are the CONTRACT-PASS STUB author for ${gameDir}. Create a registered STUB service per new feature so the wire is complete before fan-out — feature builders will REPLACE each stub with real logic.
+const stubs = await agent(
+  `You are the CONTRACT-PASS STUB author for ${gameDir}. Create a registered STUB service per new feature so the wire is complete before fan-out — feature builders will REPLACE each stub with real logic.
 
 ${GUARD}
 
-READ FIRST: ${gameDir}/src/server/services/sample/SampleService.luau (service + Start + context.net:register pattern), ${gameDir}/src/server/init.server.luau (registration), ${gameDir}/src/shared/Net.luau (Net.Actions you just added + the Action shape { name, validate, rate, handler, ownerOf? }), ${gameDir}/src/shared/Result.luau (exact Result.Codes).
+READ FIRST: ${gameDir}/src/server/services/sample/SampleService.luau (the service + Start + context.net:register pattern), ${gameDir}/src/server/init.server.luau (registration), ${gameDir}/src/shared/Net.luau (the Net.Actions you just added + the Action shape { name, validate, rate, handler, ownerOf? }), ${gameDir}/src/shared/Result.luau (the EXACT Result.Codes — use them verbatim).
 
-For EACH feature in contract.stubs create ${gameDir}/src/server/services/<name>/<serviceName>.luau:
-- module { name = "<serviceName>", Start(context) } that registers its listed action(s) on context.net with a STUB handler: a valid validate (permissive passthrough -> Result.ok(payload) or a minimal typed value), a sane default rate policy, and a handler returning Result.err(Result.Codes.Internal, "stub: <name> not implemented") (or, for read-only fetch actions, Result.ok of an empty/default shape). The stub must COMPILE and pass dispatch wiring, nothing more.
-- IDENTITY-DEFAULT ctx seam: if the contract notes this feature provides a ctx seam the Sell retrofit consumes (islands:multiplierFor(d)->1, restock:multiplierFor(d, now)->1, monetization:stardustMultiplier(userId)->1), the stub populates that seam with the identity-default method now (returns 1 / no-op) so the consolidated Sell formula composes to current behavior. The real builder replaces it.
-- Register every stub service in init.server.luau.
-- Do NOT write feature LOGIC — these are stubs. Do NOT write client controllers (the hasUI builder does that).
+For EACH feature in contract.stubs (${JSON.stringify(stubList.map((s) => s.name || s))}) create ${gameDir}/src/server/services/<name>/<serviceName>.luau:
+- A module { name = "<serviceName>", Start(context) } that registers its listed action(s) on context.net with a STUB handler: a valid validate (permissive passthrough -> Result.ok(payload), or a minimal typed value), a sane default rate policy, and a handler returning Result.err(Result.Codes.Internal, "stub: <name> not implemented"). For a read-only fetch action, Result.ok of an empty/default shape is fine. The stub must COMPILE and pass dispatch wiring — nothing more.
+- IDENTITY-DEFAULT ctx seam: where contract.stubs says this feature PROVIDES a seam that another site already consumes, the stub populates that seam NOW with the identity default (returns 1 for a multiplier, 0 for a bonus, false for a gate, a no-op for a command) so every consuming formula composes to current behavior. The real builder replaces it. This is what keeps the retrofits behavior-preserving.
+- Register EVERY stub service in init.server.luau.
+- Do NOT write feature LOGIC — these are stubs. Do NOT write client controllers (each hasUI builder writes its own).
 
-Gauntlet green (all actions registered, dispatch wiring intact, no regression). Return the StructuredOutput.`, { label: 'contract:stubs', phase: 'Stubs', schema: STUBS_RESULT, effort: 'high' })
+Gauntlet green (all actions registered, dispatch wiring intact, no regression against the baseline). Return the StructuredOutput.`,
+  { label: 'contract:stubs', phase: 'Stubs', schema: STUBS_RESULT, effort: 'high' }
+)
 
 if (aborted('stubs', stubs)) {
   return { gameDir, ok: false, abortedAt: 'stubs', schema, analytics, retrofits, stubs, verify: null }
@@ -239,25 +294,28 @@ log(`contract-pass: stubs green. created=[${(stubs.stubsCreated || []).map((s) =
 
 // ============================ PHASE 5: VERIFY (independent) ============================
 phase('Verify')
-const verify = await agent(`You are an INDEPENDENT VERIFIER of a just-completed contract pass for ${gameDir}. You did NOT write it. Audit the WHOLE diff against the approved contract spec and try to find what is wrong, missing, or over-reaching. Reading + reasoning + running the gauntlet only — do NOT edit anything.
+const verify = await agent(
+  `You are an INDEPENDENT VERIFIER of a just-completed contract pass for ${gameDir}. You did NOT write it. Audit the WHOLE diff against the approved contract spec and try to find what is wrong, missing, or over-reaching. Reading + reasoning + running the gauntlet ONLY — do NOT edit anything.
 
 The approved contract spec:
 -----
 ${contractJson}
 -----
 
-INSPECT the current working tree (the contract pass already ran): ${gameDir}/src/shared/Net.luau, Types.luau, Migrations.luau, Result.luau; ${gameDir}/src/server/Context.luau, init.server.luau; ${gameDir}/src/server/services/{analytics,collection,daily,shop, and the 6 new stub dirs}/; ${gameDir}/tests/unit/migration.spec.luau + any new tests. Run \`lune run .claude/skills/lib/gauntlet.luau ${gameDir}\` to confirm green.
+INSPECT the current working tree (the contract pass already ran). Use "git status" and "git diff" to see EVERY file it touched rather than guessing, then read: ${gameDir}/src/shared/{Net,Types,Migrations,Result}.luau; ${gameDir}/src/server/Context.luau and init.server.luau; every service dir under ${gameDir}/src/server/services/; ${gameDir}/tests/unit/migration.spec.luau and any new tests. Run "lune run .claude/skills/lib/gauntlet.luau ${gameDir}" to confirm green yourself — do not take the makers' word for it.
 
-CHECK and report (be specific, cite file+line):
-- netActionsComplete: all ${(contract.netActions || []).length} Net.Actions present AND each registered (by a stub or a retrofit)?
-- migrationsFalsifiable: read each new migration step + its round-trip test. Reason adversarially: if the step FORGOT to stamp the version (infinite loop) or FORGOT to seed the field (nil), would the test FAIL? If a test would still pass under a broken step, it is NOT self-verifying — flag it. Confirm versions are contiguous and CURRENT_SCHEMA_VERSION == ${contract.toSchemaVersion}.
-- defaultSeedsComplete: does Migrations.default seed ALL new fields (Prisms, rebirths, stats.lifetimeStardust) for fresh players, NOT just the migrate() steps?
-- retrofitsBehaviorPreserving: is the consolidated Sell formula behavior-identical to the prior Sell when feature seams are absent (multipliers default 1, rebirths default 0)? Is lifetimeStardust incremented ONLY on earns (sell, daily) and NOT on the shop spend? Are the seam reads genuinely nil-safe?
-- analyticsStoodUp: is ctx.analytics:emit wired + observable in Tier-1, with session_start/session_end on the lifecycle? Do feature emit sites exist where the plan's emitPoints say (or are they correctly deferred to the not-yet-built feature)?
-- stubsRegistered: all 6 stubs registered + the identity-default seams present so the Sell formula composes to current behavior?
-- featureLogicLeak: did the pass write real feature LOGIC beyond wiring/stubs/the 4 named retrofits? It should NOT have.
+CHECK and report (be specific, cite file + line):
+- netActionsComplete: are all ${netActions.length} contract Net.Actions present AND each actually REGISTERED by some service (a declared action nobody registers is a dead wire)?
+- migrationsFalsifiable: read each new migration step WITH its round-trip test. Reason adversarially: if the step FORGOT to stamp the version (infinite loop) or FORGOT to seed the field (nil), would the test FAIL? If a test would still pass under a broken step, it is NOT self-verifying — flag it. Confirm the versions are contiguous and CURRENT_SCHEMA_VERSION == ${contract.toSchemaVersion}.
+- defaultSeedsComplete: does Migrations.default() seed ALL of ${JSON.stringify(seedList)} for FRESH players, not just the migrate() steps? A field seeded only in a step means every brand-new player is missing it.
+- retrofitsBehaviorPreserving: ${retrofitList.length === 0 ? 'no retrofits were in scope (fresh scaffold) — report true, and instead CHECK that the contract pass did NOT silently edit code outside src/shared, the analytics service, and the new stub dirs.' : 'is each consolidated formula behavior-identical to the prior behavior when the feature seams are absent (multipliers default 1, new counters 0)? Is the lifetime/aggregate counter incremented ONLY on the contract earnPaths and NEVER on a spend/reset? Are the seam reads genuinely nil-safe? Is each post-write emit guarded so it cannot turn a committed write into an error?'}
+- analyticsStoodUp: is the emit seam wired and Tier-1 OBSERVABLE, with the session lifecycle events firing on join/leave? Are events server-clock timestamped?
+- stubsRegistered: is every stub in contract.stubs created AND registered in init.server.luau, with the identity-default seams present?
+- featureLogicLeak: did the pass write real feature LOGIC beyond wiring, stubs, and the named retrofits? It should NOT have. A stub that "helpfully" implements its feature is a leak — flag it.
 
-verdict: 'pass' (faithful to the plan, gauntlet green, migrations falsifiable, behavior preserved) / 'issues' (green but discrepancies to fix) / 'fail' (not green, or a migration is not self-verifying, or feature logic leaked). Put every finding in discrepancies with severity. Return the StructuredOutput.`, { label: 'contract:verify', phase: 'Verify', schema: VERIFY_RESULT, effort: 'high' })
+verdict: 'pass' (faithful to the plan, gauntlet green, migrations falsifiable, behavior preserved) / 'issues' (green but discrepancies to fix) / 'fail' (not green, or a migration is not self-verifying, or feature logic leaked). Put EVERY finding in discrepancies with a severity. Return the StructuredOutput.`,
+  { label: 'contract:verify', phase: 'Verify', schema: VERIFY_RESULT, effort: 'high' }
+)
 
 const critical = (verify && verify.discrepancies ? verify.discrepancies : []).filter((d) => d.severity === 'critical' || d.severity === 'high')
 log(`contract-pass DONE. verify verdict: ${verify ? verify.verdict : 'n/a'} | gauntletOk: ${verify ? verify.gauntletOk : 'n/a'} | ${critical.length} critical/high discrepancy(ies). Orchestrator reviews the diff + this report, then the human reviews before fan-out.`)
