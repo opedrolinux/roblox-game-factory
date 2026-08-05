@@ -22,12 +22,14 @@ local SPEC_PATHS = {
 	"./unit/clock.spec",
 	"./unit/contract.spec", -- [contract pass] the shared-contract completeness spec (v1->v7 round
 	-- trip, the toView allowlist, the analytics taxonomy, the action registry, the test seams)
+	"./unit/daily.spec", -- [feature: daily supply drop] the independent gate's spec-derived tests
 	"./unit/data.spec",
 	"./unit/economy.spec", -- [contract pass] ctx.economy earn/spend inside one data:update
 	"./unit/economy_race.spec",
 	"./unit/framework.spec",
 	"./unit/hudroot.spec", -- [contract pass] the shared HUD root's slot layout
 	"./unit/joinretry.spec", -- [contract pass] the client join-race guard + its install seam
+	"./unit/leaderboard.spec", -- [feature: leaderboard] the independent gate's spec-derived tests
 	"./unit/lifecycle.spec", -- [A10b] the pinned PlayerRemoving order (analytics -> plot -> data)
 	"./unit/migration.spec",
 	"./unit/net.spec",

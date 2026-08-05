@@ -31,6 +31,9 @@ local controllers = {
 	-- (AMENDMENT A10a: the sample controller is DELETED along with its server action.)
 	-- --- [features] one line per feature controller, appended at merge. Keep this block LAST. ---
 	require(Client.controllers.plot.PlotController), -- [plot] dome highlight + label (zero authority)
+	require(Client.controllers.daily.DailyController), -- [daily] streak badge + claim (zero authority)
+	-- [leaderboard] the in-world greybox board + the LeftPanel standings list (zero authority)
+	require(Client.controllers.leaderboard.LeaderboardController),
 }
 
 Bootstrap.start(controllers, context)
