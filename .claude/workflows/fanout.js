@@ -42,7 +42,13 @@ if (!gameDir) throw new Error('fanout: args must supply {gameDir, buildFeaturesP
 const buildFeaturesPath = input && input.buildFeaturesPath
 const autoFixRounds = (input && input.autoFixRounds) || 2
 const features = (input && input.features) || []
-log(`fanout: ${features.length} feature(s) on ${gameDir} (one batch); autoFixRounds=${autoFixRounds}. Nested build-features via scriptPath. Commits nothing.`)
+// Passed straight through to build-features — see the long note at the top of that script for why
+// these exist. Repeating the reasoning here would let the two copies drift; this is the pipe, not
+// the policy. Both default OFF, and both are the orchestrator's to set.
+const allowGauntletRedStages = (input && input.allowGauntletRedStages) || []
+const gauntletRedReason = (input && input.gauntletRedReason) || ''
+const mode = (input && input.mode) || 'full'
+log(`fanout: ${features.length} feature(s) on ${gameDir} (one batch); autoFixRounds=${autoFixRounds}; mode=${mode}${allowGauntletRedStages.length ? `; known-red ALLOWED: [${allowGauntletRedStages.join(', ')}]` : ''}. Nested build-features via scriptPath. Commits nothing.`)
 
 if (!buildFeaturesPath) {
   log('fanout: ERROR — no buildFeaturesPath supplied; cannot nest build-features. Aborting.')
@@ -92,7 +98,9 @@ DO, IN ORDER (falsify-first):
 2. FIX: apply the MINIMAL implementation change to ${dir}/src/server/services/${f.name}/ that restores the invariant (e.g. clamp to a cap, move an operand inside the transform, derive a value server-side). Do NOT weaken any existing gate test. Do NOT edit src/shared or init.server (report a needed contract amendment instead).
 3. PROVE: re-run the gauntlet — the new regression test must now be GREEN and the full suite must pass (no regression). Report the falsifiability (what the test asserts that was RED before and GREEN after).
 
-HARD CONSTRAINTS: do NOT run git / commit / stage. Run stylua on edited files (self-heal). VERIFY with: lune run .claude/skills/lib/gauntlet.luau ${dir} — iterate until {"ok":true,...}. Return the StructuredOutput (set regressionTest.wasRedBeforeFix truthfully).`
+HARD CONSTRAINTS: do NOT run git / commit / stage. Run stylua on edited files (self-heal). VERIFY with: lune run .claude/skills/lib/gauntlet.luau ${dir} — iterate until {"ok":true,...}.${allowGauntletRedStages.length ? `
+
+KNOWN-RED GAUNTLET STAGE(S): [${allowGauntletRedStages.join(', ')}]. The orchestrator established these are red for a reason outside any single feature's slice${gauntletRedReason ? `: ${gauntletRedReason}` : '.'} "Iterate until ok:true" does not apply to them and that green is not reachable from here. Your target is every OTHER stage green plus your regression test RED-then-GREEN, with no NEW known-red failure naming this feature. Never satisfy a gate rule with code written only to satisfy it — set gauntletOk honestly and name the red stage in notes.` : ''} Return the StructuredOutput (set regressionTest.wasRedBeforeFix truthfully).`
 }
 
 phase('Fanout')
@@ -102,7 +110,7 @@ for (let i = 0; i < features.length; i++) {
   const f = features[i]
 
   // --- build + independent gate via the proven build-features engine (nested, ONE feature) ---
-  const bf = await workflow({ scriptPath: buildFeaturesPath }, { gameDir, features: [f] })
+  const bf = await workflow({ scriptPath: buildFeaturesPath }, { gameDir, features: [f], allowGauntletRedStages, gauntletRedReason, mode })
   const r = bf && bf.results && bf.results[0] ? bf.results[0] : null
   if (!r) {
     log(`fanout: ${f.name} — build-features returned no result; recording build-failed.`)
@@ -127,7 +135,12 @@ for (let i = 0; i < features.length; i++) {
     fixes.push(fix || { round, fixed: false, note: 'fixer agent returned null' })
     // The fixer closes the bug iff it applied a real fix, added a falsify-first (was-RED) regression
     // test, and the gauntlet is green. Otherwise loop (another round) or fall through to park.
-    if (fix && fix.fixed && fix.gauntletOk && fix.regressionTest && fix.regressionTest.added && fix.regressionTest.wasRedBeforeFix && (!fix.stillBroken || fix.stillBroken.length === 0)) {
+    // The gauntlet clause carries the same known-red override as the build and gate steps: without
+    // it, a fixer that genuinely closed the bug would still be looped and then PARKED because a stage
+    // no fix can reach is red. Every OTHER condition here is untouched — a fix with no was-RED test
+    // still does not close a bug, override or not.
+    const fixGauntletOk = !!(fix && (fix.gauntletOk || allowGauntletRedStages.length > 0))
+    if (fix && fix.fixed && fixGauntletOk && fix.regressionTest && fix.regressionTest.added && fix.regressionTest.wasRedBeforeFix && (!fix.stillBroken || fix.stillBroken.length === 0)) {
       verdict = 'fixed'
       break
     }

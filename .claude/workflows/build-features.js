@@ -57,7 +57,40 @@ if (typeof input === 'string') {
 const gameDir = input && input.gameDir
 if (!gameDir) throw new Error('build-features: args must supply {gameDir, features}.')
 const features = (input && input.features) || []
-log(`build-features: args type=${typeof args}; parsed ${features.length} feature(s) for ${gameDir}.`)
+
+// ---- ORCHESTRATOR OVERRIDES (both default OFF; both are the orchestrator's to set, never an agent's) ----
+//
+// WHY THESE EXIST. A workflow script cannot run the gauntlet — it has no filesystem and no shell — so
+// all it ever sees is the agent's own `gauntletOk` boolean. That boolean CANNOT distinguish "this
+// builder broke the test suite" from "a stage is red for a reason outside every builder's slice".
+// Only the orchestrator can tell those apart, because only the orchestrator can actually run the
+// gauntlet and read which stages failed. So the distinction is passed IN, explicitly, per run.
+//
+// THE CONCRETE CASE. gate-reachability fails a replicated field that no client file reads. Between
+// the contract pass and the LAST feature merge, that is the honest state of a correctly-built game:
+// the schema for nine features exists, the controllers that read it do not yet. A single feature
+// builder cannot clear those without leaving its slice, and a builder that TRIES is writing reads
+// that exist only to quiet a rule — the precise defect the rule was written to catch.
+//
+// WHY IT MATTERS MORE HERE THAN ANYWHERE ELSE. `gauntletOk:false` used to record build-failed and
+// SKIP THE GATE. So during exactly the window where reachability is red by construction, every
+// feature would be recorded failed and the independent test gate — the factory's single most
+// important checker — would never run at all. Nine unverified services, each reported as a build
+// failure rather than as untested. That is a worse outcome than any red stage.
+//
+// WHAT THIS IS NOT: a waiver. The named stage stays red, it is reported red, and handoff still
+// requires a genuinely green gauntlet. This only stops a known-red stage from suppressing the gate.
+const allowGauntletRedStages = (input && input.allowGauntletRedStages) || []
+const gauntletRedReason = (input && input.gauntletRedReason) || ''
+// 'gate-only' skips the builder and gates whatever is ALREADY on disk. For re-gating a build the
+// orchestrator has independently verified — so a control-flow fix does not force a good build to be
+// thrown away and redone, which would replace a verified implementation with an unverified one.
+const mode = (input && input.mode) || 'full'
+
+log(`build-features: args type=${typeof args}; parsed ${features.length} feature(s) for ${gameDir}; mode=${mode}${allowGauntletRedStages.length ? `; known-red stages ALLOWED: [${allowGauntletRedStages.join(', ')}]` : ''}.`)
+if (allowGauntletRedStages.length) {
+  log(`build-features: OVERRIDE ACTIVE — a red [${allowGauntletRedStages.join(', ')}] will not suppress the gate. Orchestrator's stated reason: ${gauntletRedReason || '(none given)'}`)
+}
 
 // ---- structured-output schemas (validated at the tool-call layer; agents retry on mismatch) ----
 
@@ -105,6 +138,15 @@ const CRITIC_SCHEMA = {
 
 // ---- prompt builders (parameterized by feature; mirror the proven collect-sim run) ----
 
+// Told to every agent that runs the gauntlet, so nobody burns effort chasing a green that is not
+// reachable from inside one slice — and, worse, nobody "fixes" it by writing a read that exists only
+// to satisfy a rule. An agent handed an unsatisfiable success condition does not stop; it escalates.
+const KNOWN_RED = allowGauntletRedStages.length
+  ? `\n\nKNOWN-RED GAUNTLET STAGE(S): [${allowGauntletRedStages.join(', ')}]. The orchestrator ran the gauntlet itself and established these are red for a reason OUTSIDE any single feature's slice${gauntletRedReason ? `: ${gauntletRedReason}` : '.'} So "iterate until ok:true" DOES NOT APPLY to these stages — that green is not reachable from where you are standing.
+YOUR ACTUAL TARGET: (a) every OTHER stage green, and (b) no NEW failure in a known-red stage that names YOUR feature's files, seams or fields. Check that specifically: capture the known-red stage's failure list BEFORE you start and compare at the end.
+DO NOT make a known-red stage green by adding a read, a field, a call or a test whose only purpose is to satisfy the rule. That is the exact defect these rules exist to catch, and it will be found and reverted. Reporting gauntletOk=false with an honest account of which stages are red is CORRECT here and is not counted against you.`
+  : ''
+
 function buildPrompt(dir, f) {
   // The client conventions are whatever the scaffold's framework/ establishes — DISCOVERED, not
   // named here. A hardcoded exemplar rots: this prompt used to point at `controllers/sample/`, which
@@ -135,9 +177,9 @@ HARD CONSTRAINTS:
 - Do NOT edit anything under ${dir}/src/shared or ${dir}/src/server/init.server.luau. If you believe you genuinely need a new shared action/field, STOP and report it in designNotes as a needed contract amendment (set touchedSharedOrSpine appropriately) — do NOT edit shared yourself.
 - Do NOT run git. Do NOT commit or stage anything.
 - After each edit run stylua on the files you wrote (self-heal formatting; a PostToolUse hook nags otherwise).
-- VERIFY with: lune run .claude/skills/lib/gauntlet.luau ${dir} — iterate until it ends {"ok":true,...}. Report the lune stage's {"passed":X,"failed":Y,"total":Z}.
+- VERIFY with: lune run .claude/skills/lib/gauntlet.luau ${dir} — iterate until it ends {"ok":true,...}. Report the lune stage's {"passed":X,"failed":Y,"total":Z}.${KNOWN_RED}
 
-Return the StructuredOutput: the service path, gauntletOk + luneResult, whether you touched shared/spine (you should not have), your design notes (state ownership + the concurrency-safety argument), and any known limitations so the test gate is not surprised.`
+Return the StructuredOutput: the service path, gauntletOk + luneResult, whether you touched shared/spine (you should not have), your design notes (state ownership + the concurrency-safety argument), and any known limitations so the test gate is not surprised. If a known-red stage is the ONLY thing keeping gauntletOk false, say so explicitly in designNotes and name the stage — the orchestrator reads that to tell your build apart from a broken one.`
 }
 
 function authorPrompt(dir, f) {
@@ -159,7 +201,7 @@ HARD CONSTRAINTS:
 - Do NOT edit any file under src/ — the implementation is FROZEN. You only create the spec + register it.
 - Do NOT run git / commit / stage.
 - If a test FAILS: if it's YOUR test's bug (syntax, wrong harness usage, wrong Result code / constant) -> fix YOUR test and rerun (up to ~5 iterations). If it's a genuine SPEC violation by the implementation -> STOP patching, leave that test RED, and report it under suspectedRealBugs. NEVER edit the implementation to make a test pass.
-- After each edit run stylua on the spec + run.luau. VERIFY with lune run .claude/skills/lib/gauntlet.luau ${dir} — report the lune total (existing tests + yours, no regression).
+- After each edit run stylua on the spec + run.luau. VERIFY with lune run .claude/skills/lib/gauntlet.luau ${dir} — report the lune total (existing tests + yours, no regression).${KNOWN_RED}
 
 Return the StructuredOutput.`
 }
@@ -202,18 +244,37 @@ const results = []
 for (let i = 0; i < features.length; i++) {
   const f = features[i]
 
-  phase(`Build:${f.name}`)
-  const builder = await agent(buildPrompt(gameDir, f), {
-    label: `build:${f.name}`,
-    phase: `Build:${f.name}`,
-    schema: BUILD_SCHEMA,
-    effort: 'high',
-  })
+  let builder = null
+  if (mode === 'gate-only') {
+    // The build is already on disk and was verified by the orchestrator (who can run the gauntlet).
+    // Re-running the builder would discard a verified implementation for an unverified one.
+    log(`build-features: ${f.name} — mode=gate-only; skipping the builder and gating what is on disk.`)
+  } else {
+    phase(`Build:${f.name}`)
+    builder = await agent(buildPrompt(gameDir, f), {
+      label: `build:${f.name}`,
+      phase: `Build:${f.name}`,
+      schema: BUILD_SCHEMA,
+      effort: 'high',
+    })
 
-  if (!builder || !builder.gauntletOk) {
-    log(`build-features: ${f.name} did not build green — recording build-failed, skipping its gate.`)
-    results.push({ feature: f.name, verdict: 'build-failed', builder: builder || null, gate: null })
-    continue
+    // A null builder is always fatal: no agent ran, so nothing was built and there is nothing to gate.
+    // A FALSE gauntletOk is only fatal when no known-red stage was declared — see the override note
+    // at the top. Skipping the gate is the most expensive thing this workflow can do wrong, because
+    // an ungated feature and a failed build are reported identically and only one of them is honest.
+    if (!builder) {
+      log(`build-features: ${f.name} — builder agent returned nothing; recording build-failed, skipping its gate.`)
+      results.push({ feature: f.name, verdict: 'build-failed', builder: null, gate: null })
+      continue
+    }
+    if (!builder.gauntletOk && allowGauntletRedStages.length === 0) {
+      log(`build-features: ${f.name} did not build green — recording build-failed, skipping its gate.`)
+      results.push({ feature: f.name, verdict: 'build-failed', builder, gate: null })
+      continue
+    }
+    if (!builder.gauntletOk) {
+      log(`build-features: ${f.name} — builder reports gauntletOk=false; PROCEEDING TO THE GATE under the declared known-red override [${allowGauntletRedStages.join(', ')}]. The gate re-runs the gauntlet independently, and the orchestrator re-verifies which stages are red before any merge.`)
+    }
   }
 
   phase(`Gate:${f.name}`)
@@ -237,7 +298,11 @@ for (let i = 0; i < features.length; i++) {
     .concat((bughunt && bughunt.realBugsFound) || [])
   const critics = [coverage, quality, bughunt]
   const anyCriticGap = critics.some((c) => !c || c.verdict !== 'pass')
-  const gateGreen = !!(author && author.gauntletOk)
+  // Same override, same reasoning, applied to the gate author: it runs the SAME gauntlet and sees the
+  // SAME known-red stage, so without this every feature lands on needs-review for a reason that has
+  // nothing to do with the tests it just wrote. `author` still has to EXIST and have run — the
+  // override relaxes which stages may be red, never whether the gate ran.
+  const gateGreen = !!(author && (author.gauntletOk || allowGauntletRedStages.length > 0))
 
   let verdict
   if (realBugs.length > 0) {
@@ -255,6 +320,11 @@ for (let i = 0; i < features.length; i++) {
     realBugs,
     builder,
     gate: { author, coverage, quality, bughunt },
+    // Recorded on EVERY result, so a verdict reached under an override can never be read back as a
+    // clean unconditional green. mode is carried for the same reason: a gate-only run means the
+    // build in this result was verified elsewhere, not by this workflow.
+    mode,
+    gauntletOverride: allowGauntletRedStages.length ? { allowedRedStages: allowGauntletRedStages, reason: gauntletRedReason } : null,
   })
 }
 
