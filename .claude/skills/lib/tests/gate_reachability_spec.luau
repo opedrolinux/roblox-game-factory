@@ -46,6 +46,50 @@
 --   currency-sunk-via-dynamic-catalog-index
 --                                      R4 — ...the positive control, so the rule is not just refusing
 --                                      every dynamic `currencies[entry.currency]` spend
+--   seam-mediated-spend-is-green       R4 shape 4 — a SECOND green baseline (SEAM_BASE): the shop
+--                                      writes NO balance, every debit goes through `ctx.economy:spend`.
+--                                      R4's first three shapes made this — the architecture
+--                                      games/deep-reach's contract REQUIRES — report both currencies
+--                                      un-sunk. Its four refusals, each a different way in:
+--   seam-spend-with-currency-declaration-deleted
+--                                      R4 — THE PRISMS DEFECT in the seam shape: the only
+--                                      Gems-denominated entry deleted, a read-only Gems echo left
+--                                      behind (the form the defect actually hid in). The seam call
+--                                      still debits Gold and must not certify Gems
+--   seam-named-spend-that-adds-is-not-a-sink
+--                                      R4 — THE ANTI-LAUNDERING CLAUSE: the seam is verified by
+--                                      IMPLEMENTATION, not by name. Also proves the check is scoped to
+--                                      the function BODY — `earn` still adds beside it
+--   seam-earn-only-file-sinks-nothing  R4 — a file that only ever calls `earn` sinks nothing, even
+--                                      with the receiver and the declarations intact
+--   seam-spend-on-unattributable-receiver
+--                                      R4 — an unresolvable receiver FAILS CLOSED here, the opposite
+--                                      of R1's valve, because here it would MANUFACTURE a sink
+--   seam-literal-spend-binds-only-that-currency
+--                                      R4 — a literal at the call binds only itself; the declaration
+--                                      fallback is for DYNAMIC calls only. Paired with
+--   seam-literal-spend-per-currency-is-green
+--                                      R4 — ...one literal call per currency: GREEN
+--   scratch-table-is-not-the-balance-map
+--                                      R4 hole A1 — a read-only affordability PREVIEW whose scratch
+--                                      table happens to be called `currencies` enrolled as a debit
+--                                      body. A token must trace to the function's blob PARAMETER
+--   seam-subtraction-only-in-a-nested-block
+--                                      R4 hole A8a — every purchase FREE (`local balance = before`),
+--                                      the subtraction alive only inside a branch that cannot run.
+--                                      The textual one-hop-back scan hopped straight into it
+--   seam-spend-labelled-with-another-currency
+--                                      R4 hole A4a — THE PRISMS DEFECT IN SEAM CLOTHING: spend Gold,
+--                                      name Gems in a SINK LABEL. The key now binds only from the
+--                                      argument position the seam's signature names
+--   inert-declaration-does-not-certify R4 hole A4b — the whole-file `currency = "<Key>"` regex,
+--                                      satisfied by a UI legend no purchase path reads. Also carries
+--                                      the annotation-reach-forward defect that rerunning this attack
+--                                      against the real games/deep-reach tree exposed in the FIX
+--   dead-file-cannot-certify           R4 hole A3 — a brand-new service nothing requires, registers
+--                                      or calls, satisfying every other clause. Paired with
+--   wired-file-certifies               R4 — ...the identical file with the ONE bootstrap require line
+--                                      restored: GREEN. So the rule is not refusing every new file
 --   unread-toView-field                R5 — a replicated field no client file reads
 --   playerview-count-mismatch          R5 — a field added to PlayerView and never projected. Also the
 --                                      truncation guard: the baseline's toView contains a nested `if`,
@@ -203,11 +247,198 @@ end
 return Hud
 ]==]
 
+-- THE ROBLOX ENTRY POINT (added 2026-08-05 — hole A3). Rojo makes `src/server` a Script, so this file
+-- runs with nothing requiring it: it is the ROOT of the require graph R4 now walks before it will let
+-- any file certify a currency. A brand-new service that nothing requires, registers or calls used to
+-- certify a currency off a spend that never runs; the edge from THIS registry line is what makes a
+-- service live. Without a root in the corpus nothing is reachable and no currency can be certified —
+-- which is exactly the property `dead-file-cannot-certify` below asserts.
+local ENTRY_SRC = [==[
+--!strict
+local ServerScriptService = game:GetService("ServerScriptService")
+local Server = ServerScriptService:WaitForChild("Server")
+
+local PlayService = require(Server.services.play.PlayService)
+local ShopService = require(Server.services.shop.ShopService)
+
+local context = {}
+PlayService.Start(context)
+ShopService.Start(context)
+]==]
+
 local BASE: { Src } = {
 	{ path = "src/client/controllers/hud/HudController.luau", src = HUD_SRC },
+	{ path = "src/server/init.server.luau", src = ENTRY_SRC },
 	{ path = "src/server/services/play/PlayService.luau", src = PLAY_SRC },
 	{ path = "src/server/services/shop/ShopService.luau", src = SHOP_SRC },
 	{ path = "src/shared/Migrations.luau", src = MIGRATIONS_SRC },
+	{ path = "src/shared/Types.luau", src = TYPES_SRC },
+}
+
+-- ── the SEAM-MEDIATED baseline (R4 shape 4, added 2026-08-05) ─────────────────
+-- A SECOND green baseline, because the difference is STRUCTURAL, not a one-token mutation of the
+-- first: here the shop writes NO balance at all. games/deep-reach's engineering contract forbids
+-- feature code from touching `data.currencies` — every debit goes through `ctx.economy:spend`, and
+-- the seam writes the map through a local alias — so R4's first three shapes were unsatisfiable by
+-- correct code and reported a game that demonstrably spends both its currencies as sink-less. This
+-- corpus is that architecture in miniature: an economy seam, a context that installs it, and a shop
+-- that only CALLS it. Two currencies, because the interesting refusals are per-currency.
+local SEAM_MIGRATIONS_SRC = [==[
+--!strict
+local Migrations = {}
+
+function Migrations.default(nowUnix: number): { [string]: any }
+	return {
+		schemaVersion = 1,
+		currencies = { Gold = 0, Gems = 0 },
+		stats = { playtimeSeconds = 0, joinCount = 0 },
+		upgrades = {},
+	}
+end
+
+return Migrations
+]==]
+
+-- THE seam. `earn` adds and `spend` subtracts, and both write through the SAME local alias — which
+-- is what makes this corpus a real test of the anti-laundering clause: the two bodies are textually
+-- near-identical and differ only in the operator, so a rule that scanned the MODULE instead of the
+-- FUNCTION BODY would certify a spend that adds.
+local SEAM_ECONOMY_SRC = [==[
+--!strict
+local EconomyService = {}
+
+function EconomyService.new(): any
+	return setmetatable({}, { __index = EconomyService })
+end
+
+function EconomyService.earn(
+	_self: any,
+	data: any,
+	currency: string,
+	amount: number,
+	source: string
+): number
+	local currencies = data.currencies
+	local map = currencies
+	local before = map[currency] or 0
+	local balance = before + amount
+	map[currency] = balance
+	return balance
+end
+
+function EconomyService.spend(
+	_self: any,
+	data: any,
+	currency: string,
+	amount: number,
+	sink: string
+): number?
+	local currencies = data.currencies
+	local map = currencies
+	local before = map[currency] or 0
+	if before < amount then
+		return nil
+	end
+	local balance = before - amount
+	map[currency] = balance
+	return balance
+end
+
+return EconomyService
+]==]
+
+-- The install lives OUTSIDE src/server/services/, exactly as games/deep-reach's Context.luau does, so
+-- the seam is reached as `ctx.economy` and the field name `economy` is the attribution token a call
+-- site can be resolved by.
+local SEAM_CONTEXT_SRC = [==[
+--!strict
+local EconomyService = require(script.Parent.services.economy.EconomyService)
+
+local Context = {}
+
+function Context.build(): any
+	local economy = EconomyService.new()
+	return {
+		economy = economy,
+	}
+end
+
+return Context
+]==]
+
+-- The shop NEVER touches `data.currencies`. Its only debit is the seam call, and the only thing
+-- binding that dynamic call to a concrete currency is the catalog's `currency = "<Key>"` declaration
+-- — the same binding shape (3) uses for a dynamic index, and the thing the Prisms defect deletes.
+local SEAM_SHOP_SRC = [==[
+--!strict
+local CATALOG: { [string]: any } = {
+	["boots"] = { base = 10, currency = "Gold", label = "Boots" },
+	["pack"] = { base = 20, currency = "Gems", label = "Pack" },
+}
+
+local CATALOG_ORDER: { string } = { "boots", "pack" }
+
+local function levelOf(d: any, id: string): number
+	return (d.upgrades[id] or 0)
+end
+
+local ShopSeam = {}
+
+function ShopSeam.speedFor(_self: any, d: any): number
+	return 16 + levelOf(d, "boots") * 2
+end
+
+function ShopSeam.capacityFor(_self: any, d: any): number
+	return 50 + levelOf(d, "pack") * 10
+end
+
+local Service = {}
+
+function Service.Start(context: any)
+	context.upgrades = ShopSeam
+	context.net:on("Buy", function(ctx: any, payload: any)
+		local entry = CATALOG[payload.id]
+		local economy = ctx.economy
+		return ctx.data:update(ctx.player, function(d)
+			local cost = entry.base
+			local paid = economy:spend(d, entry.currency, cost, "shop." .. payload.id)
+			if paid == nil then
+				return d
+			end
+			d.upgrades[payload.id] = 1
+			return d
+		end)
+	end)
+end
+
+return Service
+]==]
+
+-- The seam corpus's own entry point. `Server.Context` is what pulls EconomyService into the live set
+-- (Context requires it), and the two service lines are what make the shop live — the same two edges
+-- games/deep-reach's init.server.luau provides for StructuresShopService and EconomyService.
+local SEAM_ENTRY_SRC = [==[
+--!strict
+local ServerScriptService = game:GetService("ServerScriptService")
+local Server = ServerScriptService:WaitForChild("Server")
+
+local Context = require(Server.Context)
+local PlayService = require(Server.services.play.PlayService)
+local ShopService = require(Server.services.shop.ShopService)
+
+local context = Context.build()
+PlayService.Start(context)
+ShopService.Start(context)
+]==]
+
+local SEAM_BASE: { Src } = {
+	{ path = "src/client/controllers/hud/HudController.luau", src = HUD_SRC },
+	{ path = "src/server/Context.luau", src = SEAM_CONTEXT_SRC },
+	{ path = "src/server/init.server.luau", src = SEAM_ENTRY_SRC },
+	{ path = "src/server/services/economy/EconomyService.luau", src = SEAM_ECONOMY_SRC },
+	{ path = "src/server/services/play/PlayService.luau", src = PLAY_SRC },
+	{ path = "src/server/services/shop/ShopService.luau", src = SEAM_SHOP_SRC },
+	{ path = "src/shared/Migrations.luau", src = SEAM_MIGRATIONS_SRC },
 	{ path = "src/shared/Types.luau", src = TYPES_SRC },
 }
 
@@ -248,6 +479,30 @@ local function mutate(path: string, find: string, replace: string): ({ Src }, st
 	end
 	if not hit then
 		return BASE, string.format("mutation target file %s is not in the baseline corpus", path)
+	end
+	return out, nil
+end
+
+-- The same single-mutation discipline, against SEAM_BASE.
+local function seamMutate(path: string, find: string, replace: string): ({ Src }, string?)
+	local out: { Src } = {}
+	local hit = false
+	for _, f in SEAM_BASE do
+		if f.path == path then
+			local newSrc, n = string.gsub(f.src, find, replace, 1)
+			if n == 0 then
+				return SEAM_BASE,
+					string.format("mutation %q did not match anything in %s", find, path)
+			end
+			hit = true
+			table.insert(out, { path = path, src = newSrc })
+		else
+			table.insert(out, f)
+		end
+	end
+	if not hit then
+		return SEAM_BASE,
+			string.format("mutation target file %s is not in the seam baseline corpus", path)
 	end
 	return out, nil
 end
@@ -750,6 +1005,361 @@ return Service
 			end
 		end
 		expectGreen("currency-sunk-via-dynamic-catalog-index", withGems, nil, NO_WAIVERS)
+	end
+
+	-- ── R4 SHAPE (4): THE SEAM-MEDIATED SPEND (added 2026-08-05) ──────────────
+	-- R4's first three shapes all demanded that the SPEND SITE ITSELF write the balance map.
+	-- games/deep-reach's contract forbids exactly that (every debit goes through `ctx.economy:spend`,
+	-- and the seam writes through a local alias), so R4 was UNSATISFIABLE BY CORRECTLY-ARCHITECTED
+	-- CODE and reported both of a game's currencies un-sunk while the game demonstrably spent both.
+	-- Two independent agents refused to hand-roll a direct balance write to satisfy the regex. They
+	-- were right, so the rule grew a fourth shape — and the shape has to be falsified against THE
+	-- ORIGINAL DEFECT, not a convenient mutation, which is what the four REDs below are for.
+	expectGreen("seam-mediated-spend-is-green", SEAM_BASE, nil, NO_WAIVERS)
+
+	-- ...green for the RIGHT reason: it discovered both currencies to check.
+	do
+		checks += 1
+		local d = decide(SEAM_BASE, NO_WAIVERS, true, nil)
+		local found = false
+		for _, c in d.counts do
+			if c.rule == "currency-sink" then
+				found = true
+				if c.subjects ~= 2 then
+					note(
+						string.format(
+							"seam-mediated-spend-is-green: currency-sink discovered %d subjects, expected 2 — "
+								.. "a green run with the wrong subject count is vacuity, not a pass",
+							c.subjects
+						)
+					)
+				end
+			end
+		end
+		if not found then
+			note("seam-mediated-spend-is-green: currency-sink reported no subject count at all")
+		end
+	end
+
+	-- (1) THE PRISMS DEFECT, restored in the seam shape. Delete the ONLY Gems-denominated catalog
+	-- entry — nothing in the game can spend Gems any more — but leave a read-only Gems balance echo
+	-- behind, which is the exact form the defect ACTUALLY hid in on collect-sim. The seam call is
+	-- still there and still debits Gold; it must no longer certify Gems.
+	do
+		local files, err = seamMutate(
+			"src/server/services/shop/ShopService.luau",
+			'%["pack"%] = { base = 20, currency = "Gems", label = "Pack" },',
+			'["pack"] = { base = 20, currency = "Gold", label = "Pack" },\n'
+				.. "\t-- a read-only echo, the shape the defect hid in\n"
+				.. "\tgemEcho = 0,"
+		)
+		expectRed(
+			"seam-spend-with-currency-declaration-deleted",
+			files,
+			err,
+			NO_WAIVERS,
+			"currency-sink",
+			"currencies.Gems"
+		)
+	end
+
+	-- (2) THE ANTI-LAUNDERING CLAUSE. A function NAMED `spend` that ADDS is not a sink. The two seam
+	-- bodies are textually near-identical and differ only in the operator, so this also proves the
+	-- verification is scoped to the FUNCTION BODY: `earn` still contains a `+`, `spend` no longer
+	-- contains a `-`, and a module-wide scan would happily certify both currencies anyway.
+	do
+		local files, err = seamMutate(
+			"src/server/services/economy/EconomyService.luau",
+			"local balance = before %- amount",
+			"local balance = before + amount"
+		)
+		expectRed(
+			"seam-named-spend-that-adds-is-not-a-sink",
+			files,
+			err,
+			NO_WAIVERS,
+			"currency-sink",
+			"currencies.Gold"
+		)
+	end
+
+	-- (3) AN EARN-ONLY FILE MUST NOT CERTIFY. The shop keeps its seam receiver, its catalog and its
+	-- currency declarations, and calls `earn` with a LITERAL currency instead of `spend`. `earn`'s
+	-- body adds, so it is not in the debiting set and nothing here is a sink.
+	do
+		local files, err = seamMutate(
+			"src/server/services/shop/ShopService.luau",
+			"economy:spend%(d, entry%.currency, cost,",
+			'economy:earn(d, "Gold", cost,'
+		)
+		expectRed(
+			"seam-earn-only-file-sinks-nothing",
+			files,
+			err,
+			NO_WAIVERS,
+			"currency-sink",
+			"currencies.Gold"
+		)
+	end
+
+	-- (4) AN UNATTRIBUTABLE RECEIVER FAILS CLOSED. The call shape and the declarations are untouched;
+	-- only the receiver changes to something no walker can resolve to the debiting seam. R1 lets an
+	-- unresolvable receiver SUPPRESS a failure because there the risk is a false alarm; here it would
+	-- MANUFACTURE a sink, so the two rules deliberately fail in opposite directions.
+	do
+		local files, err = seamMutate(
+			"src/server/services/shop/ShopService.luau",
+			"local economy = ctx%.economy\n",
+			"local ledger = ctx.ledger\n"
+		)
+		local files2: { Src } = {}
+		for _, f in files do
+			if f.path == "src/server/services/shop/ShopService.luau" then
+				table.insert(files2, {
+					path = f.path,
+					src = (string.gsub(f.src, "economy:spend%(", "ledger:spend(", 1)),
+				})
+			else
+				table.insert(files2, f)
+			end
+		end
+		expectRed(
+			"seam-spend-on-unattributable-receiver",
+			files2,
+			err,
+			NO_WAIVERS,
+			"currency-sink",
+			"currencies.Gold"
+		)
+	end
+
+	-- (5) A LITERAL AT THE CALL BINDS ONLY ITSELF. The declaration fallback exists for DYNAMIC calls
+	-- (`spend(d, entry.currency, …)`); a call that names its currency outright must not drag every
+	-- other `currency = "<Key>"` in the file along with it. Gold stays sunk, Gems does not.
+	do
+		local files, err = seamMutate(
+			"src/server/services/shop/ShopService.luau",
+			"economy:spend%(d, entry%.currency, cost,",
+			'economy:spend(d, "Gold", cost,'
+		)
+		expectRed(
+			"seam-literal-spend-binds-only-that-currency",
+			files,
+			err,
+			NO_WAIVERS,
+			"currency-sink",
+			"currencies.Gems"
+		)
+	end
+
+	-- ...and the positive control for the literal form, so (5) is not the rule simply refusing every
+	-- literal spend: give each currency its own literal call and BOTH are sunk. GREEN.
+	do
+		local files, err = seamMutate(
+			"src/server/services/shop/ShopService.luau",
+			'local paid = economy:spend%(d, entry%.currency, cost, "shop%." %.%. payload%.id%)',
+			'local paid = economy:spend(d, "Gold", cost, "shop.gold")\n'
+				.. '\t\t\tlocal paid2 = economy:spend(d, "Gems", cost, "shop.gems")\n'
+				.. "\t\t\tif paid2 == nil then\n\t\t\t\treturn d\n\t\t\tend"
+		)
+		expectGreen("seam-literal-spend-per-currency-is-green", files, err, NO_WAIVERS)
+	end
+
+	-- ── SHAPE (4), SECOND HARDENING PASS (2026-08-05) ─────────────────────────
+	-- An INDEPENDENT ADVERSARY ran twelve laundering attacks against the shape above and got SIX of
+	-- them past it. Five are closed below, each with the attack reconstructed as a single mutation of
+	-- SEAM_BASE — and each one was verified GREEN (i.e. laundered) against the rule as it stood before
+	-- the fix, which is the only thing that makes these fixtures evidence rather than decoration.
+
+	-- (6) HOLE A1 — A SCRATCH TABLE IS NOT THE BALANCE MAP. `balanceMapTokens` seeded its token list
+	-- with the BARE NAME `currencies`, so a read-only affordability PREVIEW that happens to build a
+	-- local table of that name enrolled as a debit body: `local currencies = {}` …
+	-- `currencies[k] = before - cost` writes nothing a player owns, and certified both currencies of a
+	-- game that now spends neither. The seam is otherwise untouched — same name, same receiver, same
+	-- call site — so the ONLY thing under test is whether a token has to trace to the function's own
+	-- blob parameter.
+	do
+		local files, err = seamMutate(
+			"src/server/services/economy/EconomyService.luau",
+			"function EconomyService%.spend%(.-\nend",
+			"function EconomyService.spend(\n"
+				.. "\t_self: any,\n\tdata: any,\n\tcurrency: string,\n\tamount: number,\n\tsink: string\n"
+				.. "): number?\n"
+				.. "\t-- A PREVIEW: it answers 'could you afford this', and writes nothing anyone owns.\n"
+				.. "\tlocal currencies = {}\n"
+				.. "\tlocal before = data.currencies[currency] or 0\n"
+				.. "\tif before < amount then\n\t\treturn nil\n\tend\n"
+				.. "\tcurrencies[currency] = before - amount\n"
+				.. "\treturn currencies[currency]\n"
+				.. "end"
+		)
+		expectRed(
+			"scratch-table-is-not-the-balance-map",
+			files,
+			err,
+			NO_WAIVERS,
+			"currency-sink",
+			"currencies.Gold"
+		)
+	end
+
+	-- (7) HOLE A8a — THE SEAM'S SUBTRACTION CAN BE DEAD. Every purchase is now FREE: the stored value
+	-- is `before`, and the subtraction survives only inside a branch that cannot be taken (`amount` is
+	-- guarded > 0 by every caller shape this factory writes). The textual one-hop-back scan hopped
+	-- straight into the dead assignment and certified both currencies — reopening, one level up, the
+	-- exact hole the "bind the subtraction to the write" clause was written to close.
+	do
+		local files, err = seamMutate(
+			"src/server/services/economy/EconomyService.luau",
+			"\tlocal balance = before %- amount\n\tmap%[currency%] = balance\n\treturn balance",
+			"\tlocal balance = before\n"
+				.. "\tif amount < 0 then\n\t\tbalance = before - amount\n\tend\n"
+				.. "\tmap[currency] = balance\n\treturn balance"
+		)
+		expectRed(
+			"seam-subtraction-only-in-a-nested-block",
+			files,
+			err,
+			NO_WAIVERS,
+			"currency-sink",
+			"currencies.Gold"
+		)
+	end
+
+	-- (8) HOLE A4a — THE CURRENCY BINDS ONLY FROM THE CURRENCY ARGUMENT POSITION. THIS IS THE PRISMS
+	-- DEFECT IN SEAM CLOTHING: spend A, name B. The shop debits GOLD outright and mentions Gems in a
+	-- SINK LABEL, and the old test — "is the quoted key anywhere inside the parenthesised span" —
+	-- certified Gems off that label. The position now comes from the seam's own signature (the
+	-- parameter named like a currency), so the label argument binds nothing.
+	do
+		local files, err = seamMutate(
+			"src/server/services/shop/ShopService.luau",
+			'economy:spend%(d, entry%.currency, cost, "shop%." %.%. payload%.id%)',
+			'economy:spend(d, "Gold", cost, { sink = "shop", currency = "Gems" })'
+		)
+		expectRed(
+			"seam-spend-labelled-with-another-currency",
+			files,
+			err,
+			NO_WAIVERS,
+			"currency-sink",
+			"currencies.Gems"
+		)
+	end
+
+	-- (9) HOLE A4b — AN INERT DECLARATION MUST NOT CERTIFY. Nothing is denominated in Gems any more
+	-- (the `pack` row is Gold), and the only `currency = "Gems"` left is a UI LEGEND — a table no
+	-- purchase path reads. The whole-file `declaresCurrency` regex could not tell that from a price,
+	-- so the dynamic `economy:spend(d, entry.currency, …)` certified Gems off a label table. The
+	-- declaration is now required INSIDE the catalog the dynamic expression actually indexes.
+	--
+	-- The legend sits BELOW a helper whose PARAMETER is annotated `entry: any`, and that is not
+	-- decoration: the first version of this fix accepted any `: …` between a name and the next `=`, so
+	-- the ANNOTATION reached forward past its own statement and adopted the legend as `entry`'s table
+	-- — certifying Gems again through the very clause written to stop it. Rerunning this hole against
+	-- the real games/deep-reach tree is what exposed that; this fixture is that finding, made
+	-- permanent.
+	do
+		local files, err = seamMutate(
+			"src/server/services/shop/ShopService.luau",
+			'%["pack"%] = { base = 20, currency = "Gems", label = "Pack" },',
+			'["pack"] = { base = 20, currency = "Gold", label = "Pack" },\n'
+				.. "}\n\nlocal function costOf(entry: any, level: number): number\n"
+				.. "\treturn entry.base * (level + 1)\nend\n\n"
+				.. "-- A UI legend: rendered, never priced against, never spent.\n"
+				.. "local LEGEND: { [string]: any } = {\n"
+				.. '\t["gems"] = { currency = "Gems", label = "Gems", icon = "rbxassetid://0" },'
+		)
+		expectRed(
+			"inert-declaration-does-not-certify",
+			files,
+			err,
+			NO_WAIVERS,
+			"currency-sink",
+			"currencies.Gems"
+		)
+	end
+
+	-- (10) HOLE A3 — A DEAD FILE MUST NOT CERTIFY. `PearlAltarService.luau` is brand new and nothing
+	-- requires it, registers it or calls it: it is not in the bootstrap's list and no module names it.
+	-- It satisfies every OTHER clause of shape (4) — attributable receiver, debiting seam, the key as a
+	-- literal in the currency argument position — and it still must not certify Gems, because the code
+	-- never runs. (The corpus is every .luau under a Rojo mount; being a file is not being alive.)
+	local ALTAR_SRC = [==[
+--!strict
+local PearlAltarService = {}
+
+function PearlAltarService.Start(ctx: any)
+	ctx.net:on("Altar", function(c: any, payload: any)
+		local economy = c.economy
+		return c.data:update(c.player, function(d)
+			local paid = economy:spend(d, "Gems", 5, "altar.offering")
+			if paid == nil then
+				return d
+			end
+			d.upgrades.altar = 1
+			return d
+		end)
+	end)
+end
+
+return PearlAltarService
+]==]
+
+	-- SEAM_BASE with nothing denominated in Gems any more, plus the altar file. `wired` splices the
+	-- altar into the bootstrap, which is the ONLY difference between the RED and its positive control.
+	local function altarCorpus(wired: boolean): ({ Src }, string?)
+		local files, err = seamMutate(
+			"src/server/services/shop/ShopService.luau",
+			'%["pack"%] = { base = 20, currency = "Gems", label = "Pack" },',
+			'["pack"] = { base = 20, currency = "Gold", label = "Pack" },'
+		)
+		if err ~= nil then
+			return files, err
+		end
+		local out: { Src } = {}
+		for _, f in files do
+			if wired and f.path == "src/server/init.server.luau" then
+				local src, n = string.gsub(
+					f.src,
+					"local ShopService = require%(Server%.services%.shop%.ShopService%)",
+					"local ShopService = require(Server.services.shop.ShopService)\n"
+						.. "local PearlAltarService = require(Server.services.altar.PearlAltarService)",
+					1
+				)
+				if n == 0 then
+					return files, "altarCorpus: the bootstrap mutation matched nothing"
+				end
+				src = src .. "PearlAltarService.Start(context)\n"
+				table.insert(out, { path = f.path, src = src })
+			else
+				table.insert(out, f)
+			end
+		end
+		table.insert(
+			out,
+			{ path = "src/server/services/altar/PearlAltarService.luau", src = ALTAR_SRC }
+		)
+		return out, nil
+	end
+
+	do
+		local files, err = altarCorpus(false)
+		expectRed(
+			"dead-file-cannot-certify",
+			files,
+			err,
+			NO_WAIVERS,
+			"currency-sink",
+			"currencies.Gems"
+		)
+	end
+
+	-- ...and the paired positive control, so the rule above is not "R4 refuses every new file": add
+	-- the ONE require line the bootstrap was missing and the identical altar certifies Gems. GREEN.
+	do
+		local files, err = altarCorpus(true)
+		expectGreen("wired-file-certifies", files, err, NO_WAIVERS)
 	end
 
 	-- ── R5 view-field-read ────────────────────────────────────────────────────

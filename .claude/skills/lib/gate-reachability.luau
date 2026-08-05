@@ -590,6 +590,259 @@ local function quotesName(fv: FileView, name: string): boolean
 		or string.find(fv.code, "'" .. e .. "'", 1, false) ~= nil
 end
 
+-- ── FILE REACHABILITY (added 2026-08-05 — hole A3) ────────────────────────────
+-- THE HOLE. The corpus is "every .luau under a Rojo mount", which is a set of FILES, not a set of
+-- LIVE code. An adversarial pass added a brand-new `PearlAltarService.luau` that nothing requires,
+-- nothing registers in the bootstrap's service list and nothing calls — and R4's shape (4) certified
+-- Pearls sunk off it. A DEAD FILE CERTIFIED A LIVE CURRENCY: "written here, read nowhere" hiding
+-- inside the gate built to catch it, exactly as the homonym hole did to R1.
+--
+-- This answers "which files does the running game actually reach". It is a REDUCED PORT of
+-- gate-require.luau's resolver (:186-240 resolveStringRequire/exprLeaf, :101-127 buildMounts):
+-- the same relative-string resolution with the same init.luau folder-collapse quirk, and the same
+-- last-dotted-identifier leaf for an instance require. PORTED rather than required from a private
+-- local for the same reason the masker is (see the header at :218): the two gates are separately
+-- runnable stages and neither may break the other by refactoring a helper. It answers a WEAKER
+-- question than gate-require does (which asks whether a target EXISTS on disk), so it needs no
+-- filesystem at all — membership is decided against the corpus's own path set, which is what keeps
+-- `M.classify` pure and the RED corpus handwritten.
+--
+-- ROOTS are what Roblox itself runs, with no require anywhere: `init.server.luau` /
+-- `init.client.luau` (Rojo turns the containing folder into a Script/LocalScript) and any
+-- `*.server.luau` / `*.client.luau`. Everything else must be REQUIRED, transitively, by something
+-- reachable — which is how the bootstrap's `require(Server.services.structures.StructuresShopService)`
+-- registration line becomes the edge that makes a service live.
+--
+-- WHICH WAY IT FAILS. Unreachability is NOT reported as a finding of its own: an unreachable module
+-- is not necessarily a defect (a Tier-1 test double, a feature landing next batch), and a rule that
+-- red-lit every one of them would be the false alarm that gets a gate switched off. It is used only
+-- to REFUSE EVIDENCE — a file this walker cannot prove reachable may not certify a currency. That is
+-- the fail-closed direction: the cost is an investigation, never a silent green.
+local function segsOf(p: string): { string }
+	local out: { string } = {}
+	for s in string.gmatch(p, "[^/]+") do
+		table.insert(out, s)
+	end
+	return out
+end
+
+local function stripLuau(name: string): string
+	return (string.gsub(name, "%.luau$", ""))
+end
+
+local function isInitLeaf(noExt: string): boolean
+	return noExt == "init" or noExt == "init.server" or noExt == "init.client"
+end
+
+-- A file Roblox runs on its own. `init.server`/`init.client` collapse their folder into a
+-- Script/LocalScript; a `Foo.server.luau` is a Script wherever it sits.
+local function isEntryPoint(path: string): boolean
+	local leaf = segsOf(path)
+	local name = leaf[#leaf] or ""
+	return string.match(name, "%.server%.luau$") ~= nil
+		or string.match(name, "%.client%.luau$") ~= nil
+end
+
+-- Port of gate-require.luau:190. Inside an `init.luau`, `./` resolves against the init dir's PARENT.
+local function resolveRelativeRequire(sourceRel: string, req: string): string?
+	local dir = segsOf(sourceRel)
+	local fileLeaf = stripLuau(dir[#dir] or "")
+	table.remove(dir)
+	if isInitLeaf(fileLeaf) then
+		table.remove(dir)
+	end
+	local cur = table.clone(dir)
+	for _, part in segsOf(req) do
+		if part == "." then
+			-- same directory
+		elseif part == ".." then
+			if #cur > 0 then
+				table.remove(cur)
+			end
+		else
+			table.insert(cur, part)
+		end
+	end
+	if #cur == 0 then
+		return nil
+	end
+	return table.concat(cur, "/")
+end
+
+-- The dotted identifier segments of an instance-require expression: `Server.services.economy.Economy
+-- Service` -> {Server, services, economy, EconomyService}. Strings are already blanked on `masked`,
+-- so `WaitForChild(…)` contributes nothing.
+local function dottedSegments(expr: string): { string }
+	local out: { string } = {}
+	for id in string.gmatch(expr, "%.([%a_][%w_]*)") do
+		table.insert(out, id)
+	end
+	if #out == 0 then
+		local bare = string.match(expr, "([%a_][%w_]*)%s*$")
+		if bare ~= nil then
+			table.insert(out, bare)
+		end
+	end
+	return out
+end
+
+-- Which corpus files does this instance-require name? The LEAF must match the module's basename, and
+-- among the files that match, the ones matching the MOST trailing segments win — case-insensitively,
+-- because Rojo's DataModel names (`Server`, `Client`) are the capitalised form of the directory
+-- (`src/server`). That tie-break is load-bearing: every fork has BOTH `src/server/Context.luau` and
+-- `src/client/Context.luau`, and `require(Server.Context)` must reach exactly one of them.
+-- A remaining tie marks every tied candidate reachable — an over-approximation, stated here rather
+-- than hidden: to exploit it a dead file would have to be named exactly like a live required module
+-- AND sit at the same depth under a sibling directory.
+local function instanceRequireTargets(paths: { string }, expr: string): { string }
+	local segs = dottedSegments(expr)
+	if #segs == 0 then
+		return {}
+	end
+	local leaf = segs[#segs]
+	local best: { string } = {}
+	local bestScore = 0
+	for _, p in paths do
+		local fseg = segsOf(p)
+		fseg[#fseg] = stripLuau(fseg[#fseg])
+		if isInitLeaf(fseg[#fseg]) then
+			table.remove(fseg)
+		end
+		if #fseg > 0 and string.lower(fseg[#fseg]) == string.lower(leaf) then
+			local score = 0
+			local i, j = #fseg, #segs
+			while i >= 1 and j >= 1 and string.lower(fseg[i]) == string.lower(segs[j]) do
+				score += 1
+				i -= 1
+				j -= 1
+			end
+			if score > bestScore then
+				best = { p }
+				bestScore = score
+			elseif score == bestScore then
+				table.insert(best, p)
+			end
+		end
+	end
+	return best
+end
+
+-- Every file this one requires, resolved against the corpus's own path set.
+local function requireTargetsOf(
+	fv: FileView,
+	paths: { string },
+	pathSet: { [string]: boolean }
+): { string }
+	local out: { string } = {}
+	local seen: { [string]: boolean } = {}
+	local function add(p: string)
+		if not seen[p] then
+			seen[p] = true
+			table.insert(out, p)
+		end
+	end
+	local n = #fv.masked
+	local p = 1
+	while true do
+		local rs, re = string.find(fv.masked, "require", p, true)
+		if rs == nil or re == nil then
+			break
+		end
+		p = (re :: number) + 1
+		local before = if (rs :: number) > 1
+			then string.sub(fv.masked, (rs :: number) - 1, (rs :: number) - 1)
+			else " "
+		local after = string.sub(fv.masked, (re :: number) + 1, (re :: number) + 1)
+		if string.match(before, "[%w_]") ~= nil or string.match(after, "[%w_]") ~= nil then
+			continue -- `myrequire` / `requireFoo`, not the builtin
+		end
+		local q = (re :: number) + 1
+		while q <= n and string.match(string.sub(fv.masked, q, q), "%s") ~= nil do
+			q += 1
+		end
+		if string.sub(fv.masked, q, q) ~= "(" then
+			continue -- paren-less `require "…"` is not used in this factory; not resolving it can
+			-- only LOSE an edge, which fails closed (a file looks unreachable, so it cannot certify).
+		end
+		local ps, pe = string.find(fv.masked, "%b()", q)
+		if ps == nil or pe == nil then
+			continue
+		end
+		p = (pe :: number) + 1
+		-- Offsets are preserved by the masker, so the SAME span of `code` carries the literal.
+		local innerRaw = string.sub(fv.code, (ps :: number) + 1, (pe :: number) - 1)
+		local literal = string.match(innerRaw, '^%s*"(.-)"%s*$')
+			or string.match(innerRaw, "^%s*'(.-)'%s*$")
+		if literal ~= nil then
+			if string.sub(literal, 1, 1) == "." then
+				local target = resolveRelativeRequire(fv.path, literal)
+				if target ~= nil then
+					for _, cand in
+						{
+							target .. ".luau",
+							target .. "/init.luau",
+							target .. "/init.server.luau",
+							target .. "/init.client.luau",
+						}
+					do
+						if pathSet[cand] then
+							add(cand)
+						end
+					end
+				end
+			end
+			-- `@lune/…` and other non-relative strings reach nothing in this corpus.
+		else
+			for _, cand in
+				instanceRequireTargets(
+					paths,
+					string.sub(fv.masked, (ps :: number) + 1, (pe :: number) - 1)
+				)
+			do
+				add(cand)
+			end
+		end
+	end
+	return out
+end
+
+-- The transitive closure from the entry points. Files with no entry point in the corpus reach
+-- nothing — which is the honest answer for a fixture tree that contains no bootstrap, and the reason
+-- the spec's seam corpus grew one.
+local function reachableFiles(views: { FileView }): { [string]: boolean }
+	local paths: { string } = {}
+	local pathSet: { [string]: boolean } = {}
+	local byPath: { [string]: FileView } = {}
+	for _, fv in views do
+		table.insert(paths, fv.path)
+		pathSet[fv.path] = true
+		byPath[fv.path] = fv
+	end
+	local reached: { [string]: boolean } = {}
+	local queue: { string } = {}
+	for _, fv in views do
+		if isEntryPoint(fv.path) then
+			reached[fv.path] = true
+			table.insert(queue, fv.path)
+		end
+	end
+	local head = 1
+	while head <= #queue do
+		local cur = queue[head]
+		head += 1
+		local fv = byPath[cur]
+		if fv ~= nil then
+			for _, target in requireTargetsOf(fv, paths, pathSet) do
+				if not reached[target] then
+					reached[target] = true
+					table.insert(queue, target)
+				end
+			end
+		end
+	end
+	return reached
+end
+
 -- ── public: readByAnotherFile ─────────────────────────────────────────────────
 -- The engine of the whole gate: "written here, read SOMEWHERE ELSE". Takes the Corpus so the pure
 -- rules and the filesystem path share one implementation.
@@ -1332,6 +1585,787 @@ function M.classify(corpus: Corpus, allow: Allowlist, nowUnix: number): Decision
 			return string.find(fv.masked, "currencies%." .. esc(key) .. "%f[^%w_]") ~= nil
 		end
 
+		-- ── SHAPE (4): THE SEAM-MEDIATED SPEND (added 2026-08-05) ─────────────
+		--
+		-- ‼ WHAT SHAPE (4) PROVES, AND WHAT IT DOES NOT. Read this before trusting a green here, and
+		-- before "improving" the clauses below.
+		--   PROVES:      a REACHABLE file contains a call to a seam method whose own body debits the
+		--                persisted balance map, and THIS currency is bound to THAT call.
+		--   DOES NOT:    that the debit actually runs, or that the seam genuinely lowers a balance at
+		--                RUNTIME. Those are dataflow questions and this is a regex gate.
+		--
+		-- This boundary was established by two rounds of adversarial attack, not assumed. Round 1 found
+		-- 6 laundering routes; all 6 were closed (see A1/A3/A4a/A4b/A8a below). Round 2 then found 8
+		-- MORE against the hardened rule, and three of them are worse than the Prisms defect this rule
+		-- exists to catch, because the game LOOKS like it has a sink:
+		--   N3  the subtraction is at the right depth but its value is overwritten before the write
+		--       (`balance = before - amount` then `balance = math.max(before, 0)`) -> every purchase FREE
+		--   N4  negation instead of subtraction (`local delta = -amount; balance = before - delta`)
+		--       -> `spend` MINTS, and `-` is a token to this rule, never a direction
+		--   N6  the debit writes into `table.clone(...)` that is never stored back -> nothing persists
+		--   N2  a dead CALL SITE inside a live registered file — A3 gates dead FILES, nothing gates
+		--       dead FUNCTIONS
+		-- Each round of pattern-hardening closed holes and opened new ones, which is the signature of
+		-- the wrong tool: proving "this code genuinely debits persisted state" is dataflow analysis.
+		--
+		-- SO THE GUARANTEE IS SPLIT, DELIBERATELY, AND THE OTHER HALF IS ALREADY LOAD-BEARING:
+		--   this rule       -> "a reachable spend site names this currency"   (static, cheap, here)
+		--   the Tier-1 spec -> "the seam genuinely lowers the persisted balance" (behavioural, tests/)
+		-- MEASURED, not hoped for: applying N4 to games/deep-reach reds 20 Lune tests while this rule
+		-- stays green; applying N6 reds 19. Both name the debit directly
+		-- ("spend > debits the balance and leaves lifetimeCredits alone: expected: 700 === 300").
+		-- So a game can pass this rule and fail its economy — and it will be caught, one rung over.
+		--
+		-- THE CONSEQUENCE FOR ANYONE MAINTAINING THIS: do NOT delete an economy spec's balance-delta
+		-- assertions on the grounds that "the reachability gate covers the sink". It does not. And do
+		-- NOT try to close N3/N4/N6 with more patterns here — that path was tried twice and measured.
+		-- If this must become airtight, the right move is a required behavioural assertion (the seam's
+		-- own spec proving a debit lowers a persisted balance), enforced as its own rule, not a
+		-- cleverer regex.
+		--
+		-- WHY A FOURTH SHAPE. Shapes (1)-(3) all require THE SPEND SITE ITSELF to write the balance
+		-- map. games/deep-reach's engineering contract FORBIDS exactly that: its CLAUDE.md §4 and its
+		-- contract pass route EVERY debit through `ctx.economy:spend(data, currency, cost, sink)`, and
+		-- EconomyService writes the balance through a LOCAL ALIAS —
+		-- `local map = currencies.value; map[currency] = before - amount` — which matches none of the
+		-- three shapes. R4 was therefore UNSATISFIABLE BY CORRECTLY-ARCHITECTED CODE in this factory:
+		-- StructuresShopService.luau genuinely spends both Credits and Pearls (proven end-to-end — a
+		-- Credits buy moved 100000 -> 99950, a Pearls buy moved 50 -> 49, 7 currency_spent events) and
+		-- R4 still reported both currencies un-sunk. Two independent feature agents hit this and BOTH
+		-- refused to hand-roll a direct `data.currencies[k] = balance - cost` write purely to satisfy
+		-- the regex, because that write IS the §4 violation this rule exists to protect. They were
+		-- right; the rule was wrong. A gate satisfiable only by breaking the architecture teaches
+		-- authors to break the architecture — the header's "a false alarm gets a gate switched off",
+		-- one level up.
+		--
+		-- THE BINDING THIS SHAPE KEEPS. R4 was REBUILT after a falsification run restored the Prisms
+		-- defect verbatim and the first version reported 0 FAIL: "does this file name the currency" and
+		-- "does this file spend" were evaluated INDEPENDENTLY, so a shop that spent Stardust certified
+		-- Prisms from a read-only balance echo 200 lines away. Shape (4) binds three things at once, and
+		-- every one of them is load-bearing:
+		--   (a) THE CALL. A reference-shaped `[.:]<method>(…)` on MASKED source — never a substring of
+		--       raw source (header, vacuity trap) — whose RECEIVER is attributable to the seam that
+		--       DEFINES that method: the seam's ident, a name assigned directly from it anywhere in the
+		--       tree (`local economy = EconomyService.new(analytics)`, then `economy = economy` in the
+		--       context literal — which is how this factory installs it), or a one-hop local alias of
+		--       either in the calling file (`local economy = ctx.economy`). An UNRESOLVED receiver does
+		--       NOT certify. R1 lets an unresolvable receiver SUPPRESS a failure because there the risk
+		--       is a false alarm; here an unresolvable receiver would MANUFACTURE a sink, so this half
+		--       fails CLOSED. The two directions are deliberately opposite.
+		--   (b) THE CURRENCY, BOUND TO THAT CALL — not merely present in the file, and not merely
+		--       present in the call. The key must arrive in THE CURRENCY ARGUMENT POSITION, which is
+		--       read off the seam method's own signature (holes A4a/A4b below). Either that argument
+		--       IS the string literal `"<Key>"`, or — when it is dynamic
+		--       (`economy:spend(data, entry.currency, cost, …)`) — the expression must resolve to a
+		--       TABLE LITERAL in the calling file that declares `<field> = "<Key>"`. A call that names
+		--       its currency literally binds ONLY that currency, so a file that literally spends
+		--       Credits can never certify a Pearls declaration sitting elsewhere in it. Deleting the
+		--       last Pearls-denominated catalog row — which IS the Prisms defect, and is the
+		--       falsification recorded for this shape — removes the sink.
+		--   (c) THE ANTI-LAUNDERING CLAUSE (`isDebitBody`): THE SEAM MUST ITSELF SUBTRACT FROM A
+		--       BALANCE. Without it, "define a function named `spend` that adds" would certify every
+		--       currency in the game. So the method name carries NO authority here — the set of
+		--       spendable seam methods is discovered BY IMPLEMENTATION. A `(ident, method)` pair counts
+		--       only when, INSIDE ITS OWN BODY, a table that is the persisted balance map (`currencies`,
+		--       or a local aliased from it in that body) is written with a value that traces to a
+		--       SUBTRACTION: `-=`, a same-statement `-`, or one hop back to a local assigned in that
+		--       body from a subtraction. `spend` earns its place by debiting; `earn` (`local balance =
+		--       before + amount`) never enters the set. The scan is scoped to THE FUNCTION BODY on
+		--       purpose: a whole-module scan would let a service's `earn` launder its `spend`, which is
+		--       the same "a whole-file scan cannot tell a charge from a label" hole that forced the
+		--       subtraction-to-write binding above.
+		--
+		-- Body bounds are taken CONSERVATIVELY — from the definition to the next column-0 `function`,
+		-- `local` or `return` — never by scanning for a closing `end`. R5's header records what the
+		-- `.-\nend` parse cost: any nested block silently TRUNCATES the body, and a truncated body here
+		-- would drop the debit and report a live sink as dangling. Over-inclusion can only reach blanked
+		-- comments and blank lines between two top-level statements; truncation loses real code.
+		--
+		-- ── SECOND HARDENING PASS (2026-08-05): FIVE HOLES AN ADVERSARY WALKED THROUGH ────────
+		-- An INDEPENDENT adversary ran twelve laundering attacks at the shape above and got SIX past
+		-- it. Five are closed, each at the clause that let it through, each with its attack rerun
+		-- against the REAL games/deep-reach tree and a fixture added to gate_reachability_spec.luau:
+		--   A1  a scratch table called `currencies` in a read-only PREVIEW enrolled as a debit body
+		--       -> a token must trace to the function's own blob PARAMETER  (see `seedsBalanceMap`)
+		--   A4a the key bound from ANY argument, so a SINK LABEL certified a currency nobody spends
+		--       -> the currency argument POSITION comes from the seam's signature  (see `currencyArg`)
+		--   A4b a whole-file `currency = "<Key>"` regex, satisfied by a UI legend or a config stub
+		--       -> the declaration must live in the table the dynamic expression indexes
+		--         (see `dynamicArgBinds`)
+		--   A8a the seam's subtraction moved into a branch that never runs, and still certified
+		--       -> the subtraction must sit at the write's own block depth  (see `depthProfile`)
+		--   A3  a brand-new service NOTHING requires certified a currency off a spend that never runs
+		--       -> the certifying file must be REACHABLE from an entry point  (see `reachableFiles`)
+		--
+		-- A3's fix is applied to ALL FOUR SHAPES, not just this one: a dead file that hand-writes
+		-- `currencies.Pearls -= cost` is the same lie as a dead file that calls a seam, and gating only
+		-- the shape the adversary happened to attack would leave the identical hole one shape over.
+		-- Measured on every tree in this repo before it was kept: collect-sim (direct-write shape),
+		-- deep-reach (seam shape) and core (below maturity) are byte-identical with it in place.
+		--
+		-- WHAT IS STILL OPEN, stated rather than discovered later. Both fail toward CERTIFYING, which
+		-- is the direction that costs a green, so they are named here on purpose:
+		--   * SHADOWING. Tokens are matched by NAME, not by scope. A function that legitimately aliases
+		--     the balance map and then SHADOWS that name with a scratch table (`local currencies =
+		--     currenciesOf(data)` … later `local currencies = {}`) still certifies. Closing it needs
+		--     scope tracking — a real parse, not a text walk. The A1 fix covers the shape the adversary
+		--     used (a preview with no legitimate alias at all); this narrower one survives.
+		--   * BACKTICK STRINGS. `M.mask` blanks `"` and `'` literals only; Luau's interpolated
+		--     `` `structure.{key}` `` is left intact, so a COMMA inside one would shift the argument
+		--     split and bind the wrong position. In practice that lands on a non-literal argument and
+		--     fails closed, but it is not proven to, and the masker is shared with the other seven
+		--     rules — widening it belongs in its own change, with its own falsification.
+		local BODY_STOPS = { "\nfunction%f[^%w_]", "\nlocal%f[^%w_]", "\nreturn%f[^%w_]" }
+
+		-- Which files the running game actually reaches (see the REACHABILITY block at the top of this
+		-- file). Computed ONCE, and read only as a REFUSAL: a file that cannot be shown to run is not
+		-- evidence that anything is spent.
+		local reachable = reachableFiles(views)
+
+		local function trimText(s: string): string
+			return (string.match(s, "^%s*(.-)%s*$")) :: string
+		end
+
+		-- Strip wrapping parens and `:: any` casts, so `(currencies :: any)` and `currencies` are the
+		-- same expression to every binder below.
+		local function bareExpr(text: string): string
+			local t = trimText(text)
+			for _ = 1, 4 do
+				local stripped = string.match(t, "^(.-)%s*::%s*[%w_%.%s<>{}%[%]|%?]+$")
+				if stripped ~= nil and stripped ~= "" then
+					t = trimText(stripped)
+				end
+				local inner = string.match(t, "^%b()$")
+				if inner ~= nil then
+					t = trimText(string.sub(t, 2, #t - 1))
+				else
+					break
+				end
+			end
+			return t
+		end
+
+		-- Split a parenthesised span's INTERIOR on depth-0 commas, returning offsets. Runs on MASKED
+		-- text, where string CONTENT is blanked, so a comma inside a string literal cannot split an
+		-- argument — and because the masker preserves offsets, the same offsets read the literals back
+		-- out of `code`.
+		local function splitTopLevel(masked: string, a: number, b: number): { Span }
+			local out: { Span } = {}
+			if b < a then
+				return out
+			end
+			local depth = 0
+			local start = a
+			for i = a, b do
+				local c = string.sub(masked, i, i)
+				if c == "(" or c == "{" or c == "[" then
+					depth += 1
+				elseif c == ")" or c == "}" or c == "]" then
+					depth -= 1
+				elseif c == "," and depth == 0 then
+					table.insert(out, { a = start, b = i - 1 })
+					start = i + 1
+				end
+			end
+			table.insert(out, { a = start, b = b })
+			return out
+		end
+
+		-- HOLE A1 (2026-08-05): A SCRATCH TABLE IS NOT THE BALANCE MAP.
+		-- This seeded its token list with the BARE NAME `currencies`, unconditionally — so a READ-ONLY
+		-- affordability preview containing `local currencies = {}` … `currencies[k] = before - cost`
+		-- enrolled as a debit body and certified a currency that nothing in the game spends. The name
+		-- of a local proves nothing; an attacker picks it.
+		--
+		-- A token now has to TRACE TO THE FUNCTION'S OWN BLOB PARAMETER. A seed is a local whose
+		-- right-hand side is either `<param>.currencies` (the direct form) or a call to a helper whose
+		-- NAME names the map and whose arguments name the blob (`currenciesOf(data)` — the shape the
+		-- real EconomyService uses, because it normalises a missing map into a Result first). Each
+		-- parameter also contributes the pseudo-token `<param>.currencies`, so a seam that writes the
+		-- blob's map without aliasing it still counts. Alias hops off those seeds are unchanged: the
+		-- seam is REQUIRED to write through one (`local map = (currencies :: any).value`).
+		-- `local currencies = {}` names no parameter, so it seeds nothing — and a preview that assigns
+		-- into a table it just created certifies nothing.
+		local function seedsBalanceMap(rhs: string, params: { string }): boolean
+			local t = bareExpr(rhs)
+			for _, p in params do
+				if
+					t == p .. ".currencies"
+					or t == p .. '["currencies"]'
+					or t == p .. "['currencies']"
+				then
+					return true
+				end
+				local name, args = string.match(t, "^([%w_%.:]+)%s*(%b())$")
+				if
+					name ~= nil
+					and args ~= nil
+					and string.find(string.lower(name), "currencies", 1, true) ~= nil
+					and namesToken(args, p)
+				then
+					return true
+				end
+			end
+			return false
+		end
+
+		-- Names that denote the persisted balance map inside ONE function body, each traced to a
+		-- parameter of THAT function (see HOLE A1 above), then extended by alias hops.
+		local function balanceMapTokens(body: string, params: { string }): { string }
+			local tokens: { string } = {}
+			for _, p in params do
+				table.insert(tokens, p .. ".currencies")
+			end
+			type LocalDecl = { ident: string, rhs: string }
+			local decls: { LocalDecl } = {}
+			for ident, rhs in string.gmatch(body, "local%s+([%w_]+)%s*=([^=%c][^%c]*)") do
+				table.insert(decls, { ident = ident, rhs = rhs })
+				if seedsBalanceMap(rhs, params) then
+					table.insert(tokens, ident)
+				end
+			end
+			for _ = 1, 3 do
+				local grew = false
+				for _, d in decls do
+					local known = false
+					for _, t in tokens do
+						if t == d.ident then
+							known = true
+							break
+						end
+					end
+					if not known then
+						for _, t in tokens do
+							if namesToken(d.rhs, t) then
+								table.insert(tokens, d.ident)
+								grew = true
+								break
+							end
+						end
+					end
+				end
+				if not grew then
+					break
+				end
+			end
+			return tokens
+		end
+
+		-- HOLE A8a (2026-08-05): THE SEAM'S SUBTRACTION CAN BE DEAD.
+		-- The one-hop-back search below scanned the body TEXTUALLY, so rewriting EconomyService.spend's
+		-- debit to `local balance = before` plus `if amount < 0 then balance = before - amount end`
+		-- still certified both currencies: the write stores `balance`, and the hop cheerfully found the
+		-- assignment inside the dead branch. That reopens ONE LEVEL UP the exact hole the whole
+		-- "bind the subtraction to the write" paragraph above was written to close — a whole-file scan
+		-- cannot tell a charge from a label, and a whole-BODY scan cannot tell a charge from a branch
+		-- that never runs.
+		--
+		-- A full reachability analysis of a Luau function is out of scope for a static text gate, so
+		-- the rule is CONSERVATIVE instead: the subtraction that feeds the stored value must sit at the
+		-- SAME BLOCK DEPTH as the write, BEFORE it, with the depth never dipping below that in between
+		-- (which is what "and in the same block" means when all you have is a depth profile). A
+		-- subtraction found only inside a nested block does NOT establish a debit. That fails closed —
+		-- a conditional debit reads as no debit, which costs an investigation, never a silent green —
+		-- and it keeps the real EconomyService certified, whose `local balance = before - amount` and
+		-- `map[currency] = balance` are consecutive statements at the same level.
+		--
+		-- DEPTH is counted on statement keywords. `if` opens a block ONLY when it is not preceded by
+		-- `=`, `(`, `,`, `{`, `return`, `and`, `or` or `not` — that is Luau's `if … then … else`
+		-- EXPRESSION (`local existing = if type(data.stats) == "table" then … else nil`, three lines
+		-- from the real spend), which has no `end` and would otherwise open a block that never closes.
+		local BLOCK_OPEN_WORDS = { ["function"] = true, ["repeat"] = true }
+		local EXPR_IF_PREV_WORDS =
+			{ ["return"] = true, ["and"] = true, ["or"] = true, ["not"] = true, ["elseif"] = true }
+
+		local function ifOpensBlock(body: string, at: number): boolean
+			local i = at - 1
+			while i >= 1 and string.match(string.sub(body, i, i), "%s") ~= nil do
+				i -= 1
+			end
+			if i < 1 then
+				return true
+			end
+			local c = string.sub(body, i, i)
+			if c == "=" or c == "(" or c == "," or c == "{" or c == "[" then
+				return false
+			end
+			local word = string.match(string.sub(body, math.max(1, i - 9), i), "([%a_][%w_]*)$")
+			if word ~= nil and EXPR_IF_PREV_WORDS[word] then
+				return false
+			end
+			return true
+		end
+
+		-- Block depth at every character offset of `body`.
+		local function depthProfile(body: string): { number }
+			local prof: { number } = {}
+			local depth = 0
+			local expectDo = false
+			local cursor = 1
+			local p = 1
+			local function fill(upto: number, d: number)
+				local stop = math.min(upto, #body)
+				for i = cursor, stop do
+					prof[i] = d
+				end
+				if stop + 1 > cursor then
+					cursor = stop + 1
+				end
+			end
+			while true do
+				local ws, we, word = string.find(body, "([%a_][%w_]*)", p)
+				if ws == nil or we == nil then
+					break
+				end
+				p = (we :: number) + 1
+				if word == "end" or word == "until" then
+					depth = math.max(0, depth - 1)
+					fill(we :: number, depth)
+				else
+					fill(we :: number, depth)
+					if BLOCK_OPEN_WORDS[word :: string] then
+						depth += 1
+					elseif word == "for" or word == "while" then
+						depth += 1
+						expectDo = true
+					elseif word == "do" then
+						if expectDo then
+							expectDo = false
+						else
+							depth += 1
+						end
+					elseif word == "if" and ifOpensBlock(body, ws :: number) then
+						depth += 1
+					end
+				end
+			end
+			fill(#body, depth)
+			return prof
+		end
+
+		local function depthAt(prof: { number }, pos: number): number
+			return prof[pos] or 0
+		end
+
+		-- One hop back, WITHIN THIS BODY and WITHIN THIS BLOCK. Same follow-the-stored-value logic as
+		-- identFromSubtraction, but never leaving the function — that scoping is the anti-laundering
+		-- clause's teeth — and never entering a nested block (HOLE A8a).
+		local function bodyIdentFromSubtraction(
+			body: string,
+			prof: { number },
+			ident: string,
+			writeAt: number,
+			writeDepth: number
+		): boolean
+			local pat = "%f[%w_]" .. esc(ident) .. "%s*=[^=%c][^%c]*"
+			local from = 1
+			while true do
+				local s, e = string.find(body, pat, from)
+				if s == nil or e == nil then
+					return false
+				end
+				from = (e :: number) + 1
+				if
+					string.find(string.sub(body, s :: number, e :: number), "%-") ~= nil
+					and (s :: number) < writeAt
+					and depthAt(prof, s :: number) == writeDepth
+				then
+					local sameBlock = true
+					for i = e :: number, writeAt do
+						if depthAt(prof, i) < writeDepth then
+							sameBlock = false
+							break
+						end
+					end
+					if sameBlock then
+						return true
+					end
+				end
+			end
+		end
+
+		-- (c) Does THIS body actually lower a balance?
+		local function isDebitBody(body: string, params: { string }): boolean
+			local prof = depthProfile(body)
+			for _, token in balanceMapTokens(body, params) do
+				local t = esc(token)
+				for _, target in { t .. "%b[]", t .. "%.[%w_]+" } do
+					if string.find(body, target .. "[ \t]*%-=") ~= nil then
+						return true
+					end
+					local from = 1
+					while true do
+						local s, e = string.find(body, target .. "[ \t]*=", from)
+						if s == nil or e == nil then
+							break
+						end
+						-- `==` is a comparison, not a write.
+						if string.sub(body, (e :: number) + 1, (e :: number) + 1) ~= "=" then
+							local lineEnd = string.find(body, string.char(10), e :: number, true)
+								or (#body + 1)
+							local rhs = string.sub(body, (e :: number) + 1, lineEnd - 1)
+							if string.find(rhs, "%-") ~= nil then
+								-- The subtraction IS the write: one statement, one block, no branch.
+								return true
+							end
+							local ident = string.match(rhs, "^%s*([%w_]+)%s*$")
+							if
+								ident ~= nil
+								and bodyIdentFromSubtraction(
+									body,
+									prof,
+									ident,
+									s :: number,
+									depthAt(prof, s :: number)
+								)
+							then
+								return true
+							end
+						end
+						from = (e :: number) + 1
+					end
+				end
+			end
+			return false
+		end
+
+		-- Every `(ident, method)` in the tree whose body debits, plus the tokens a call site may name it
+		-- by. Computed ONCE, not per currency.
+		-- HOLE A4a (2026-08-05): THE CURRENCY MUST BIND FROM THE CURRENCY ARGUMENT POSITION.
+		-- `seamSpend` used to take the whole parenthesised span and ask only whether the quoted key
+		-- appeared ANYWHERE in it, so `economy:spend(data, "Credits", cost, "structure.pearls.discount")`
+		-- certified PEARLS off a SINK LABEL. That is the Prisms defect in seam clothing — spend A, name
+		-- B — and it is the one this shape was built to make impossible.
+		--
+		-- The position is read off the SEAM METHOD'S OWN SIGNATURE: the parameter whose name names a
+		-- currency. Never a hardcoded index — `spend(data, currency, amount, sink)` is this factory's
+		-- shape, not a law, and an index frozen here would silently bind the wrong argument the first
+		-- time a game orders its parameters differently. EXACTLY ONE such parameter must be found: zero
+		-- (no currency parameter at all) or two (ambiguous) means the position CANNOT BE DETERMINED,
+		-- and this seam then certifies nothing, ever. A `:` call site drops one for the implicit
+		-- `self`; a `.` call site does not.
+		type DebitSeam = {
+			ident: string,
+			method: string,
+			path: string,
+			tokens: { string },
+			currencyArg: number?,
+		}
+		local debitSeams: { DebitSeam } = {}
+		for _, fv in views do
+			local from = 1
+			while true do
+				local s, e, ident, method =
+					string.find(fv.code, "function%s+([%w_]+)[%.:]([%w_]+)%s*%(", from)
+				if s == nil or e == nil then
+					break
+				end
+				from = (e :: number) + 1
+				-- `e` is the `(` of the parameter list; the body starts after its match.
+				local ps, pe = string.find(fv.masked, "%b()", e :: number)
+				if ps == e and pe ~= nil then
+					local params: { string } = {}
+					local currencyArg: number? = nil
+					local ambiguous = false
+					local frags = splitTopLevel(fv.masked, (ps :: number) + 1, (pe :: number) - 1)
+					for i, frag in frags do
+						local name =
+							string.match(string.sub(fv.masked, frag.a, frag.b), "^%s*([%w_]+)")
+						table.insert(params, name or "")
+						if
+							name ~= nil
+							and string.find(string.lower(name), "currency", 1, true) ~= nil
+						then
+							if currencyArg ~= nil then
+								ambiguous = true
+							end
+							currencyArg = i
+						end
+					end
+					local stop = #fv.code
+					for _, pat in BODY_STOPS do
+						local bs = string.find(fv.code, pat, (pe :: number) + 1)
+						if bs ~= nil and bs < stop then
+							stop = bs
+						end
+					end
+					if isDebitBody(string.sub(fv.code, (pe :: number) + 1, stop), params) then
+						table.insert(debitSeams, {
+							ident = ident :: string,
+							method = method :: string,
+							path = fv.path,
+							tokens = {},
+							currencyArg = if ambiguous then nil else currencyArg,
+						})
+					end
+				end
+			end
+		end
+		-- Attribution tokens. Only a DIRECT reference counts as an install (`= EconomyService`,
+		-- `= EconomyService.new(…)`, `= require(….EconomyService)`) — `setmetatable({}, EconomyService)`
+		-- must NOT make `self` a token for every service in the game. Dunder/underscore names are
+		-- skipped for the same reason (`EconomyService.__index = EconomyService`).
+		for _, seam in debitSeams do
+			local tokens: { string } = { seam.ident }
+			for _ = 1, 2 do
+				for _, fv in views do
+					for name, rhs in string.gmatch(fv.masked, "([%w_]+)%s*=([^=%c][^%c]*)") do
+						if string.sub(name, 1, 1) ~= "_" then
+							local trimmed = string.match(rhs, "^%s*(.-)%s*$") or ""
+							local known = false
+							for _, t in tokens do
+								if t == name then
+									known = true
+									break
+								end
+							end
+							if not known then
+								for _, t in tokens do
+									local direct = string.find(trimmed, "^" .. esc(t) .. "%f[^%w_]")
+										~= nil
+									local required = string.sub(trimmed, 1, 8) == "require("
+										and namesToken(trimmed, t)
+									if direct or required then
+										table.insert(tokens, name)
+										break
+									end
+								end
+							end
+						end
+					end
+				end
+			end
+			seam.tokens = tokens
+		end
+
+		-- Definition separators for ANY owner of `method`, so a `function X.spend(` header is never
+		-- mistaken for a call site. Same exact-offset trick as definitionSeparators.
+		local function anyDefinitionSeparators(fv: FileView, method: string): { [number]: boolean }
+			local out: { [number]: boolean } = {}
+			local e = esc(method)
+			for _, sep in { "%.", ":" } do
+				local from = 1
+				while true do
+					local ds, de = string.find(
+						fv.masked,
+						"function%s+[%w_]+%s*" .. sep .. e .. "%f[^%w_]",
+						from
+					)
+					if ds == nil or de == nil then
+						break
+					end
+					out[(de :: number) - #method] = true
+					from = (de :: number) + 1
+				end
+			end
+			return out
+		end
+
+		-- An argument that is EXACTLY one string literal, else nil (it is dynamic).
+		local function literalArg(text: string): string?
+			local t = trimText(text)
+			return string.match(t, '^"([^"]*)"$') or string.match(t, "^'([^']*)'$")
+		end
+
+		-- Every table literal assigned to `ident` in this file, as offset spans of `code`. The
+		-- occurrence has to be a DECLARATION or a plain assignment, and the test is deliberately
+		-- narrow on BOTH sides: `local` (or the start of a line) immediately before the name, and
+		-- between the name and its `=` nothing but whitespace or a SINGLE-LINE type annotation. It is
+		-- the same "find the assignment `=` first, then the literal" parse R3 uses for
+		-- `local CATALOG: { [string]: CatalogEntry } = { … }`.
+		--
+		-- THE NARROWING IS NOT COSMETIC — it was falsified. A first version accepted any `: …` between
+		-- the name and the next `=`, which let a PARAMETER ANNOTATION (`nextCostOf(entry: CatalogEntry,
+		-- …)`) reach forward past the end of its own statement and adopt some later `local X = { … }`
+		-- as `entry`'s table. Rerunning hole A4b against the real games/deep-reach tree caught it: a UI
+		-- legend appended at the bottom of StructuresShopService.luau certified Pearls again, through
+		-- the very clause written to stop it. A fixture corpus small enough to read by eye would never
+		-- have shown it.
+		local function tableLiteralSpans(fv: FileView, ident: string): { Span }
+			local out: { Span } = {}
+			local from = 1
+			local pat = "%f[%w_]" .. esc(ident) .. "%f[^%w_]"
+			while true do
+				local s, e = string.find(fv.code, pat, from)
+				if s == nil or e == nil then
+					break
+				end
+				from = (e :: number) + 1
+				local before =
+					string.sub(fv.code, math.max(1, (s :: number) - 10), (s :: number) - 1)
+				local declared = string.match(before, "%f[%w_]local[ \t]+$") ~= nil
+					or string.match(before, "[\r\n][ \t]*$") ~= nil
+				local eqAt = string.find(fv.code, "=", (e :: number) + 1, true)
+				if declared and eqAt ~= nil then
+					local between = string.sub(fv.code, (e :: number) + 1, (eqAt :: number) - 1)
+					if
+						string.match(between, "^[ \t]*$") ~= nil
+						or string.match(between, "^[ \t]*:[^=\r\n]*$") ~= nil
+					then
+						local braceAt = string.find(fv.code, "{", (eqAt :: number) + 1, true)
+						if
+							braceAt ~= nil
+							and string.match(
+									string.sub(
+										fv.code,
+										(eqAt :: number) + 1,
+										(braceAt :: number) - 1
+									),
+									"^%s*$"
+								)
+								~= nil
+						then
+							local a, b = string.find(fv.code, "%b{}", braceAt :: number)
+							if a ~= nil and b ~= nil then
+								table.insert(out, { a = a :: number, b = b :: number })
+							end
+						end
+					end
+				end
+			end
+			return out
+		end
+
+		-- `entry` <- `CATALOG[key]` <- the CATALOG literal: the idents a value could have come out of,
+		-- up to three hops. Only the HEAD identifier of each right-hand side is followed, so this walks
+		-- table origins and nothing else.
+		local function originIdents(fv: FileView, ident: string): { string }
+			local out: { string } = { ident }
+			local seen: { [string]: boolean } = { [ident] = true }
+			for _ = 1, 3 do
+				local grew = false
+				for _, name in table.clone(out) do
+					local rhs =
+						string.match(fv.code, "local%s+" .. esc(name) .. "%f[^%w_][^=%c]*=([^%c]*)")
+					if rhs ~= nil then
+						local head = string.match(bareExpr(rhs), "^([%w_]+)")
+						if head ~= nil and not seen[head] then
+							seen[head] = true
+							table.insert(out, head)
+							grew = true
+						end
+					end
+				end
+				if not grew then
+					break
+				end
+			end
+			return out
+		end
+
+		-- HOLE A4b (2026-08-05): AN INERT DECLARATION MUST NOT CERTIFY.
+		-- When the call passes a DYNAMIC currency, shape (4)(b) used to fall back to `declaresCurrency`
+		-- — a WHOLE-FILE regex for `currency = "<Key>"`. A UI legend, a localisation table, a config
+		-- stub or a commented-out catalog row satisfied it, so a currency could be certified sunk by a
+		-- string that no purchase path ever reads. The declaration is now bound to THE DATA THAT
+		-- ACTUALLY REACHES THE CALL: the dynamic argument must be `<base>.<field>` (or
+		-- `<base>["<field>"]`), `<base>` must resolve to a TABLE LITERAL in this file, and THAT literal
+		-- must contain `<field> = "<Key>"`. `economy:spend(data, entry.currency, …)` with
+		-- `local entry = CATALOG[key]` therefore binds exactly the currencies the catalog is
+		-- denominated in — deleting the last Pearls row removes the sink, which is the Prisms defect
+		-- and the falsification recorded for this shape. An argument this walker cannot resolve to a
+		-- table binds NOTHING: fail closed.
+		local function dynamicArgBinds(fv: FileView, argText: string, key: string): boolean
+			local expr = bareExpr(argText)
+			for _ = 1, 3 do
+				local base, field = string.match(expr, "^([%w_]+)%s*%.%s*([%w_]+)$")
+				if base == nil then
+					base, field = string.match(expr, '^([%w_]+)%s*%[%s*"([%w_]+)"%s*%]$')
+				end
+				if base ~= nil and field ~= nil then
+					local f = esc(field :: string)
+					local k = esc(key)
+					for _, owner in originIdents(fv, base :: string) do
+						for _, span in tableLiteralSpans(fv, owner) do
+							local body = string.sub(fv.code, span.a, span.b)
+							if
+								string.find(body, f .. '%s*=%s*"' .. k .. '"') ~= nil
+								or string.find(body, '%["' .. f .. '"%]%s*=%s*"' .. k .. '"')
+									~= nil
+							then
+								return true
+							end
+						end
+					end
+					return false
+				end
+				-- a bare local (`local currency = entry.currency`): one hop and try again.
+				local bare = string.match(expr, "^([%w_]+)$")
+				if bare == nil then
+					return false
+				end
+				local rhs =
+					string.match(fv.code, "local%s+" .. esc(bare) .. "%f[^%w_][^=%c]*=([^%c]*)")
+				if rhs == nil then
+					return false
+				end
+				expr = bareExpr(rhs)
+			end
+			return false
+		end
+
+		local function seamSpend(fv: FileView, key: string): boolean
+			-- HOLE A3: a file the running game never reaches may not certify anything. Both halves of
+			-- the evidence have to be live — the CALL SITE and the SEAM that debits.
+			if not reachable[fv.path] then
+				return false
+			end
+			for _, seam in debitSeams do
+				-- `currencyArg == nil` is "the currency position could not be determined" (HOLE A4a);
+				-- such a seam certifies nothing rather than guessing.
+				if seam.currencyArg ~= nil and reachable[seam.path] then
+					local tokens = withAliases(fv, seam.tokens)
+					local defSeps = anyDefinitionSeparators(fv, seam.method)
+					local pat = "[%.:]" .. esc(seam.method) .. "%s*(%b())"
+					local from = 1
+					while true do
+						local s, e, span = string.find(fv.masked, pat, from)
+						if s == nil or e == nil or span == nil then
+							break
+						end
+						from = (e :: number) + 1
+						if not defSeps[s :: number] then
+							local recv = receiverTextBefore(fv.masked, s :: number)
+							local attributed = false
+							for _, t in tokens do
+								if namesToken(recv, t) then
+									attributed = true
+									break
+								end
+							end
+							if attributed then
+								local isColon = string.sub(fv.masked, s :: number, s :: number)
+									== ":"
+								local argIndex = (seam.currencyArg :: number)
+									- (if isColon then 1 else 0)
+								local innerA = (e :: number) - #(span :: string) + 2
+								local innerB = (e :: number) - 1
+								local args = splitTopLevel(fv.masked, innerA, innerB)
+								local arg = if argIndex >= 1 then args[argIndex] else nil
+								if arg ~= nil then
+									-- Offsets are preserved by the masker, so the SAME span of `code`
+									-- carries this argument's string literal.
+									local text = string.sub(fv.code, arg.a, arg.b)
+									local literal = literalArg(text)
+									if literal ~= nil then
+										-- A literal binds ONLY itself. A file that literally spends
+										-- Credits can never certify Pearls off a label elsewhere in the
+										-- same call — that was hole A4a.
+										if literal == key then
+											return true
+										end
+									elseif dynamicArgBinds(fv, text, key) then
+										return true
+									end
+								end
+							end
+						end
+					end
+				end
+			end
+			return false
+		end
+
 		for _, key in currencies do
 			local subject = string.format("Migrations.luau::currencies.%s", key)
 			local granted, sunk = false, false
@@ -1340,7 +2374,13 @@ function M.classify(corpus: Corpus, allow: Allowlist, nowUnix: number): Decision
 					or string.find(fv.path, "shared/Types.luau", 1, true) ~= nil
 				if not isContract and namesCurrency(fv, key) then
 					granted = true
-					if literalSpend(fv, key) or dynamicSpend(fv, key) then
+					-- REACHABILITY GATES EVERY SHAPE (hole A3). `granted` deliberately does NOT check
+					-- it: a currency named only by dead files is still seeded into the save file, and
+					-- "granted but no sink" is the more useful diagnosis than silence.
+					if
+						reachable[fv.path]
+						and (literalSpend(fv, key) or dynamicSpend(fv, key) or seamSpend(fv, key))
+					then
 						sunk = true
 					end
 				end
@@ -1364,9 +2404,26 @@ function M.classify(corpus: Corpus, allow: Allowlist, nowUnix: number): Decision
 					"src/shared/Migrations.luau",
 					0,
 					string.format(
-						"currency %q is GRANTED but has NO SINK — no file that names it also decrements a balance "
-							.. "against a cost/price. The player accumulates a number that buys nothing (the Prisms "
-							.. "defect: granted, persisted, displayed, decremented by nothing).",
+						"currency %q is GRANTED but has NO SINK — no REACHABLE file that names it also decrements "
+							.. "a balance against a cost/price. The player accumulates a number that buys nothing (the "
+							.. "Prisms defect: granted, persisted, displayed, decremented by nothing). A sink is a "
+							.. "`currencies.%s -=` / `currencies.%s = …-…` write, a dynamic "
+							.. "`currencies[expr] = …` write in a file declaring `currency = %q`, or a call to a "
+							.. "seam whose own body debits the balance map (`ctx.economy:spend(data, …)`) with "
+							.. "%q bound to THE CURRENCY ARGUMENT of that call — as a string literal there, or, when "
+							.. "that argument is dynamic (`entry.currency`), by the `currency = %q` declaration "
+							.. "inside the very table it indexes. FOUR THINGS EACH FAIL CLOSED HERE, so check them "
+							.. "before assuming the gate is wrong: the file must be reached from an entry point "
+							.. "(`init.server.luau` / `*.server.luau` and the require graph from it); the seam's own "
+							.. "body must lower a balance map traced to ITS OWN blob parameter; that subtraction must "
+							.. "sit at the same block depth as the write it feeds (a debit inside an `if` reads as no "
+							.. "debit); and the currency must arrive in the argument position the seam's signature "
+							.. "names — a sink label carrying the key binds nothing.",
+						key,
+						key,
+						key,
+						key,
+						key,
 						key
 					)
 				)
