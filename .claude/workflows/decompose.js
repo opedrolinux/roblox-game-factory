@@ -101,7 +101,7 @@ const PLAN_SCHEMA = {
       type: 'object',
       description: 'cross-cutting wiring the SERIAL contract pass owns beyond src/shared.',
       properties: {
-        sharedServices: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, serviceName: { type: 'string' }, purpose: { type: 'string' } }, required: ['name', 'serviceName', 'purpose'] } },
+        sharedServices: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, serviceName: { type: 'string' }, kind: { type: 'string', enum: ['service', 'client-framework', 'shared-module'] }, purpose: { type: 'string' } }, required: ['name', 'serviceName', 'purpose'] } },
         retrofits: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, change: { type: 'string' }, why: { type: 'string' } }, required: ['file', 'change', 'why'] } },
         emitPoints: { type: 'array', items: { type: 'object', properties: { event: { type: 'string' }, where: { type: 'string' }, owner: { type: 'string' } }, required: ['event', 'where', 'owner'] } },
         earnPaths: { type: 'array', items: { type: 'string' } },
@@ -137,8 +137,8 @@ contractDeltas — every src/shared change, written ONCE by the serial contract 
 - migrations[]: one per class-B feature (or owned by "contract-pass" for a cross-cutting field no single slice owns). toVersion MUST equal fromVersion+1, and the sequence must be contiguous starting at the current schema version, ordered by build order.
 
 contractPassExtras — the cross-cutting wiring the SERIAL pass performs BEYOND pure src/shared deltas, INCLUDING edits to already-built/merged service files (the human diff-reviews these, so the blast radius must be complete). A concern that must hook EVERY earn/spend path cannot be owned by a feature builder, because those points live in OTHER features:
-- sharedServices[]: INFRASTRUCTURE services the pass stands up (they own no spec feature; they provide a ctx seam every feature uses — e.g. the analytics emitter).
-- retrofits[]: {file: a path under the game's src/ that already exists, change: the exact minimal edit, why}. EVERY edit to already-built code goes here.
+- sharedServices[]: INFRASTRUCTURE modules the pass stands up (they own no spec feature; they provide a seam every feature uses — e.g. the analytics emitter, a single-writer economy helper). Set kind: "service" (default, a server service — serviceName must then be PascalCase ending in Service), "client-framework" (a client-side module every controller uses, e.g. a join-retry guard or a shared HUD root), or "shared-module".
+- retrofits[]: {file: a path inside the game that ALREADY EXISTS, change: the exact minimal edit, why}. EVERY edit the contract pass makes to code it did not write goes here — including inherited scaffold code (a test asserting the foundation game's currency, the shared test mocks) — because this list IS the blast radius the human diff-reviews.
 - emitPoints[]: the FULL analytics taxonomy — one entry per spec-mandated event, each mapped to {event, where it fires, owner: a feature name or "contract-pass"}. The validator checks the taxonomy is complete.
 - earnPaths[]: the EXHAUSTIVE list of paths that must increment any lifetime/aggregate EARN counter — and by omission, what must not (spend/reset paths).
 
@@ -178,7 +178,7 @@ You are at repo root. READ, IN FULL, BEFORE PLANNING:
 3. THE SHARED CONTRACTS you will propose deltas to (read every one — your contractDeltas must name the REAL surfaces; enumerate what each ACTUALLY contains today rather than assuming):
    - ${gameDir}/src/shared/Types.luau — PlayerData. CRITICAL design intent: it ships RESERVED SEAMS so features add logic, not schema. The OPEN seams are: \`currencies: { [string]: number }\` (a MAP — a new currency like Prisms is just a new KEY, NO migration), \`flags: { [string]: boolean }\` (per-player booleans — island-unlock flags, gamepass-effect flags ride here), \`receipts: { [string]: boolean }\` (idempotency ledger — monetization receipts ride here), \`analytics: { lastEventUnix }?\`, \`upgrades: { [string]: number }\`, and \`timestamps.lastSeenUnix\` (already written on save/release — the offline-earnings base). \`CURRENT_SCHEMA_VERSION\` is ${currentSchemaVersion}.
    - ${gameDir}/src/shared/Net.luau — read Net.Actions and list the keys that EXIST TODAY (a fresh scaffold has only \`Sample\`); every action a specSlice invokes that is not already there must appear in contractDeltas.netActions. Net.dispatch is the ONE inbound pipeline.
-   - ${gameDir}/src/shared/Result.luau — Result.Codes (existing: BadPayload, BadType, OutOfRange, Insufficient, OnCooldown, NotOwner, RateLimited, UnknownAction, NoData, Internal, Rejected, SessionLocked, LockStolen). REUSE these — only propose a new code if NONE fits.
+   - ${gameDir}/src/shared/Result.luau — READ the Result.Codes table and list what it ACTUALLY contains today; do not assume, and do not carry over a list from another game (the scaffold's set is deliberately smaller than a mature game's). REUSE an existing code wherever one fits; propose a new one only when NONE does, and name the ones you rejected.
    - ${gameDir}/src/shared/Migrations.luau — steps[] + default(). A class-B feature adds a step (i -> i+1) that MUST stamp the new version, and default() must seed the new field.
 4. ${gameDir}/CLAUDE.md — the engineering contract (server-authoritative, concurrency-safe economy, server clock, data-only-through-the-layer, idempotent purchases).
 
@@ -282,10 +282,25 @@ const earnPaths = extras.earnPaths || []
 for (const s of sharedServices) {
   if (!NAME_RE.test(s.name)) mechanicalErrors.push(`contractPassExtras infra service name "${s.name}" is not hyphen-free lowercase.`)
   if (nameCount[s.name] || builtSet.has(s.name)) mechanicalErrors.push(`contractPassExtras infra service "${s.name}" collides with a feature/built name — infra services must NOT be feature slices.`)
-  if (!SERVICE_RE.test(s.serviceName)) mechanicalErrors.push(`contractPassExtras infra serviceName "${s.serviceName}" is not PascalCase ending in Service.`)
+  // Not every cross-cutting module the contract pass stands up is a SERVER SERVICE. A client
+  // framework module (a join-retry guard, a shared HUD root) is exactly the kind of cross-cutting
+  // thing no feature builder can own, and forcing it to be named "<X>Service" would either misname
+  // it or push it out of the plan entirely. Only enforce the suffix on kind 'service' (the default).
+  const kind = s.kind || 'service'
+  if (kind === 'service' && !SERVICE_RE.test(s.serviceName)) {
+    mechanicalErrors.push(`contractPassExtras infra serviceName "${s.serviceName}" is not PascalCase ending in Service (set kind:"client-framework" or "shared-module" if it is not a server service).`)
+  }
+  if (!['service', 'client-framework', 'shared-module'].includes(kind)) {
+    mechanicalErrors.push(`contractPassExtras infra service "${s.name}" has unknown kind "${kind}" (expected service | client-framework | shared-module).`)
+  }
 }
 for (const r of retrofits) {
-  if (typeof r.file !== 'string' || r.file.indexOf(`${gameDir}/src/`) !== 0) mechanicalErrors.push(`contractPassExtras retrofit file "${r.file}" should be a path under ${gameDir}/src/ (an already-built file).`)
+  // Anywhere inside the GAME, not just src/. Retargeting an inherited test that asserts the
+  // FOUNDATION game's currency, or widening the shared mock context, is legitimate contract-pass
+  // work with real blast radius — the human review needs to see it, so it must not be rejected here.
+  if (typeof r.file !== 'string' || r.file.indexOf(`${gameDir}/`) !== 0) {
+    mechanicalErrors.push(`contractPassExtras retrofit file "${r.file}" should be a path under ${gameDir}/ (a file that already exists in this game).`)
+  }
 }
 const hasAggregateField = (plan.contractDeltas.typesFields || []).some((t) => /lifetime|cumulative|aggregate|total/i.test(`${t.field} ${t.why || ''}`))
 if (hasAggregateField && earnPaths.length === 0) mechanicalErrors.push('a lifetime/aggregate counter field is declared but contractPassExtras.earnPaths is empty — the earn paths that increment it are unspecified (the ships-broken gap).')

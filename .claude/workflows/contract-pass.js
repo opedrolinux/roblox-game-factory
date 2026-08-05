@@ -41,8 +41,8 @@ export const meta = {
   description: 'build-game Workflow A.2: the SERIAL guarded contract pass. Writes every shared-contract delta the approved decompose plan foresaw (Net.Actions, Types fields, Migrations steps + self-verifying round-trip tests, schema-version bump, nil-safe ctx seams), stands up the analytics emitter, retrofits any already-built services for cross-cutting accrual + analytics, and registers a stub per new feature — in serial gauntlet-green phases, then an independent verifier audits the whole diff vs the plan. Commits nothing; writes no feature logic.',
   phases: [
     { title: 'Schema', detail: 'Net.Actions, Types fields + PlayerView/toView, Migrations steps + default seeds, version bump, nil-safe ctx seams, + self-verifying migration round-trip tests' },
-    { title: 'Analytics', detail: 'stand up the analytics emitter on ctx.analytics + the session_start/session_end lifecycle' },
-    { title: 'Retrofits', detail: 'the named edits to already-built services (behavior-preserving when feature seams absent); skipped on a fresh scaffold' },
+    { title: 'Analytics', detail: 'stand up every cross-cutting infra module the plan names (the analytics emitter + any economy/framework helper) on its ctx seam' },
+    { title: 'Retrofits', detail: 'the named edits to code the contract pass inherits or already shipped (behavior-preserving when feature seams absent); skipped when the plan names none' },
     { title: 'Stubs', detail: 'a registered stub service per new feature + identity-default ctx seams' },
     { title: 'Verify', detail: 'an independent agent audits the whole contract-pass diff against the approved plan' },
   ],
@@ -213,24 +213,34 @@ if (aborted('schema', schema)) {
 }
 log(`contract-pass: schema green. version=${schema.currentSchemaVersion}; fields=[${(schema.fieldsAdded || []).join(', ')}]; actions=[${(schema.netActionsAdded || []).join(', ')}].`)
 
-// ============================ PHASE 2: ANALYTICS ============================
+// ============================ PHASE 2: INFRA (analytics + every other shared service) ============================
+// The plan's contractPassExtras.sharedServices are the cross-cutting concerns NO feature builder can
+// own, because the sites they hook live in OTHER features. Whatever the plan names gets stood up
+// here — an analytics emitter, a single-writer economy helper, a client-framework guard — not just
+// analytics. Building any of them per-feature would build them once per feature.
 phase('Analytics')
+const sharedServiceSpec = (contract.sharedServices || [])
+  .map((s, i) => `  ${i + 1}. ${s.name} (${s.serviceName})\n     PURPOSE: ${s.purpose}`)
+  .join('\n')
 const analytics = await agent(
-  `You are the CONTRACT-PASS ANALYTICS author for ${gameDir}. Stand up the SINGLE analytics emitter every feature emits through, so the taxonomy is built exactly once instead of once per feature.
+  `You are the CONTRACT-PASS INFRASTRUCTURE author for ${gameDir}. Stand up the shared, cross-cutting modules every feature will lean on — so each is built EXACTLY ONCE here, instead of once per feature during fan-out.
 
 ${GUARD}
 
-READ FIRST: ${gameDir}/src/server/services/sample/SampleService.luau (the service { name, Start(context) } pattern + context.net:register), ${gameDir}/src/server/Context.luau (ServerContext — ctx.analytics is the reserved seam to populate), ${gameDir}/src/server/init.server.luau (service registration + the player join/leave lifecycle), ${gameDir}/src/shared/Net.luau (ActionContext.analytics is already optional).
+READ FIRST: ${gameDir}/src/server/services/sample/SampleService.luau (the service { name, Start(context) } pattern + context.net:register), ${gameDir}/src/server/Context.luau (ServerContext — the reserved seams to populate), ${gameDir}/src/server/init.server.luau (service registration order + the player join/leave lifecycle), ${gameDir}/src/client/init.client.luau and ${gameDir}/src/client/framework/ (if a client-side module is in scope), ${gameDir}/src/shared/Net.luau (the ActionContext seams the schema phase just declared).
 
-WRITE per contract.analytics:
-- ${gameDir}/src/server/services/analytics/AnalyticsService.luau — a service { name = "<the serviceName in contract.analytics>", Start(context) } exposing the emit seam (${JSON.stringify(analyticsSpec.seam || 'ctx.analytics:emit(event, payload)')}) and populating ctx.analytics so ANY handler can call it. Fire the session lifecycle events the contract names (${JSON.stringify(analyticsSpec.lifecycle || ['session_start on join', 'session_end on leave/release'])}) from the bootstrap lifecycle.
-- Make emits TIER-1 OBSERVABLE: keep an in-memory event buffer (or an injectable sink) the service exposes, so a test can assert "event X fired with payload Y". Server-clock timestamp every event via ctx.clock:unix() — never client time, never os.time in a handler.
-- Wire ctx.analytics into ServerContext (Context.luau) AND the ActionContext projection (NetServer), and register the service in init.server.luau.
-- The FULL taxonomy this game must eventually emit is ${JSON.stringify(analyticsEvents)}. You are standing up the SEAM and the session lifecycle ONLY — do NOT make features emit their domain events here (that is each feature builder's job, or a named retrofit's). Building it here as well would build it twice.
-- Add a small Tier-1 test for the emitter itself (emit -> buffered + timestamped) so the seam is proven, not assumed.
+STAND UP EACH OF THESE, exactly as its purpose describes:
+${sharedServiceSpec || '  (none listed — then stand up the analytics emitter only, per contract.analytics)'}
 
-Gauntlet green. Return the StructuredOutput.`,
-  { label: 'contract:analytics', phase: 'Analytics', schema: ANALYTICS_RESULT, effort: 'high' }
+RULES THAT APPLY TO ALL OF THEM:
+- Populate the matching ctx seam in ServerContext (Context.luau) AND make sure it reaches the ActionContext projection (NetServer), then register the service in init.server.luau in an order where a dependency starts before its dependents. A seam declared but never assigned is a nil every handler will silently fall through.
+- TIER-1 OBSERVABLE: whatever these modules do must be assertable from a Lune test with no Roblox runtime. For an event emitter that means an in-memory buffer or injectable sink the service exposes. Server-clock timestamp everything via ctx.clock:unix() — never client time, never a bare os.time inside a handler.
+- The analytics taxonomy this game must eventually emit is ${JSON.stringify(analyticsEvents)}, and the emit seam is ${JSON.stringify(analyticsSpec.seam || 'ctx.analytics:emit(event, payload)')}. You stand up the SEAM plus the session lifecycle events (${JSON.stringify(analyticsSpec.lifecycle || ['session_start on join', 'session_end on leave/release'])}) ONLY — the per-feature domain emits belong to each feature builder, and writing them here too would build them twice.
+- Any economy/currency helper you stand up must be a PURE transform designed to be applied INSIDE one ctx.data:update, so a feature builder physically cannot mint by reading a balance, yielding, then writing a stale value back.
+- Add a small Tier-1 test per module you create, proving the seam actually works — not that it merely exists.
+
+Gauntlet green. Return the StructuredOutput (filesTouched must list EVERY module you created).`,
+  { label: 'contract:infra', phase: 'Analytics', schema: ANALYTICS_RESULT, effort: 'high' }
 )
 
 if (aborted('analytics', analytics)) {
@@ -250,15 +260,22 @@ if (retrofitList.length === 0) {
 
 ${GUARD}
 
-READ FIRST, IN FULL, every file named in contract.retrofits: ${JSON.stringify(retrofitList.map((r) => r.file))}. Study how each one mutates player data inside its ctx.data:update transform (the concurrency-safe pattern), and how ctx.analytics:emit is called (from the analytics phase you just saw). The new player-data fields from the schema phase exist now and every player has them post-migration.
+READ FIRST, IN FULL, every file named in contract.retrofits: ${JSON.stringify(retrofitList.map((r) => r.file))}. Study how each one mutates player data inside its ctx.data:update transform (the concurrency-safe pattern), and how the analytics emit seam is called (from the infra phase you just saw). The new player-data fields from the schema phase exist now and every player has them post-migration.
 
-APPLY the ${retrofitList.length} retrofit(s) in contract.retrofits EXACTLY as each "change" describes. Two invariants govern ALL of them:
+contract.retrofits is the FULL BLAST RADIUS — every file this whole pass touches, listed so the human diff-review sees all of it. That means SOME entries were already applied by the earlier phases (the shared schema files, the infra services, the context/bootstrap wiring, the stub registrations). So, for EACH of the ${retrofitList.length} entries, FIRST determine which case it is:
+- ALREADY APPLIED by the schema or infra phase -> VERIFY it actually landed as described (read the file; if it did NOT land, that is a real gap — apply it now and say so in notes). Do NOT redo or re-litigate work that is already correct.
+- NOT YET APPLIED -> apply it now, EXACTLY as its "change" describes.
+Report each entry in retrofitsApplied either way, so nothing is silently assumed done.
 
-1. BEHAVIOR-PRESERVING under absent seams. Where a retrofit consolidates a formula that will later be influenced by not-yet-built features, read every such seam NIL-SAFELY so it defaults to the identity (a multiplier defaults to 1, an additive bonus to 0), e.g. "local m = (ctx.<seam> and ctx.<seam>:<method>(...)) or 1". With the stubs returning identity and the new counters at 0, the consolidated formula MUST equal the CURRENT behavior exactly — so every existing test passes UNCHANGED. That equality is the whole safety property of this phase.
+Two invariants govern all of them:
+
+1. BEHAVIOR-PRESERVING under absent seams — with ONE deliberate exception, below. Where a retrofit consolidates a formula that will later be influenced by not-yet-built features, read every such seam NIL-SAFELY so it defaults to the identity (a multiplier defaults to 1, an additive bonus to 0), e.g. "local m = (ctx.<seam> and ctx.<seam>:<method>(...)) or 1". With the stubs returning identity and the new counters at 0, the consolidated formula MUST equal the CURRENT behavior exactly — so every existing test passes UNCHANGED. That equality is the whole safety property of this phase.
 
 2. EARN vs SPEND. Any lifetime/aggregate EARN counter is incremented ONLY on the earn paths the contract lists (contract.earnPaths = ${JSON.stringify(contract.earnPaths || [])}) and NEVER on a spend, reset or prestige path. Increment it inside the SAME ctx.data:update transform that credits the currency — never in a second, racing update. Emit the contract's event for that site AFTER the update succeeds, never before (a post-write emit that can itself fail must not turn a committed transaction into an error — guard it).
 
-Make the gauntlet green WITHOUT changing existing test expectations; the retrofits are additive. If a built test must change because a field legitimately appears, prefer ADDING assertions over weakening one. Return the StructuredOutput and set behaviorPreserved + lifetimeOnlyOnEarns TRUTHFULLY — a false claim here is worse than a red gauntlet.`,
+THE ONE DELIBERATE EXCEPTION to invariant 1: a retrofit whose stated purpose is to CORRECT something this game INHERITED from the foundation it was forked from (most commonly: scaffold code and tests still naming the FOUNDATION game's currency or constants) is meant to change that value — that is the entire point of the edit. For those, "preserving behavior" means preserving the test's INTENT while retargeting its subject: an assertion about a balance must still assert the same property about THIS game's balance. Retarget it; do not delete it, and do not weaken it to make the suite green. Where the retrofit list names a set of files to retarget, GREP THE WHOLE GAME for the old identifier afterwards — a list assembled by reading is usually a few sites short, and a missed site is a nil read at runtime, not a test failure.
+
+Make the gauntlet green. Existing tests must not be weakened: if a built test must change because a field legitimately appears or a subject was legitimately retargeted, prefer ADDING assertions over removing one. Return the StructuredOutput and set behaviorPreserved + lifetimeOnlyOnEarns TRUTHFULLY — a false claim here is worse than a red gauntlet.`,
     { label: 'contract:retrofits', phase: 'Retrofits', schema: RETROFIT_RESULT, effort: 'high' }
   )
 
