@@ -128,11 +128,22 @@ function Context.build(): any
 		-- Start re-asserts that the object on the seam IS itself, so the wiring cannot rot silently.
 		analytics = analytics,
 		economy = economy,
-		-- [contract pass] Deep Reach FEATURE seams. Present + nil from t0 so the shape is not
-		-- surprising and no feature has to edit Context.build during fan-out (nine builders editing
-		-- one constructor is exactly the merge-conflict surface this exists to avoid). Each is
-		-- populated at Start by the service that owns it; every reader must be nil-safe.
-		plot = nil, -- PlotService (plotIdFor / rootFor / ownerOf)
+		-- [contract pass] Deep Reach FEATURE seams, DECLARED HERE AND NOWHERE ELSE so no feature has
+		-- to edit Context.build during fan-out (nine builders editing one constructor is exactly the
+		-- merge-conflict surface this exists to avoid). Each is installed at Start by the service that
+		-- owns it; every reader must be nil-safe until then.
+		--
+		-- The three lines below are DOCUMENTATION, not assignments: a `= nil` field in a Lua table
+		-- constructor creates NO key. (The comment that stood here claimed the fields were "present +
+		-- nil from t0"; Lua has no stored nil, so that was simply false — `next(context)` never yields
+		-- them and rawget returns nil either way.) Nothing depends on the difference at READ time, an
+		-- absent key and a nil value both index to nil — which is why the nil-safety rule above is the
+		-- real contract — but a comment must not claim a guarantee the language cannot give.
+		-- (`playerRemovingOwner` is the same kind of Start-installed field: PlayerLifecycle sets it
+		-- before DataService and AnalyticsService Start, and each of them connects PlayerRemoving
+		-- itself only while it is nil. It is not listed below for the reason spelled out above —
+		-- listing it would create no key either.)
+		plot = nil, -- PlotService (plotIdFor / rootFor / ownerOf / releaseFor)
 		salvage = nil, -- SalvageService (rateFor / capacityFor)
 		depth = nil, -- DepthService (valueMultiplier / tierYFor)
 	}

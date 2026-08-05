@@ -27,7 +27,8 @@ local SPEC_PATHS = {
 	"./unit/economy_race.spec",
 	"./unit/framework.spec",
 	"./unit/hudroot.spec", -- [contract pass] the shared HUD root's slot layout
-	"./unit/joinretry.spec", -- [contract pass] the client join-race guard
+	"./unit/joinretry.spec", -- [contract pass] the client join-race guard + its install seam
+	"./unit/lifecycle.spec", -- [A10b] the pinned PlayerRemoving order (analytics -> plot -> data)
 	"./unit/migration.spec",
 	"./unit/net.spec",
 	-- (AMENDMENT A10a: ./unit/sample.spec is DELETED with the sample service it covered.)

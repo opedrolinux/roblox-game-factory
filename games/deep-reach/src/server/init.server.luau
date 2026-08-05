@@ -8,6 +8,8 @@ local Server = ServerScriptService:WaitForChild("Server")
 
 local Context = require(Server.Context)
 local Bootstrap = require(Server.framework.Bootstrap)
+-- [AMENDMENT A10b] The single owner of PlayerRemoving. See the HOOK ORDER note below.
+local PlayerLifecycle = require(Server.framework.PlayerLifecycle)
 
 -- [contract pass — STUBS] The nine feature services. Each is a STUB today: it registers its
 -- contract-named actions on the gateway with a refusing handler and, where the contract says it
@@ -44,12 +46,17 @@ local context = Context.build()
 --    AnalyticsService session_end (needs the STILL-LOADED blob)
 --      -> PlotService release (frees the dome)
 --        -> DataService session release (invalidates the blob).
--- A session_end emitted after the data layer releases reads NoData and fires an EMPTY payload, so
--- the analytics success criterion would pass vacuously. DataService connects PlayerRemoving in its
--- own Start (above this line), so connection order alone cannot deliver that guarantee —
--- AnalyticsService.onPlayerRemoving therefore falls back to its join-time snapshot and marks the
--- payload `stale = true` rather than firing empty. PlotService must slot BETWEEN them when it lands.
+-- A session_end emitted after the data layer releases reads NoData and describes the JOIN-TIME
+-- snapshot instead of the session just played, so the analytics success criterion would pass
+-- vacuously. This used to be only this comment, while DataService and AnalyticsService each
+-- connected their own PlayerRemoving handler — an order this game does not control.
+-- It is now CODE: PlayerLifecycle owns the one connection and runs the three steps in order. It is
+-- FIRST in this list so its `context.playerRemovingOwner` claim is already set when DataService and
+-- AnalyticsService Start and decide not to connect the signal themselves. Moving it after either of
+-- them re-creates the defect; tests/unit/lifecycle.spec.luau asserts both the sequence and this
+-- ordering, and fails if the release ever runs before session_end.
 local services = {
+	PlayerLifecycle, -- [A10b] claims PlayerRemoving BEFORE data/analytics Start (see note above)
 	context.net, -- NetServer  (constructed in Context.build; Start binds the remotes)
 	context.data, -- DataService (constructed in Context.build; Start hooks PlayerAdded)
 	context.analytics, -- AnalyticsService (contract pass; Start hooks session_start/session_end)

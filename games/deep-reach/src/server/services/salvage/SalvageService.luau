@@ -29,14 +29,18 @@ local function passthrough(rawPayload: any): any
 end
 
 -- ----- ctx.salvage SEAM (contract.stubs.salvage.seamProvided) — IDENTITY DEFAULTS -----
+-- Named `SalvageSeam` (not installed as the service itself) — see the naming note in PlotService:
+-- `context.salvage = self` published the ident `self`, which gate-reachability's seam rules cannot
+-- attribute a single method to, so they discovered zero subjects and failed blind.
+local SalvageSeam = {}
 
 -- Credits per second this blob's smelter currently produces. 0 until the real service lands.
-function SalvageService.rateFor(_self: any, _data: any): number
+function SalvageSeam.rateFor(_self: any, _data: any): number
 	return 0
 end
 
 -- The smelter's storage ceiling for this blob. 0 until the real service lands.
-function SalvageService.capacityFor(_self: any, _data: any): number
+function SalvageSeam.capacityFor(_self: any, _data: any): number
 	return 0
 end
 
@@ -67,7 +71,7 @@ local function makeFetchSalvageAction(_service: any): any
 end
 
 function SalvageService.Start(self: any, context: any): ()
-	context.salvage = self
+	context.salvage = SalvageSeam
 	context.net:register(makeCollectSmelterAction(self))
 	context.net:register(makeFetchSalvageAction(self))
 end

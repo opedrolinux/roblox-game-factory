@@ -83,4 +83,52 @@ function JoinRetry.once(net: any, label: string, call: () -> any): any
 	return result
 end
 
+-- ───────────────────────────────────────────────────────────────────────────────────────────────
+-- INSTALL — why the guard is not something a controller opts into.
+--
+-- The mechanism above was correct and REACHED BY NOTHING: no file under src/ required this module,
+-- so every controller written during fan-out would have called context.net:call(...) straight from
+-- Start and lost the race, exactly as the previous game did. "Every join-time fetch MUST go through
+-- JoinRetry" written in a comment is the same class of promise as the PlayerRemoving order that was
+-- also only a comment — it holds until the first author who has not read it.
+--
+-- So the guard is installed ON THE NET ITSELF, in src/client/Context.luau, before the context is
+-- handed to Bootstrap. A controller resolves its collaborators from `context` and never requires a
+-- sibling module (framework/Controller.luau §2.1), so `context.net` IS the only wire out of the
+-- client — and the FIRST call it ever makes for a given action is wrapped whether the author knew
+-- about this module or not. There is nothing to remember and nothing to opt into.
+--
+-- SCOPE: first call PER ACTION, not per client. `plot.fetch` and `offline.claim` are issued from
+-- two different controllers' Start and each can lose the race independently. Every later call of an
+-- action (a player-driven collect, buy, descend) is passed straight through: those are not join
+-- reads, they cannot be "too early", and re-issuing them on a data push is the unbounded
+-- self-feeding remote loop `once` exists to avoid.
+function JoinRetry.install(net: any): any
+	if net == nil then
+		return net
+	end
+	if net._joinGuarded then
+		return net -- idempotent: a second install would wrap the wrapper and retry twice
+	end
+	net._joinGuarded = true
+
+	-- Resolve through the instance so the metatable's NetClient.call is captured ONCE; the field we
+	-- assign below shadows it for every later lookup, so `raw` can never become the wrapper itself.
+	local raw = net.call
+	local guarded: { [string]: boolean } = {}
+
+	net.call = function(self: any, actionName: string, payload: any): any
+		local function issue(): any
+			return raw(self, actionName, payload)
+		end
+		if guarded[actionName] then
+			return issue()
+		end
+		guarded[actionName] = true
+		return JoinRetry.once(self, actionName, issue)
+	end
+
+	return net
+end
+
 return JoinRetry

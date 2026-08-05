@@ -37,16 +37,20 @@ local function passthrough(rawPayload: any): any
 end
 
 -- ----- ctx.depth SEAM (contract.stubs.depth.seamProvided) — IDENTITY DEFAULTS -----
+-- Named `DepthSeam` (not installed as the service itself) — see the naming note in PlotService:
+-- `context.depth = self` published the ident `self`, which gate-reachability's seam rules cannot
+-- attribute a single method to, so they discovered zero subjects and failed blind.
+local DepthSeam = {}
 
 -- The salvage-value multiplier this blob's unlocked tier grants at `nowUnix` (server clock — the
 -- daily restock rich wreck folds into this too). 1 = MULTIPLICATIVE IDENTITY: composing with it
 -- leaves the income rate unchanged, which is what makes the retrofits behaviour-preserving.
-function DepthService.valueMultiplier(_self: any, _data: any, _nowUnix: number): number
+function DepthSeam.valueMultiplier(_self: any, _data: any, _nowUnix: number): number
 	return 1
 end
 
 -- The world Y at which this blob's current tier sits, for placing its dome.
-function DepthService.tierYFor(_self: any, _data: any): number
+function DepthSeam.tierYFor(_self: any, _data: any): number
 	return TIER_1_Y
 end
 
@@ -77,7 +81,7 @@ local function makeFetchDepthAction(_service: any): any
 end
 
 function DepthService.Start(self: any, context: any): ()
-	context.depth = self
+	context.depth = DepthSeam
 	context.net:register(makeDescendAction(self))
 	context.net:register(makeFetchDepthAction(self))
 end

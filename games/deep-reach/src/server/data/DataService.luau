@@ -481,6 +481,37 @@ function DataService.autosaveTick(self: any): { flushed: number, stolen: number 
 	return { flushed = flushed, stolen = stolen }
 end
 
+-- THE leave path: the player's final durable write, then the session slot is retired. Extracted
+-- from Start's PlayerRemoving closure so the ORDER it sits in is expressible ([AMENDMENT A10b] —
+-- src/server/framework/PlayerLifecycle calls this LAST, after analytics has read the still-loaded
+-- blob) and so Tier-1 can drive it. Roblox-free, like every other method on this service.
+function DataService.onPlayerRemoving(self: any, player: PlayerLike): ()
+	-- FIRST: record the departure, so a load still in flight installs nothing orphaned. (The
+	-- lifecycle owner calls this too, at the head of the sequence; it is idempotent.)
+	self:noteDeparture(player)
+	local session = self._sessions[player.UserId]
+	if session ~= nil then
+		session.data.timestamps.lastSeenUnix = self._clock:unix()
+		-- Budget-aware RETRY: this is the session's final durable write, so a single
+		-- throttled attempt would discard everything the player just did.
+		local released = self:releaseSession(session)
+		if not released.ok then
+			self._logWarn(
+				`DataService: release for {player.Name} failed: {tostring((released :: any).code)}`
+			)
+		end
+		-- Identity-guarded: releaseSession above can retry for seconds, and a fast rejoin
+		-- inside that window installs a new session for this userId.
+		self:clearSession(player.UserId, session)
+		-- Leaving clears any dead marker (a rejoin starts fresh) — but ONLY when this leave
+		-- corresponds to the session we just released. Clearing unconditionally could
+		-- un-mark a genuinely dead live replacement and resume serving its stale data.
+		self._dead[player.UserId] = nil
+	elseif self._sessions[player.UserId] == nil then
+		self._dead[player.UserId] = nil
+	end
+end
+
 -- Lifecycle (Start) — Roblox event wiring only (construct already happened in Context.build).
 -- ROBLOX-ONLY at runtime: references `game`. No spec calls Start (tests call get/update/save).
 function DataService.Start(self: any, context: any): ()
@@ -526,33 +557,19 @@ function DataService.Start(self: any, context: any): ()
 	end
 	Players.PlayerAdded:Connect(onAdded)
 
-	Players.PlayerRemoving:Connect(function(player: any)
-		-- FIRST: record the departure, so a load still in flight installs nothing orphaned.
-		self:noteDeparture(player)
-		local session = self._sessions[player.UserId]
-		if session ~= nil then
-			session.data.timestamps.lastSeenUnix = self._clock:unix()
-			-- Budget-aware RETRY: this is the session's final durable write, so a single
-			-- throttled attempt would discard everything the player just did.
-			local released = self:releaseSession(session)
-			if not released.ok then
-				self._logWarn(
-					`DataService: release for {player.Name} failed: {tostring(
-						(released :: any).code
-					)}`
-				)
-			end
-			-- Identity-guarded: releaseSession above can retry for seconds, and a fast rejoin
-			-- inside that window installs a new session for this userId.
-			self:clearSession(player.UserId, session)
-			-- Leaving clears any dead marker (a rejoin starts fresh) — but ONLY when this leave
-			-- corresponds to the session we just released. Clearing unconditionally could
-			-- un-mark a genuinely dead live replacement and resume serving its stale data.
-			self._dead[player.UserId] = nil
-		elseif self._sessions[player.UserId] == nil then
-			self._dead[player.UserId] = nil
-		end
-	end)
+	-- [AMENDMENT A10b] PlayerRemoving is a PINNED SEQUENCE — AnalyticsService session_end (which
+	-- needs the still-loaded blob) -> PlotService release -> THIS release, which invalidates the
+	-- blob. src/server/framework/PlayerLifecycle owns that sequence and Starts before this service,
+	-- setting context.playerRemovingOwner. Connecting here as well would run the release from a
+	-- SECOND handler on the same signal, in an order this game does not control — which is exactly
+	-- how session_end came to fire on a released session and report the join-time snapshot.
+	-- Still connect when nobody claimed it: a bootstrap that drops the lifecycle must degrade to
+	-- "analytics may be stale", never to "sessions are never released".
+	if context.playerRemovingOwner == nil then
+		Players.PlayerRemoving:Connect(function(player: any)
+			self:onPlayerRemoving(player)
+		end)
+	end
 
 	-- [B2 D5] periodic autosave: bounds ungraceful-crash data-loss to one interval. 0 disables
 	-- (save-on-release-only). NOTE the SessionStore heartbeat (MemoryStore TTL renew) is a

@@ -42,20 +42,39 @@ end
 -- nil, so a consumer's `if ctx.plot ~= nil then local id = ctx.plot:plotIdFor(player) end` composes
 -- to the same behaviour it has today with the seam unassigned — but reaches a REAL object, so a
 -- typo'd method name is a boot-time error rather than a silent nil.
+--
+-- NAMED `PlotSeam`, not `self`: the seam is its OWN table, installed on context.plot, and the
+-- `<X>Seam` name is the convention gate-reachability's seam-installed / seam-read rules discover by
+-- (gate-reachability.luau §R2). Installing the SERVICE (`context.plot = self`) published the ident
+-- `self`, which matches no `function self.<method>(` definition anywhere — so BOTH seam rules found
+-- ZERO subjects, and zero subjects is a hard FAIL by design: the gate was blind to every seam in
+-- this game. A separate table also keeps the seam surface honest — what is on PlotSeam is what
+-- gameplay may call; Start/name/the action factories are the service's own business.
+local PlotSeam = {}
 
 -- The dome id this player holds, or nil when they hold none.
-function PlotService.plotIdFor(_self: any, _player: any): string?
+function PlotSeam.plotIdFor(_self: any, _player: any): string?
 	return nil
 end
 
 -- The world root (an Instance) of this player's dome, or nil when they hold none.
-function PlotService.rootFor(_self: any, _player: any): any?
+function PlotSeam.rootFor(_self: any, _player: any): any?
 	return nil
 end
 
 -- The UserId currently holding `plotId`, or nil when the plot is free / unknown.
-function PlotService.ownerOf(_self: any, _plotId: string): number?
+function PlotSeam.ownerOf(_self: any, _plotId: string): number?
 	return nil
+end
+
+-- Free whatever dome this player holds; returns whether anything was actually released.
+-- This is the METHOD NAME for the middle step of the pinned PlayerRemoving sequence (AMENDMENT
+-- A10b: analytics session_end -> PLOT RELEASE -> data session release). The amendment named the
+-- step but not the call, so the step could not be wired; PlayerLifecycle calls this. The stub's
+-- honest answer is `false` — no plot was ever claimed, so nothing was freed — and the real
+-- PlotService replaces it with the occupancy-map release WITHOUT the caller changing.
+function PlotSeam.releaseFor(_self: any, _player: any): boolean
+	return false
 end
 
 -- ----- actions -----
@@ -90,7 +109,7 @@ end
 -- NetServer ActionContext projection reads it at dispatch time, so an install at Start is visible to
 -- every request the game ever serves.
 function PlotService.Start(self: any, context: any): ()
-	context.plot = self
+	context.plot = PlotSeam
 	context.net:register(makeClaimPlotAction(self))
 	context.net:register(makeFetchPlotAction(self))
 end

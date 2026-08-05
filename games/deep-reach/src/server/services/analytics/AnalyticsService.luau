@@ -239,15 +239,16 @@ end
 
 -- THE leave lifecycle hook. Fires session_end with the still-loaded blob when it is there.
 --
--- HOOK ORDER (contract precisionNote 3 / AMENDMENT A10b): the intended order is AnalyticsService
--- session_end -> PlotService release -> DataService session release, because a session_end emitted
--- AFTER the data layer releases reads NoData and the event fires empty — which makes the analytics
--- success criterion pass vacuously. This service is registered after DataService in the bootstrap
--- (contract.retrofits: "immediately after context.data"), so its PlayerRemoving connection is made
--- SECOND and signal-connection order alone cannot be relied on to deliver the loaded blob.
--- Correctness therefore does NOT depend on that ordering: when get() reports the blob is already
--- gone, the join-time snapshot supplies the payload and the event carries `stale = true`. The event
--- is never empty either way — which is the property the contract actually cares about.
+-- HOOK ORDER (contract precisionNote 3 / AMENDMENT A10b): the order is AnalyticsService session_end
+-- -> PlotService release -> DataService session release, because a session_end emitted AFTER the
+-- data layer releases reads NoData and describes the join-time snapshot instead of the session the
+-- player actually played — which makes the analytics success criterion pass vacuously.
+-- That order is now REAL rather than documented: src/server/framework/PlayerLifecycle owns the one
+-- PlayerRemoving connection and calls this method as step 1, while the blob is still loaded (this
+-- service does not connect the signal itself when an owner claimed it — see Start).
+-- The `stale = true` fallback below stays as DEFENCE, not as the design: if the blob is somehow
+-- already gone, the join-time snapshot supplies the payload and the event is never empty. A
+-- session_end carrying stale = true in a live server now means the pinned order was bypassed.
 function AnalyticsService.onPlayerRemoving(self: any, dataService: any, player: any): Event
 	local data: any = nil
 	if dataService ~= nil then
@@ -297,12 +298,20 @@ function AnalyticsService.Start(self: any, context: any): ()
 		end)
 	)
 
-	table.insert(
-		self._connections,
-		Players.PlayerRemoving:Connect(function(player: any)
-			self:onPlayerRemoving(dataService, player)
-		end)
-	)
+	-- [AMENDMENT A10b] The leave sequence (session_end -> plot release -> data release) is OWNED by
+	-- src/server/framework/PlayerLifecycle, which Starts first and sets context.playerRemovingOwner;
+	-- it calls onPlayerRemoving directly, while the blob is still loaded. Connecting here too would
+	-- emit session_end TWICE per leave (once from each handler), and the second one — after the data
+	-- release — would be the stale reconstruction. Only connect when nobody claimed the sequence, so
+	-- a bootstrap without the lifecycle still emits session_end (stale, but never missing).
+	if context.playerRemovingOwner == nil then
+		table.insert(
+			self._connections,
+			Players.PlayerRemoving:Connect(function(player: any)
+				self:onPlayerRemoving(dataService, player)
+			end)
+		)
+	end
 end
 
 -- Stop (BindToClose) — every still-present player's session ends here. Best-effort and never raises:

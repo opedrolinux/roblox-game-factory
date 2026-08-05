@@ -18,11 +18,13 @@ local context = Context.build() -- builds NetClient (waits for the server's remo
 -- ordering — HudRoot.ensure is idempotent and mount() calls it — but no controller may ever create
 -- its own ScreenGui; nine of those is a pile of overlapping full-screen GUIs.)
 --
--- JoinRetry (Client.framework.JoinRetry) is a PURE helper, not a controller, so it is not started
--- here — a controller requires it directly and wraps its join-time server call:
---   JoinRetry.once(context.net, "offline.claim", function() return context.net:call(...) end)
--- Every join-time fetch/claim MUST go through it: loadSession yields, and an unguarded Start() call
--- loses that race — permanently, for the grant-shaped ones.
+-- JoinRetry (Client.framework.JoinRetry) is not a controller and is not started here: it is
+-- INSTALLED ON context.net by Context.build, above, so the first call of each action — whoever
+-- issues it — is already race-guarded. A controller therefore writes the ordinary
+-- `context.net:call("offline.claim", …)` from Start and is safe; there is no wrapper to remember
+-- and no way to opt out, because context.net is the only wire out of the client.
+-- (loadSession yields on join, and an unguarded Start() call loses that race — permanently, for the
+-- grant-shaped ones, because autosave re-stamps lastSeenUnix and erases the away window.)
 local controllers = {
 	context.net, -- NetClient (resolves the RemoteFunction/RemoteEvent)
 	require(Client.framework.HudRoot), -- [contract pass] the one shared HUD root + slot layout
