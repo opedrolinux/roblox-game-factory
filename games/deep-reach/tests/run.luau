@@ -31,6 +31,7 @@ local SPEC_PATHS = {
 	"./unit/lifecycle.spec", -- [A10b] the pinned PlayerRemoving order (analytics -> plot -> data)
 	"./unit/migration.spec",
 	"./unit/net.spec",
+	"./unit/plot.spec", -- [feature: plot ownership] the independent gate's spec-derived tests
 	-- (AMENDMENT A10a: ./unit/sample.spec is DELETED with the sample service it covered.)
 	"./unit/selene_guard.spec",
 	"./unit/session_lock.spec",

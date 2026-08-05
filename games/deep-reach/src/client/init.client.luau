@@ -30,6 +30,7 @@ local controllers = {
 	require(Client.framework.HudRoot), -- [contract pass] the one shared HUD root + slot layout
 	-- (AMENDMENT A10a: the sample controller is DELETED along with its server action.)
 	-- --- [features] one line per feature controller, appended at merge. Keep this block LAST. ---
+	require(Client.controllers.plot.PlotController), -- [plot] dome highlight + label (zero authority)
 }
 
 Bootstrap.start(controllers, context)
