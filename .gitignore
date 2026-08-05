@@ -3,6 +3,7 @@ build/
 *.rbxl
 *.rbxlx
 *.rbxl.lock
+*.rbxlx.lock
 
 # Wally packages (restored via `wally install`)
 Packages/
