@@ -348,9 +348,13 @@ describe("DataService durable-write policy (§7 budget · §4.2 retry)", functio
 			local player = Mocks.player(index)
 			service:loadSession(player)
 			service:update(player, function(d)
-				d.currencies.Stardust = index * 10
+				-- Retargeted from the FOUNDATION game's currency to this game's Credits. The write
+				-- exists to make the session dirty, so assert the delta actually landed rather than
+				-- trusting an un-read write (a write nothing reads proves nothing).
+				d.currencies.Credits = index * 10
 				return d
 			end)
+			expect((service:get(player) :: any).value.currencies.Credits):toBe(index * 10)
 		end
 		service:Stop({})
 		expect(okReleases):toBe(5)

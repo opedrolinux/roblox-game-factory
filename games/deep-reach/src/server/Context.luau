@@ -21,6 +21,12 @@ local SessionStore = require(Server.data.SessionStore)
 local DataService = require(Server.data.DataService)
 local Gate = require(Server.security.Gate)
 local NetServer = require(Server.net.NetServer)
+-- [contract pass] The two cross-cutting infra services. Constructed HERE (not by a feature) because
+-- their seams must be non-nil from t0: every feature emits through ctx.analytics and mutates
+-- balances through ctx.economy, and nine builders editing one constructor is the merge-conflict
+-- surface this file exists to avoid.
+local AnalyticsService = require(Server.services.analytics.AnalyticsService)
+local EconomyService = require(Server.services.economy.EconomyService)
 
 -- [B2 §6] Pick the store by REAL DataStore capability, never by `game ~= nil` (this module
 -- already dereferences `game` at module scope, so that guard's else-branch is dead — L8) and
@@ -93,6 +99,12 @@ function Context.build(): any
 	local gate = Gate.new(clock)
 	local net = NetServer.new(gate)
 
+	-- [contract pass] Analytics FIRST: EconomyService emits currency_earned / currency_spent through
+	-- it, so it must be the same object the rest of the game reads off ctx.analytics. Construct only
+	-- (no I/O, no event connections) — AnalyticsService:Start does the Players wiring.
+	local analytics = AnalyticsService.new(clock)
+	local economy = EconomyService.new(analytics)
+
 	local context = {
 		isServer = true,
 		clock = clock,
@@ -108,8 +120,21 @@ function Context.build(): any
 		-- deferred seams (nil in the spine; populated in B2):
 		security = nil,
 		flags = nil,
-		analytics = nil,
 		monetization = nil,
+		-- [contract pass] THE analytics emit seam (ctx.analytics:emit(event, payload)) and THE single
+		-- Credits/Pearls mutation helper (ctx.economy:earn / :spend). Assigned HERE rather than left
+		-- nil for a feature to fill: these two are cross-cutting, every feature reads them, and a seam
+		-- declared but never assigned is a nil every handler silently falls through. Each service's
+		-- Start re-asserts that the object on the seam IS itself, so the wiring cannot rot silently.
+		analytics = analytics,
+		economy = economy,
+		-- [contract pass] Deep Reach FEATURE seams. Present + nil from t0 so the shape is not
+		-- surprising and no feature has to edit Context.build during fan-out (nine builders editing
+		-- one constructor is exactly the merge-conflict surface this exists to avoid). Each is
+		-- populated at Start by the service that owns it; every reader must be nil-safe.
+		plot = nil, -- PlotService (plotIdFor / rootFor / ownerOf)
+		salvage = nil, -- SalvageService (rateFor / capacityFor)
+		depth = nil, -- DepthService (valueMultiplier / tierYFor)
 	}
 
 	-- Let NetServer close over the full context so it can build each handler's ActionContext.

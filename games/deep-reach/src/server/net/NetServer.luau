@@ -66,6 +66,14 @@ function NetServer.actionContext(self: any, player: any): Net.ActionContext
 		flags = ctx.flags,
 		analytics = ctx.analytics,
 		monetization = ctx.monetization,
+		-- [contract pass] This projection DROPS any seam it does not name, so a seam declared on
+		-- ActionContext but not forwarded here is dead on the real wire no matter what Context
+		-- holds. Same object identities as ServerContext (read at dispatch time, so a service
+		-- that installs its seam at Start is visible to every later request).
+		economy = ctx.economy,
+		plot = ctx.plot,
+		salvage = ctx.salvage,
+		depth = ctx.depth,
 	}
 end
 

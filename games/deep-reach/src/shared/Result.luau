@@ -33,6 +33,31 @@ Result.Codes = {
 	SessionLocked = "SessionLocked",
 	LockStolen = "LockStolen",
 	SessionClosed = "SessionClosed",
+
+	-- [contract pass] Deep Reach's game-state refusals. The scaffold genuinely lacks these (they
+	-- exist only in collect-sim), and every spend / cooldown / prerequisite path in the plan returns
+	-- one of them. Each is a code the spine could NOT already express:
+	-- A CURRENCY shortfall: the balance does not cover the cost (structures.buy, depth.descend, and
+	--   salvage.collect on an empty smelter). Not OutOfRange (that is a payload-range failure, not a
+	--   balance state) and not Rejected (the panic refusal).
+	Insufficient = "Insufficient",
+	-- A GAME cooldown has not elapsed: the daily supply drop before its 20-22h window opens.
+	--   Deliberately NOT RateLimited — that is the Gate's per-action anti-spam token bucket, and
+	--   conflating a 20-hour game cooldown with it makes the daily-window test indistinguishable
+	--   from a rate-limit test.
+	OnCooldown = "OnCooldown",
+	-- A NON-CURRENCY prerequisite is unmet: hull below the tier minimum, the previous tier not
+	--   unlocked, the VIP-trench flag absent, or resurfacing below the minimum depth. Kept separate
+	--   from Insufficient so "the pressure gate holds" is testable — a hull-too-low refusal and a
+	--   plain can't-afford refusal must not be the same code.
+	PrereqUnmet = "PrereqUnmet",
+	-- The resource EXISTS but none is free right now: every dome plot on this server is held. Not
+	--   NoData ("no record for this key"), not Internal (this is a normal capacity state).
+	Unavailable = "Unavailable",
+	-- This player ALREADY holds one: a second plot claim. Rejected cannot serve here — Net.dispatch
+	--   returns exactly Rejected for the panic flag, so "a second claim is refused" would be
+	--   byte-indistinguishable from "the server is panicked and refusing all client writes".
+	AlreadyClaimed = "AlreadyClaimed",
 }
 
 function Result.ok<T>(value: T): Ok<T>

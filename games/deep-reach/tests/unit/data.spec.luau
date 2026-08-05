@@ -34,16 +34,31 @@ describe("Migrations", function()
 		local data = Migrations.default(12345)
 		expect(data.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
 		expect(data.timestamps.firstJoinUnix):toBe(12345)
-		expect(data.currencies.Stardust):toBe(0)
+		-- Deep Reach's currencies (the inherited Stardust seed is gone — wrong game's currency).
+		expect(data.currencies.Credits):toBe(0)
+		expect(data.currencies.Pearls):toBe(0)
+		expect(data.currencies.Stardust):toBe(nil)
+		-- Every v7 field a fresh player must ship with. default() is a SEPARATE code site from
+		-- the migration steps, so a field seeded in a step but not here is invisible until a
+		-- fresh player hits a nil.
+		expect(data.stats.lifetimeCredits):toBe(0)
+		expect(data.plot.plotId):toBe("")
+		expect(data.plot.claimedAtUnix):toBe(0)
+		expect(data.smelter.storedCredits):toBe(0)
+		expect(data.smelter.lastTickUnix):toBe(0)
+		expect(data.daily.streak):toBe(0)
+		expect(data.daily.lastClaimUnix):toBe(0)
+		expect(data.resurfaces):toBe(0)
+		expect(data.boostExpiresUnix):toBe(0)
 	end)
 
 	it("migrate() is a no-op round-trip on a current blob (no field loss)", function()
 		local data = Migrations.default(1)
-		data.currencies.Stardust = 50
+		data.currencies.Credits = 50
 		data.upgrades.CollectSpeed = 2
 		local migrated = Migrations.migrate(data)
 		expect(migrated.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
-		expect(migrated.currencies.Stardust):toBe(50)
+		expect(migrated.currencies.Credits):toBe(50)
 		expect(migrated.upgrades.CollectSpeed):toBe(2)
 	end)
 
@@ -100,11 +115,11 @@ describe("DataService load/get/update/save/release", function()
 		local player = Mocks.player(1)
 		service:loadSession(player)
 		local updated = service:update(player, function(d)
-			d.currencies.Stardust += 25
+			d.currencies.Credits += 25
 			return d
 		end)
 		expect(updated):toBeOk()
-		expect((service:get(player) :: any).value.currencies.Stardust):toBe(25)
+		expect((service:get(player) :: any).value.currencies.Credits):toBe(25)
 	end)
 
 	it(
@@ -146,7 +161,7 @@ describe("DataService.Stop (BindToClose budget-aware flush — §9.5)", function
 		service:loadSession(p1)
 		service:loadSession(p2)
 		service:update(p1, function(d)
-			d.currencies.Stardust += 10
+			d.currencies.Credits += 10
 			return d
 		end)
 		service:Stop({})

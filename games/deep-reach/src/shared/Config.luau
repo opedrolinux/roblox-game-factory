@@ -66,6 +66,24 @@ export type ClientConfig = {
 
 local CONFIG = Config :: any
 
+-- [contract pass — AMENDMENT A10c] THE one server-day helper, and the note that Deep Reach
+-- deliberately has TWO different time rules that both read as "daily" in the spec:
+--
+--   1. THE DAILY SUPPLY DROP is a ROLLING WINDOW measured off `daily.lastClaimUnix`: the claim opens
+--      20h after the LAST claim and the streak survives up to 22h (spec: "20-22h window"). It does
+--      NOT use dayIndex — a player who claims at 23:50 would otherwise be able to claim again ten
+--      minutes later, because the absolute day rolled over.
+--   2. THE RESTOCK RICH WRECK rotates on the ABSOLUTE server-day index: every player on every server
+--      sees the same trench restocked on the same day, which a per-player rolling window cannot
+--      express. That is what dayIndex below is for.
+--
+-- Pinning one helper and naming the difference here is far cheaper than reconciling two features
+-- that each invented their own definition of a day at the integration gate. `nowUnix` is ALWAYS the
+-- injected server clock (ctx.clock:unix()) — never os.time(), never anything a client sent.
+function CONFIG.dayIndex(nowUnix: number): number
+	return math.floor(nowUnix / 86400)
+end
+
 function CONFIG.clientSubset(): ClientConfig
 	return {
 		rateDefaults = Config.rateDefaults,

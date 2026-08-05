@@ -61,6 +61,14 @@ export type ActionContext = {
 	flags: any?, -- [B2]
 	analytics: any?, -- [B2]
 	monetization: any?, -- [B2]
+	-- [contract pass] Deep Reach seams. NIL in the spine; populated by a stub/feature service at
+	-- Start. Declared here because ActionContext is --!strict — a handler reading ctx.economy or
+	-- ctx.depth without the field declared is a type error at build, and src/shared/ is read-only
+	-- to feature work, so no builder can add them mid-fan-out. Read them nil-safely.
+	economy: any?, -- EconomyService: earn/spend + lifetimeCredits + currency_* analytics
+	plot: any?, -- PlotService: plotIdFor / rootFor / ownerOf
+	salvage: any?, -- SalvageService: rateFor / capacityFor
+	depth: any?, -- DepthService: valueMultiplier / tierYFor
 }
 
 export type Handler<TIn, TOut> = (ctx: ActionContext, payload: TIn) -> Result<TOut>
@@ -86,10 +94,66 @@ export type Registry = {
 local Net = {}
 
 -- Stable action-name constants the spine + B2 features share (avoids typos across files).
+-- AMENDMENT A10a: the scaffold's `Sample = "sample.ping"` key is GONE, together with
+-- services/sample, controllers/sample and tests/unit/sample.spec. SampleAction wrote
+-- `currencies.Stardust` — the FOUNDATION game's currency — directly from a client-callable action,
+-- so leaving it alive through fan-out would mint a currency Deep Reach does not have into live
+-- blobs, straight past the ctx.economy single-writer path. Removing the key here (rather than
+-- later) also keeps it inside this one guarded shared-contract edit.
 Net.Actions = {
-	Sample = "sample.ping", -- [SAMPLE]
-	-- [B2] Shop = "shop.buy", Rebirth = "rebirth.do", Claim = "offline.claim",
-	-- [B2] Daily = "daily.claim", Purchase is server-driven (ProcessReceipt), not a client action.
+	-- [plot] The payload carries NO plot id — the SERVER picks. A client-named plot IS the
+	-- plot-claim-hijack exploit. Second claim -> Err(AlreadyClaimed); server full -> Err(Unavailable).
+	ClaimPlot = "plot.claim",
+	-- [plot] Which dome this player holds (id + world position), for the HUD/highlight.
+	-- JoinRetry-guarded on the client (it reads state that only exists after loadSession's yield).
+	FetchPlot = "plot.fetch",
+
+	-- [salvage] Empty the smelter: smelter.storedCredits -> currencies.Credits via ctx.economy:earn.
+	-- Spam-duplicate safe (the second call finds 0 stored).
+	CollectSmelter = "salvage.collect",
+	-- [salvage] The DERIVED running income rate + stored + capacity. This is the observation
+	-- surface the "purchased structures change the income rate" criterion asserts a delta on.
+	FetchSalvage = "salvage.fetch",
+
+	-- [structures] Server-validated purchase of ONE catalog entry; cost is server-derived, never
+	-- sent by the client.
+	BuyStructure = "structures.buy",
+	-- [structures] The catalog with server-derived next-level prices + this player's levels, so
+	-- the shop UI never holds its own price constants. Iterates the CATALOG, never the raw blob.
+	FetchStructures = "structures.fetch",
+
+	-- [depth] Unlock + descend to the next trench tier. The pressure gate (prior tier + hull
+	-- minimum + Credits) is evaluated in the SAME lock-held transform that debits.
+	Descend = "depth.descend",
+	-- [depth] Current tier, the next tier's Credits + hull requirement, and TODAY's restock tier.
+	FetchDepth = "depth.fetch",
+
+	-- [offline] Claim the away-window accrual computed on the SERVER from timestamps.lastSeenUnix.
+	-- One-shot per session; no client-supplied time anywhere in the payload.
+	ClaimOffline = "offline.claim",
+	-- [offline, AMENDMENT A5] Read the PENDING away-accrual grant (amount + whether it was capped)
+	-- WITHOUT claiming it, so the claim-on-join popup can show it. The pending amount lives in
+	-- server memory, not in PlayerData, so it is not in PlayerView and had no read surface at all.
+	-- Peeking MUST be SIDE-EFFECT FREE: never grants, never clears the pending amount, never
+	-- re-stamps the away window. JoinRetry-guarded on the client.
+	FetchOffline = "offline.peek",
+
+	-- [daily] Claim the supply drop; SERVER-clock gated on the rolling 20-22h window off
+	-- daily.lastClaimUnix. Err(OnCooldown) before it opens.
+	ClaimDaily = "daily.claim",
+
+	-- [resurface] Prestige: wipe structures + depth + Credits, mint Pearls, ++resurfaces.
+	-- Err(PrereqUnmet) below the minimum depth. Duplicate-safe (no Pearl dupe).
+	Resurface = "resurface.do",
+	-- [resurface] Preview the Pearls that would be minted, the resulting permanent multiplier,
+	-- and whether the minimum depth is met — so the confirm UI is server-truthed.
+	FetchResurface = "resurface.fetch",
+
+	-- [leaderboard] The current top-N snapshot by stats.lifetimeCredits.
+	FetchLeaderboard = "leaderboard.fetch",
+
+	-- NOTE: monetization adds NO action. Gamepass prompts are client-initiated MarketplaceService
+	-- calls, and product grants are server-driven through ProcessReceipt — never a client action.
 }
 
 -- Creates a fresh, empty registry (one per server; tests create throwaway ones).

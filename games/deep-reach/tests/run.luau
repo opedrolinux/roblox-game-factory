@@ -18,13 +18,19 @@ local testkit = require("./lib/testkit") -- script-relative; resolves from any c
 -- EXPLICIT, LEXICALLY-ORDERED spec list (no fs.readDir). Each entry is a script-relative path.
 -- Adding a feature appends one line here; keep the list sorted so the JSON summary is byte-stable.
 local SPEC_PATHS = {
+	"./unit/analytics.spec", -- [contract pass] the emit seam + session lifecycle
 	"./unit/clock.spec",
+	"./unit/contract.spec", -- [contract pass] the shared-contract completeness spec (v1->v7 round
+	-- trip, the toView allowlist, the analytics taxonomy, the action registry, the test seams)
 	"./unit/data.spec",
+	"./unit/economy.spec", -- [contract pass] ctx.economy earn/spend inside one data:update
 	"./unit/economy_race.spec",
 	"./unit/framework.spec",
+	"./unit/hudroot.spec", -- [contract pass] the shared HUD root's slot layout
+	"./unit/joinretry.spec", -- [contract pass] the client join-race guard
 	"./unit/migration.spec",
 	"./unit/net.spec",
-	"./unit/sample.spec",
+	-- (AMENDMENT A10a: ./unit/sample.spec is DELETED with the sample service it covered.)
 	"./unit/selene_guard.spec",
 	"./unit/session_lock.spec",
 	"./unit/validation.spec",

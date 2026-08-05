@@ -16,6 +16,7 @@ local Mocks = require("../lib/mocks")
 local MockStore = require("../../src/server/data/MockStore")
 local DataService = require("../../src/server/data/DataService")
 local Result = require("../../src/shared/Result")
+local Types = require("../../src/shared/Types")
 
 local describe = testkit.describe
 local it = testkit.it
@@ -65,22 +66,22 @@ describe("Store interface round-trip via MockStore", function()
 		local clock = Mocks.clock(1000)
 		local store = MockStore.new({ clock = clock, config = testConfig() })
 		local loaded = store:load("player_1", function()
-			return { schemaVersion = 1, currencies = { Stardust = 0 } }
+			return { schemaVersion = Types.CURRENT_SCHEMA_VERSION, currencies = { Credits = 0 } }
 		end)
 		expect(loaded):toBeOk()
 		local session = (loaded :: any).value
-		expect(session.data.currencies.Stardust):toBe(0)
+		expect(session.data.currencies.Credits):toBe(0)
 		session:update(function(d)
-			d.currencies.Stardust += 40
+			d.currencies.Credits += 40
 			return d
 		end)
 		local saved = session:save()
 		expect(saved):toBeOk()
 		-- A fresh load of the SAME key sees the persisted value (round-trip through the backing table).
 		local reloaded = store:load("player_1", function()
-			return { schemaVersion = 1, currencies = { Stardust = -1 } }
+			return { schemaVersion = Types.CURRENT_SCHEMA_VERSION, currencies = { Credits = -1 } }
 		end)
-		expect((reloaded :: any).value.data.currencies.Stardust):toBe(40)
+		expect((reloaded :: any).value.data.currencies.Credits):toBe(40)
 	end)
 
 	it("isLocked: a key is locked after load and freed after release (single-writer)", function()
@@ -110,12 +111,17 @@ describe("Store interface round-trip via MockStore", function()
 			local store = MockStore.new({
 				clock = clock,
 				config = testConfig(),
-				seed = { player_7 = { schemaVersion = 1, currencies = { Stardust = 250 } } },
+				seed = {
+					player_7 = {
+						schemaVersion = Types.CURRENT_SCHEMA_VERSION,
+						currencies = { Credits = 250 },
+					},
+				},
 			})
 			local loaded = store:load("player_7", function()
-				return { schemaVersion = 1, currencies = { Stardust = 0 } }
+				return { schemaVersion = Types.CURRENT_SCHEMA_VERSION, currencies = { Credits = 0 } }
 			end)
-			expect((loaded :: any).value.data.currencies.Stardust):toBe(250)
+			expect((loaded :: any).value.data.currencies.Credits):toBe(250)
 		end
 	)
 end)
@@ -138,20 +144,20 @@ describe("Concurrency-safe economy via the per-key FIFO lock queue (falsifiable)
 		local cos = {
 			coroutine.create(function()
 				service:update(player, function(d)
-					d.currencies.Stardust += 5
+					d.currencies.Credits += 5
 					return d
 				end)
 			end),
 			coroutine.create(function()
 				service:update(player, function(d)
-					d.currencies.Stardust += 3
+					d.currencies.Credits += 3
 					return d
 				end)
 			end),
 		}
 		drain(cos)
 		-- Correct queue => 8. A naive read->yield->write would land at 3 (verified counter-case).
-		expect((service:get(player) :: any).value.currencies.Stardust):toBe(8)
+		expect((service:get(player) :: any).value.currencies.Credits):toBe(8)
 	end)
 
 	it("THREE interleaved updates converge to the exact sum (queue scales beyond 2)", function()
@@ -162,14 +168,14 @@ describe("Concurrency-safe economy via the per-key FIFO lock queue (falsifiable)
 				cos,
 				coroutine.create(function()
 					service:update(player, function(d)
-						d.currencies.Stardust += amt
+						d.currencies.Credits += amt
 						return d
 					end)
 				end)
 			)
 		end
 		drain(cos)
-		expect((service:get(player) :: any).value.currencies.Stardust):toBe(60)
+		expect((service:get(player) :: any).value.currencies.Credits):toBe(60)
 	end)
 
 	it("SPAM-DUPLICATED identical requests each apply exactly once (anti-double-spend)", function()
@@ -182,14 +188,14 @@ describe("Concurrency-safe economy via the per-key FIFO lock queue (falsifiable)
 				cos,
 				coroutine.create(function()
 					service:update(player, function(d)
-						d.currencies.Stardust += 7
+						d.currencies.Credits += 7
 						return d
 					end)
 				end)
 			)
 		end
 		drain(cos)
-		expect((service:get(player) :: any).value.currencies.Stardust):toBe(28)
+		expect((service:get(player) :: any).value.currencies.Credits):toBe(28)
 	end)
 
 	it("FALSIFIABILITY: a naive read->yield->write store (no queue) DOES lose an update", function()
@@ -197,7 +203,7 @@ describe("Concurrency-safe economy via the per-key FIFO lock queue (falsifiable)
 		-- green: the SAME two interleaved updates against a no-queue store land at the WRONG value.
 		-- (If this naive store somehow landed at 8, the queue tests would not be distinguishing.)
 		local function naiveSession(start: number): any
-			local backing = { Stardust = start }
+			local backing = { Credits = start }
 			local function deepCopy(v: any): any
 				if type(v) ~= "table" then
 					return v
@@ -222,13 +228,13 @@ describe("Concurrency-safe economy via the per-key FIFO lock queue (falsifiable)
 		local cos = {
 			coroutine.create(function()
 				session:update(function(d)
-					d.Stardust += 5
+					d.Credits += 5
 					return d
 				end)
 			end),
 			coroutine.create(function()
 				session:update(function(d)
-					d.Stardust += 3
+					d.Credits += 3
 					return d
 				end)
 			end),
@@ -236,8 +242,8 @@ describe("Concurrency-safe economy via the per-key FIFO lock queue (falsifiable)
 		drain(cos)
 		-- The naive store loses the first write: lands at 3, NOT 8. This asserts the lost-update is
 		-- real, so the lock-queue's correct result of 8 above genuinely distinguishes the mechanism.
-		expect(session.data.Stardust):toBe(3)
-		expect(session.data.Stardust).never:toBe(8)
+		expect(session.data.Credits):toBe(3)
+		expect(session.data.Credits).never:toBe(8)
 	end)
 end)
 

@@ -8,6 +8,7 @@ local Clock = require("../../src/server/data/Clock")
 local Gate = require("../../src/server/security/Gate")
 local Config = require("../../src/shared/Config")
 local Net = require("../../src/shared/Net")
+local Migrations = require("../../src/shared/Migrations")
 
 local stdio = require("@lune/stdio")
 
@@ -48,6 +49,14 @@ function Mocks.player(userId: number, name: string?): any
 	return { UserId = userId, Name = name or `Player_{userId}` }
 end
 
+-- [contract pass] A CURRENT-SCHEMA player blob, straight from the production seed. Exists so nine
+-- feature builders do not each hand-roll their own v7 blob: a hand-written literal drifts the moment
+-- a field is added, and a test built on a drifted blob passes against a shape the game never stores.
+-- Returns a FRESH table every call (never a shared reference a previous test could have mutated).
+function Mocks.playerData(nowUnix: number?): any
+	return Migrations.default(nowUnix or 1000)
+end
+
 -- The real spine Gate, over an injected clock (defaults to a fresh fake clock).
 function Mocks.gate(clock: any): any
 	return Gate.new(clock or Mocks.clock(1000))
@@ -79,6 +88,12 @@ function Mocks.net(context: any): any
 		registry:register(action)
 	end
 
+	-- Mocks.net builds the ActionContext BY HAND, so it silently DROPS any seam it does not name
+	-- here. A handler reading a dropped seam sees nil in every test and the test then passes against
+	-- a no-op — the seam is "tested" without ever being exercised. So every field declared on
+	-- Net.ActionContext must appear below. contract.spec proves the pass-through the only way a test
+	-- can: it registers a handler that CAPTURES the ctx it was called with and asserts each seam
+	-- arrived as the SAME object, so a dropped line is a red test rather than a silent nil.
 	function harness.invoke(name: string, player: any, payload: any): any
 		local ctx = {
 			player = player,
@@ -88,6 +103,14 @@ function Mocks.net(context: any): any
 			flags = context.flags,
 			analytics = context.analytics,
 			monetization = context.monetization,
+			-- [contract pass] Deep Reach seams (Net.luau ActionContext).
+			economy = context.economy,
+			plot = context.plot,
+			salvage = context.salvage,
+			depth = context.depth,
+			-- Not an ActionContext field, but ServerContext carries it and a receipt-shaped handler
+			-- must be able to consult it (a successful save from the fallback store is not durability).
+			persistenceDegraded = context.persistenceDegraded,
 		}
 		return Net.dispatch(registry, gate, ctx, name, payload)
 	end

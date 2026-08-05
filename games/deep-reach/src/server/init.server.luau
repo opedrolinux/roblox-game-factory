@@ -9,6 +9,21 @@ local Server = ServerScriptService:WaitForChild("Server")
 local Context = require(Server.Context)
 local Bootstrap = require(Server.framework.Bootstrap)
 
+-- [contract pass — STUBS] The nine feature services. Each is a STUB today: it registers its
+-- contract-named actions on the gateway with a refusing handler and, where the contract says it
+-- PROVIDES one, installs its ctx seam with the IDENTITY DEFAULT. Each feature builder replaces its
+-- own file in place; this registry does not change again during fan-out, which is the point —
+-- src/server/init.server.luau is the #1 union-merge conflict surface.
+local DepthService = require(Server.services.depth.DepthService)
+local SalvageService = require(Server.services.salvage.SalvageService)
+local PlotService = require(Server.services.plot.PlotService)
+local DailyDropService = require(Server.services.daily.DailyDropService)
+local StructuresShopService = require(Server.services.structures.StructuresShopService)
+local OfflineService = require(Server.services.offline.OfflineService)
+local ResurfaceService = require(Server.services.resurface.ResurfaceService)
+local LeaderboardService = require(Server.services.leaderboard.LeaderboardService)
+local MonetizationService = require(Server.services.monetization.MonetizationService)
+
 -- CONSTRUCT phase: every core context field (clock, config, data, net, gate) is non-nil now.
 -- B2 seams (security/flags/analytics/monetization) are constructed here too once they exist;
 -- nil in the spine. (See §2.2 Construct-vs-Start.)
@@ -18,12 +33,53 @@ local context = Context.build()
 -- `context` (context.net IS services[1]); they appear here only to receive Start().
 -- 1. NetServer:Start binds the RemoteFunction/RemoteEvent before any service registers an action.
 -- 2. DataService:Start hooks PlayerAdded/Removing before any service reads/writes data.
--- 3. Feature services (the sample) register their actions last.
+-- 3. AnalyticsService + EconomyService (the contract pass's cross-cutting infra) come immediately
+--    after context.data and BEFORE any feature service: every feature emits through ctx.analytics
+--    and mutates balances through ctx.economy, and EconomyService emits through AnalyticsService, so
+--    a dependency always Starts before its dependents. Both are constructed in Context.build; their
+--    Start asserts the seam actually holds them (a nil seam is a silent no-op for the whole game).
+-- 4. Feature services register their actions last.
+--
+-- PlayerRemoving HOOK ORDER (AMENDMENT A10b) is load-bearing and belongs to no single feature:
+--    AnalyticsService session_end (needs the STILL-LOADED blob)
+--      -> PlotService release (frees the dome)
+--        -> DataService session release (invalidates the blob).
+-- A session_end emitted after the data layer releases reads NoData and fires an EMPTY payload, so
+-- the analytics success criterion would pass vacuously. DataService connects PlayerRemoving in its
+-- own Start (above this line), so connection order alone cannot deliver that guarantee —
+-- AnalyticsService.onPlayerRemoving therefore falls back to its join-time snapshot and marks the
+-- payload `stale = true` rather than firing empty. PlotService must slot BETWEEN them when it lands.
 local services = {
 	context.net, -- NetServer  (constructed in Context.build; Start binds the remotes)
 	context.data, -- DataService (constructed in Context.build; Start hooks PlayerAdded)
-	-- [B2] context.security, context.flags, context.analytics, context.monetization,
-	require(Server.services.sample.SampleService), -- [SAMPLE]
+	context.analytics, -- AnalyticsService (contract pass; Start hooks session_start/session_end)
+	context.economy, -- EconomyService  (contract pass; pure helper — Start asserts the seam)
+	-- [B2] context.security, context.flags, context.monetization,
+	-- (AMENDMENT A10a: the sample service is DELETED — it wrote currencies.Stardust, the foundation
+	--  game's currency, from a client-callable action.)
+	-- --- [features] one line per feature, appended at merge. Keep this block LAST: every feature
+	-- --- service registers actions and reads ctx.analytics / ctx.economy, both live by now. ---
+	--
+	-- SEAM PROVIDERS FIRST (contract.newCtxSeams: plot / salvage / depth). Every seam is READ at
+	-- dispatch time, not at Start, so this ordering is not load-bearing for correctness — but a
+	-- provider Starting before its readers means a Start that ever does want to consult a seam finds
+	-- it installed, and it documents the dependency direction for the builders who replace these:
+	--   depth   provides valueMultiplier (salvage multiplies by it) + tierYFor (plot places by it)
+	--   salvage provides rateFor / capacityFor (offline caps its away-accrual by capacity)
+	--   plot    provides plotIdFor / rootFor / ownerOf
+	DepthService,
+	SalvageService,
+	PlotService,
+	-- The rest, in build-batch order. None provides a seam; none reads another's Start.
+	DailyDropService,
+	StructuresShopService,
+	OfflineService,
+	ResurfaceService,
+	LeaderboardService,
+	-- MonetizationService registers NO action by contract (gamepass prompts are client-initiated
+	-- MarketplaceService calls; product grants are server-driven through ProcessReceipt). It is in
+	-- the list so the slot is real and the receipt handler has somewhere to land.
+	MonetizationService,
 }
 
 Bootstrap.start(services, context)
