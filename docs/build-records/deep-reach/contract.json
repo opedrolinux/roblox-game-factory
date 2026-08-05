@@ -1,0 +1,632 @@
+{
+  "fromSchemaVersion": 1,
+  "toSchemaVersion": 7,
+  "netActions": [
+    {
+      "key": "ClaimPlot",
+      "value": "plot.claim",
+      "feature": "plot",
+      "comment": "[plot] claim a free dome. The payload carries NO plot id — the server picks; a client-named plot IS the plot-claim-hijack exploit. Second claim -> Err(Rejected); server full -> Err(Unavailable)."
+    },
+    {
+      "key": "FetchPlot",
+      "value": "plot.fetch",
+      "feature": "plot",
+      "comment": "[plot] read which dome this player holds (id + world position) for the HUD/highlight. Must be JoinRetry-guarded on the client."
+    },
+    {
+      "key": "CollectSmelter",
+      "value": "salvage.collect",
+      "feature": "salvage",
+      "comment": "[salvage] empty the smelter: move smelter.storedCredits into currencies.Credits via ctx.economy:earn. Spam-duplicate safe (the second call finds 0 stored)."
+    },
+    {
+      "key": "FetchSalvage",
+      "value": "salvage.fetch",
+      "feature": "salvage",
+      "comment": "[salvage] read the DERIVED running income rate + stored + capacity. This is the observation surface the 'purchased structures change the income rate' criterion asserts a delta on."
+    },
+    {
+      "key": "BuyStructure",
+      "value": "structures.buy",
+      "feature": "structures",
+      "comment": "[structures] server-validated purchase of one catalog entry (drones/conveyor/smelter/hull/pearlDrones); cost is server-derived, never sent by the client."
+    },
+    {
+      "key": "FetchStructures",
+      "value": "structures.fetch",
+      "feature": "structures",
+      "comment": "[structures] read the catalog with server-derived next-level prices + this player's levels, so the shop UI never holds its own price constants."
+    },
+    {
+      "key": "Descend",
+      "value": "depth.descend",
+      "feature": "depth",
+      "comment": "[depth] unlock + descend to the next trench tier. Pressure gate (prior tier + hull minimum + Credits) evaluated in the same lock-held transform that debits."
+    },
+    {
+      "key": "FetchDepth",
+      "value": "depth.fetch",
+      "feature": "depth",
+      "comment": "[depth] read current tier, the next tier's Credits + hull requirement, and TODAY's restock tier (the daily rich wreck) for the HUD badge."
+    },
+    {
+      "key": "ClaimOffline",
+      "value": "offline.claim",
+      "feature": "offline",
+      "comment": "[offline] claim the away-window accrual computed on the server from timestamps.lastSeenUnix. One-shot per session; no client-supplied time anywhere in the payload."
+    },
+    {
+      "key": "ClaimDaily",
+      "value": "daily.claim",
+      "feature": "daily",
+      "comment": "[daily] claim the supply drop; server-clock gated on the 20-22h window, Err(OnCooldown) before it opens."
+    },
+    {
+      "key": "Resurface",
+      "value": "resurface.do",
+      "feature": "resurface",
+      "comment": "[resurface] prestige: wipe structures + depth + Credits, mint Pearls, ++resurfaces. Err(PrereqUnmet) below the minimum depth. Duplicate-safe (no Pearl dupe)."
+    },
+    {
+      "key": "FetchResurface",
+      "value": "resurface.fetch",
+      "feature": "resurface",
+      "comment": "[resurface] preview the Pearls that would be minted, the resulting permanent multiplier, and whether the minimum depth is met — so the confirm UI is server-truthed."
+    },
+    {
+      "key": "FetchLeaderboard",
+      "value": "leaderboard.fetch",
+      "feature": "leaderboard",
+      "comment": "[leaderboard] read the current top-N snapshot by stats.lifetimeCredits. NOTE: monetization adds NO action — gamepass prompts are client-initiated MarketplaceService calls and product grants are server-driven through ProcessReceipt."
+    },
+    {
+      "key": "FetchOffline",
+      "value": "offline.peek",
+      "feature": "offline",
+      "comment": "AMENDMENT A5 [offline] read the PENDING away-accrual grant (amount + whether it was capped) WITHOUT claiming it, so the claim-on-join popup can show it. The pending amount lives in server memory, not in PlayerData, so it is not in PlayerView and had no read surface at all. Peeking must be SIDE-EFFECT FREE: it never grants, never clears the pending amount, and never re-stamps the away window. JoinRetry-guarded on the client."
+    }
+  ],
+  "resultCodes": [
+    {
+      "name": "Insufficient",
+      "feature": "structures",
+      "why": "NOT PRESENT in this scaffold's Result.luau today (the file ships BadPayload/BadType/OutOfRange/NotOwner/RateLimited/UnknownAction/NoData/Internal/Rejected/SessionLocked/LockStolen/SessionClosed — Insufficient and OnCooldown exist only in collect-sim). Needed by every spend path: structures.buy, depth.descend, and salvage.collect on an empty smelter. Considered OutOfRange (a payload-range failure, not a balance state), Rejected (the global panic refusal), BadPayload."
+    },
+    {
+      "name": "OnCooldown",
+      "feature": "daily",
+      "why": "NOT PRESENT in this scaffold today. Needed for the daily supply-drop claim attempted before its 20-22h window opens. Considered RateLimited (that is the per-action token bucket the Gate enforces — conflating a 20-hour game cooldown with an anti-spam limit would make the daily-window test indistinguishable from a rate-limit test), Rejected, Insufficient."
+    },
+    {
+      "name": "PrereqUnmet",
+      "feature": "depth",
+      "why": "A NON-CURRENCY prerequisite is unmet: hull rating below the tier minimum, the previous tier not yet unlocked, the VIP-trench gamepass flag absent, or resurfacing below the minimum depth. Considered Insufficient (reserved for a currency shortfall — overloading it is exactly what would make the 'pressure gate holds' criterion untestable, because a hull-too-low refusal and a plain can't-afford refusal would be the same code), OutOfRange (payload range, not world state), NotOwner (acting player vs target owner), Rejected (the panic-flag refusal)."
+    },
+    {
+      "name": "Unavailable",
+      "feature": "plot",
+      "why": "The resource exists but none is free right now: every dome plot on this server is already held, so the join claim cannot be satisfied. Considered NoData (means 'no record for this key', not 'all instances taken'), Rejected (reserved for the panic-flag global refusal AND used here for the second-claim case — reusing it for both would make 'a second claim is refused' and 'the server is full' indistinguishable in the exclusivity test), Insufficient (currency), Internal (implies a bug, this is a normal capacity state)."
+    },
+    {
+      "name": "AlreadyClaimed",
+      "feature": "plot",
+      "why": "The plan refused a second plot claim with Rejected, but this spine already uses Rejected as the PANIC flag — Net.dispatch returns exactly Result.Codes.Rejected(\"client writes rejected (panic)\") at Net.luau:152, and Result.luau:15 documents it as such. The success criterion \"a second claim is refused\" would then be byte-indistinguishable from \"the server is panicked and refusing all client writes\". Verified against the real scaffold before adding this code."
+    }
+  ],
+  "currencyKeys": [
+    {
+      "key": "Credits",
+      "feature": "salvage",
+      "why": "The soft primary currency ('Currencies: Credits (soft, primary)'). Rides the OPEN currencies map — a new key needs NO migration. This is the SHARED balance salvage/offline/daily/monetization credit and structures/depth debit and resurface zeroes, i.e. the cross-feature contention the integration gate races. The contract pass must ALSO replace the scaffold's leftover `Stardust = 0` seed in Migrations.default with `Credits = 0`."
+    },
+    {
+      "key": "Pearls",
+      "feature": "resurface",
+      "why": "The prestige currency ('Pearls (prestige currency, from resurfacing)'). Rides the OPEN currencies map — a second currency is a new KEY, never a migration. Minted only by resurface; spent only on the Structures shop's Pearl-priced entries. Seeded to 0 in Migrations.default; an absent key reads as 0, so existing blobs need no step."
+    }
+  ],
+  "typedFields": [
+    {
+      "field": "stats.lifetimeCredits",
+      "shape": "number",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "NEW",
+      "feature": "contract-pass",
+      "why": "Total Credits EARNED over the player's lifetime, monotonic, never decremented on spend and never reset by resurface — it is the leaderboard's ranking key. No seam carries it: currencies.Credits is the SPENT-DOWN balance and therefore cannot represent a lifetime total, and it must be incremented on earn paths that live inside OTHER features (salvage, offline, daily, monetization), so no feature builder can own it. It rides INSIDE the closed `stats` record, which toView copies wholesale — so it is client-facing with NO extra allowlist line, but adding it to a fixed-shape record is still a structural change and needs the v1->v2 step. AMENDMENT A4: PlayerView.stats is a NARROW fixed record — Types.luau:48 declares stats: { playtimeSeconds: number, joinCount: number }. toView copies data.stats wholesale so the VALUE arrives, but a client reading view.stats.lifetimeCredits is a --!strict property error, and the widened PlayerData.stats may not satisfy the narrower PlayerView.stats annotation. The contract pass MUST widen PlayerView.stats too — widening PlayerData.stats alone ships a leaderboard that cannot read its own ranking key."
+    },
+    {
+      "field": "plot",
+      "shape": "{ plotId: string, claimedAtUnix: number }",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "NEW",
+      "feature": "plot",
+      "why": "A per-player OWNED-SLOT IDENTITY plus the server-clock stamp of when it was taken. currencies is numbers, flags is booleans, upgrades is purchased LEVELS (and is enumerated by the shop's fetch, so a plot id parked there would surface as a purchasable), receipts is an idempotency ledger — none can express a string identity paired with a timestamp. Needs its own toView line (top-level field)."
+    },
+    {
+      "field": "smelter",
+      "shape": "{ storedCredits: number, lastTickUnix: number }",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "NEW",
+      "feature": "salvage",
+      "why": "The smelter's un-collected output plus the ACCRUAL TICK BASE. Two reasons no seam fits: (1) storedCredits is not a currency — it is not spendable and must never appear in the HUD's currency row or be debited by a purchase, so parking it in the currencies map corrupts the meaning of the shared balance; (2) lastTickUnix must be a stamp DISTINCT from timestamps.lastSeenUnix, because the data layer re-stamps lastSeenUnix on every autosave — using it as the online tick base would silently zero the accrual window on each autosave (the known offline-base re-stamping defect class). upgrades is {[string]: number} and could physically hold both, but it is the shop's purchased-level map and is enumerated by structures.fetch. Needs its own toView line."
+    },
+    {
+      "field": "daily",
+      "shape": "{ streak: number, lastClaimUnix: number }",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "NEW",
+      "feature": "daily",
+      "why": "A streak count paired with a server-unix claim stamp. flags is boolean-only. upgrades could physically store two numbers, but it is the shop's purchased-level map — structures.fetch enumerates its keys, so a lastClaimUnix parked there would render as an upgrade with level 1754400000 and could be 'bought'. A fixed-shape record with its own migration step is the honest home. Client-facing: the HUD badge shows the streak. Needs its own toView line."
+    },
+    {
+      "field": "resurfaces",
+      "shape": "number",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "NEW",
+      "feature": "resurface",
+      "why": "The PRESTIGE COUNT ('reset structures for Pearls + a permanent multiplier; count persisted'). currencies.Pearls cannot represent it: Pearls are spent on Pearl-only drones, so the spent-down balance would shrink the permanent multiplier every time the player shops. upgrades is wiped BY the resurface itself, so the count cannot live there. A top-level number with its own step + toView line."
+    },
+    {
+      "field": "boostExpiresUnix",
+      "shape": "number",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "NEW",
+      "feature": "monetization",
+      "why": "Server-unix expiry of the 30-min 2x boost; 0 = none. The spec demands it be PERSISTED ('the expiry survives a crash/rejoin, not session-only'). flags is boolean (cannot hold an expiry), receipts is the boolean idempotency ledger, currencies would make it spendable, upgrades would render it as a purchasable level. A top-level number with its own step + toView line, read by salvage's rateFor as `now < boostExpiresUnix`."
+    },
+    {
+      "field": "upgrades.drones",
+      "shape": "number",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "upgrades (open map)",
+      "feature": "structures",
+      "why": "Purchased COUNT of salvage drones. Rides the open upgrades map — NO Types edit and NO migration. Registered here only so structures (writer) and salvage's rateFor (reader) agree on the exact key spelling across parallel builds."
+    },
+    {
+      "field": "upgrades.conveyor",
+      "shape": "number",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "upgrades (open map)",
+      "feature": "structures",
+      "why": "Purchased conveyor-speed level. Open map, no migration. Canonical key so salvage's rateFor reads what structures writes."
+    },
+    {
+      "field": "upgrades.smelter",
+      "shape": "number",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "upgrades (open map)",
+      "feature": "structures",
+      "why": "Purchased smelter-capacity level. Open map, no migration. Read by salvage's capacityFor AND by offline accrual's cap — the reason the capacity upgrade matters."
+    },
+    {
+      "field": "upgrades.hull",
+      "shape": "number",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "upgrades (open map)",
+      "feature": "structures",
+      "why": "Purchased hull-pressure rating. Open map, no migration. Written by structures, READ by depth's pressure gate — the one purchasable whose non-inertness is proven against the depth gate rather than against the income rate."
+    },
+    {
+      "field": "upgrades.pearlDrones",
+      "shape": "number",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "upgrades (open map)",
+      "feature": "structures",
+      "why": "Purchased count of Pearl-only drones (priced in currencies.Pearls). Open map, no migration. NOT wiped by resurface — Pearl purchases are permanent; every other upgrades key is."
+    },
+    {
+      "field": "upgrades.depth",
+      "shape": "number",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "upgrades (open map)",
+      "feature": "depth",
+      "why": "The unlocked trench tier (1..5, plus the VIP trench above 5). This is a purchased LEVEL of a named upgradable, which the seam rule sends to the upgrades map — no migration. Reset to 1 by resurface. Registered so depth (writer) and salvage's valueMultiplier chain (reader) agree."
+    },
+    {
+      "field": "flags[\"gamepass.doubleCredits\"]",
+      "shape": "boolean",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "flags (open map)",
+      "feature": "monetization",
+      "why": "The 2x Credits gamepass EFFECT flag, granted server-side only. Gamepass effect flags ride the flags map by design — no migration. Read directly off the blob by salvage's rateFor (no service seam, so it cannot race)."
+    },
+    {
+      "field": "flags[\"gamepass.autoCollect\"]",
+      "shape": "boolean",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "flags (open map)",
+      "feature": "monetization",
+      "why": "The Auto-Collect gamepass effect flag. Read by salvage's tick to empty the smelter automatically. Open map, no migration, never set from a client action."
+    },
+    {
+      "field": "flags[\"gamepass.vipTrench\"]",
+      "shape": "boolean",
+      "persisted": true,
+      "clientFacing": true,
+      "ridesSeam": "flags (open map)",
+      "feature": "monetization",
+      "why": "The VIP-trench gamepass effect flag. Read by depth's gate as a hard prerequisite for the exclusive tier (Err PrereqUnmet without it). Open map, no migration."
+    },
+    {
+      "field": "receipts[<PurchaseId>]",
+      "shape": "boolean",
+      "persisted": true,
+      "clientFacing": false,
+      "ridesSeam": "receipts (open map)",
+      "feature": "monetization",
+      "why": "The idempotency ledger for dev-product receipts (Credit packs S/M/L, the 30-min 2x boost). Purchase idempotency rides the existing receipts seam by design — no migration. Deliberately NOT in PlayerView (toView strips it)."
+    }
+  ],
+  "migrations": [
+    {
+      "fromVersion": 1,
+      "toVersion": 2,
+      "addsField": "stats.lifetimeCredits",
+      "feature": "contract-pass",
+      "why": "First because every earn path from batch 0 onward must increment it, so it has to exist before any feature builds. Idempotent seed: only set when absent. For a pre-existing blob there is no historical earn ledger, so seed from math.floor(currencies.Credits or 0); defensively recreate stats if the blob lacks it. MUST stamp schemaVersion = 2."
+    },
+    {
+      "fromVersion": 2,
+      "toVersion": 3,
+      "addsField": "plot",
+      "feature": "plot",
+      "why": "Build order 1. Seeds plot = { plotId = \"\", claimedAtUnix = 0 } when absent (empty plotId = holds no plot; the join claim fills it). Idempotent so a re-migrate never evicts a live claim. MUST stamp schemaVersion = 3."
+    },
+    {
+      "fromVersion": 3,
+      "toVersion": 4,
+      "addsField": "daily",
+      "feature": "daily",
+      "why": "Build order 2. Seeds daily = { streak = 0, lastClaimUnix = 0 } when absent — 0 means never claimed, so the window is open immediately on first join. Idempotent. MUST stamp schemaVersion = 4."
+    },
+    {
+      "fromVersion": 4,
+      "toVersion": 5,
+      "addsField": "smelter",
+      "feature": "salvage",
+      "why": "Build order 4. Seeds smelter = { storedCredits = 0, lastTickUnix = 0 } when absent. lastTickUnix = 0 is safe ONLY because SalvageService re-stamps it to now at session load before its first tick (otherwise the first tick would credit ~56 years of accrual, clamped to capacity but still a free full smelter). Idempotent. MUST stamp schemaVersion = 5."
+    },
+    {
+      "fromVersion": 5,
+      "toVersion": 6,
+      "addsField": "resurfaces",
+      "feature": "resurface",
+      "why": "Build order 8. Seeds resurfaces = 0 when absent, preserving any existing value so a re-migrate cannot reset an advanced prestige count. MUST stamp schemaVersion = 6."
+    },
+    {
+      "fromVersion": 6,
+      "toVersion": 7,
+      "addsField": "boostExpiresUnix",
+      "feature": "monetization",
+      "why": "Build order 9. Seeds boostExpiresUnix = 0 (no active boost) when absent — an existing player simply starts the new schema unboosted, since none was ever persisted. Idempotent. MUST stamp schemaVersion = 7, and CURRENT_SCHEMA_VERSION becomes 7 with a self-verifying v1->v7 round-trip test."
+    }
+  ],
+  "newCtxSeams": [
+    "economy",
+    "plot",
+    "salvage",
+    "depth"
+  ],
+  "defaultSeeds": [
+    "currencies.Credits = 0",
+    "currencies.Pearls = 0",
+    "stats.lifetimeCredits = 0",
+    "plot = { plotId = \"\", claimedAtUnix = 0 }",
+    "smelter = { storedCredits = 0, lastTickUnix = 0 }",
+    "daily = { streak = 0, lastClaimUnix = 0 }",
+    "resurfaces = 0",
+    "boostExpiresUnix = 0",
+    "REMOVE the inherited currencies.Stardust seed — it is the FOUNDATION game's currency, not this game's"
+  ],
+  "analytics": {
+    "serviceName": "AnalyticsService",
+    "seam": "ctx.analytics:emit(event, payload)",
+    "lifecycle": [
+      "session_start on PlayerAdded, fired AFTER the session data load resolves (before it, the payload has no data to describe)",
+      "session_end on PlayerRemoving, BEFORE the data layer releases the session (after it, the emit reads NoData and the event fires empty)"
+    ],
+    "events": [
+      "session_start",
+      "session_end",
+      "loop_completed",
+      "currency_earned",
+      "currency_spent",
+      "progression",
+      "purchase"
+    ]
+  },
+  "sharedServices": [
+    {
+      "name": "analytics",
+      "serviceName": "AnalyticsService",
+      "purpose": "THE single analytics emitter on the ctx.analytics seam: ctx.analytics:emit(event, payload), server-clock stamped, buffered in memory so a Tier-1 spec can assert 'event X fired with payload Y at T' with no Roblox runtime. Declares the taxonomy once (session_start, session_end, loop_completed, currency_earned, currency_spent, progression, purchase) and owns the session_start / session_end lifecycle on PlayerAdded / session release. Every feature emits THROUGH this seam nil-safely — no feature stands up analytics of its own, or the game builds it nine times."
+    },
+    {
+      "name": "economy",
+      "serviceName": "EconomyService",
+      "purpose": "THE single Credits/Pearls mutation helper on the ctx.economy seam, standing up cross-cutting behaviour no feature builder can own because the earn/spend sites live in OTHER features. earn(data, currency, amount, source): applies the balance delta, increments stats.lifetimeCredits FOR CREDITS ONLY (never for Pearls), and emits currency_earned. spend(data, currency, amount, sink): guards with Err(Insufficient) before debiting, never allows a negative balance, and emits currency_spent. Both are PURE transforms designed to be applied inside ONE DataService:update, so a builder cannot forget the lifetime counter, cannot mint by read-then-write across a yield, and cannot double-emit. This is the enforcement point for 'lifetime on all earns, never on spend/reset'."
+    },
+    {
+      "name": "joinretry",
+      "serviceName": "JoinRetry",
+      "purpose": "Client framework guard (src/client/framework/JoinRetry.luau) — this scaffold does not have one. Every controller here fetches server state on Start (plot.fetch, salvage.fetch, offline.claim, daily.claim), and all of it exists only after loadSession's yield completes; an unguarded Start() call races that yield and, in the offline case, PERMANENTLY loses the accrual because the autosave then erases the away window. No offline verification rung can see this — it is a T2.7 finding by construction, so the guard ships as framework before any controller is written.",
+      "kind": "client-framework"
+    },
+    {
+      "name": "hudroot",
+      "serviceName": "HudRoot",
+      "kind": "client-framework",
+      "purpose": "AMENDMENT A10d: the ONE shared client HUD root — a single ScreenGui plus a simple anchored slot layout every controller mounts into — standing beside JoinRetry in src/client/framework/. Seven feature controllers each say \"client controller\" and none owned a shared root; without this the merge produces seven overlapping full-screen GUIs, and a pile of stacked panels is the first thing the human sees. Each controller mounts its panel into a NAMED SLOT; no controller creates its own ScreenGui."
+    }
+  ],
+  "retrofits": [
+    {
+      "file": "games/deep-reach/src/shared/Migrations.luau",
+      "change": "Replace the fresh-player seed `currencies = { Stardust = 0 }` with `currencies = { Credits = 0, Pearls = 0 }`; add default() seeds for plot, smelter, daily, resurfaces, boostExpiresUnix and stats.lifetimeCredits at CURRENT_SCHEMA_VERSION; append the six ordered steps [1]..[6], each idempotent and each STAMPING its target version.",
+      "why": "The scaffold ships collect-sim's currency. Left alone, Deep Reach mints Stardust while every Credits read starts nil, and the default() seed is a SEPARATE code site from the migrate() steps — seeding one without the other is the classic half-migration."
+    },
+    {
+      "file": "games/deep-reach/src/shared/Types.luau",
+      "change": "Add plot, smelter, daily, resurfaces, boostExpiresUnix to PlayerData and stats.lifetimeCredits inside the stats record; mirror the five top-level fields in PlayerView and add one allowlist line each in toView (stats is copied wholesale, so lifetimeCredits needs no line); bump CURRENT_SCHEMA_VERSION from 1 to 7. AMENDMENT A4: ALSO widen PlayerView.stats to { playtimeSeconds: number, joinCount: number, lifetimeCredits: number } — toView copying stats wholesale delivers the VALUE but not the TYPE, and PlayerView.stats is a narrow fixed record at Types.luau:48.",
+      "why": "toView is an allowlist — a new PlayerData field is invisible to the client unless added deliberately, so a missing line ships a HUD that renders nil."
+    },
+    {
+      "file": "games/deep-reach/src/shared/Net.luau",
+      "change": "Add the 13 Net.Actions keys; AND extend the exported ActionContext type with the new nil-safe seams `economy: any?, plot: any?, salvage: any?, depth: any?` alongside the existing security/flags/analytics/monetization.",
+      "why": "ActionContext is a --!strict type; a handler reading ctx.economy or ctx.depth without the field declared is a type error at build, and shared/ is read-only to feature work so no builder can add it mid-fan-out."
+    },
+    {
+      "file": "games/deep-reach/src/shared/Result.luau",
+      "change": "Add Insufficient, OnCooldown, PrereqUnmet and Unavailable to Result.Codes.",
+      "why": "This scaffold genuinely lacks Insufficient and OnCooldown (they exist only in collect-sim), and every spend/cooldown path in the plan returns one of them."
+    },
+    {
+      "file": "games/deep-reach/src/server/Context.luau",
+      "change": "In Context.build, construct AnalyticsService and EconomyService and assign context.analytics / context.economy (both are literal `nil` placeholders today); add `plot = nil, salvage = nil, depth = nil` placeholder keys for the feature services to populate at Start.",
+      "why": "Seams must exist and be non-surprising from t0; a feature cannot edit Context.build during fan-out without colliding with the other eight."
+    },
+    {
+      "file": "games/deep-reach/src/server/init.server.luau",
+      "change": "Register AnalyticsService and EconomyService in the deterministic services list immediately after context.data and before any feature service; leave a clearly marked `-- [features] one line per feature, appended at merge` insertion block.",
+      "why": "Start order is load-bearing (net, then data, then the emitter/economy, then features that emit). This file is also the #1 union-merge conflict: nine builders each append one line."
+    },
+    {
+      "file": "games/deep-reach/src/client/init.client.luau",
+      "change": "Add the JoinRetry framework module to the client wiring and leave a marked insertion block for the per-feature controller lines.",
+      "why": "Same merge-conflict surface as the server list, and JoinRetry must be available to the first controller that merges."
+    },
+    {
+      "file": "games/deep-reach/tests/run.luau",
+      "change": "Add `./unit/contract.spec` to SPEC_PATHS (the contract pass's own v1->v7 round-trip, toView allowlist, and taxonomy-completeness spec) and leave the sorted list ready for one appended line per feature.",
+      "why": "SPEC_PATHS is an explicit list, not fs.readDir — a feature spec that is not appended silently never runs, which is how a green test count hides an unbuilt feature."
+    },
+    {
+      "file": "games/deep-reach/tests/lib/mocks.luau",
+      "change": "Pass the new seams through Mocks.net's ActionContext (economy, plot, salvage, depth, plus persistenceDegraded) alongside the existing security/flags/analytics/monetization; add a Mocks.playerData(nowUnix) helper returning a CURRENT-version blob.",
+      "why": "Mocks.net today drops any seam it does not name, so a handler reading ctx.economy would see nil in every feature test and the tests would pass against a no-op. The playerData helper stops nine builders hand-writing nine drifting v7 blobs."
+    },
+    {
+      "file": "games/deep-reach/tests/unit/data.spec.luau",
+      "change": "Retarget every `currencies.Stardust` assertion to `currencies.Credits`; update the fresh-default assertions to the v7 shape.",
+      "why": "Inherited collect-sim assertions; the gauntlet must be green BEFORE fan-out or every builder inherits a red baseline and cannot tell its own breakage from the scaffold's."
+    },
+    {
+      "file": "games/deep-reach/tests/unit/economy_race.spec.luau",
+      "change": "Retarget the `currencies.Stardust` sites (including the raw `d.Stardust` single-writer cases) to Credits, and the hard-coded `schemaVersion = 1` seed blobs to the current version.",
+      "why": "Same inherited-currency problem; this is also the spec the integration gate's shared-balance race extends, so it must speak Credits."
+    },
+    {
+      "file": "games/deep-reach/tests/unit/migration.spec.luau",
+      "change": "Retarget the Stardust assertions to Credits and extend the round-trip cases to v1->v7 across all six new steps, asserting each step is idempotent and stamps its version.",
+      "why": "Six steps land at once in the contract pass; without a per-step round-trip the 'no step registered' non-destructive break in Migrations.migrate would silently swallow a missing stamp."
+    },
+    {
+      "file": "games/deep-reach/src/server/services/sample/ + src/client/controllers/sample/ + tests/unit/sample.spec.luau + the Net.Actions.Sample key",
+      "change": "Deleted by build-game once the first real features land (listed here for blast-radius completeness, not as contract-pass work).",
+      "why": "SampleAction writes `currencies.Stardust` directly — if it survives past batch 0 it mints a currency this game does not have, straight past the economy's single-writer path."
+    },
+    {
+      "file": "games/deep-reach/src/server/services/sample/SampleService.luau",
+      "change": "AMENDMENT A10a: DELETE the sample service AND src/client/controllers/sample/, tests/unit/sample.spec.luau, and the Net.Actions.Sample key, IN THIS PASS (the plan had deferred this to later build-game work). Then remove ./unit/sample.spec from tests/run.luau SPEC_PATHS.",
+      "why": "SampleAction writes currencies.Stardust directly and is client-callable. Left alive through batch 0 it mints a currency this game does not have into live blobs, straight past the economy single-writer path; and deleting Net.Actions.Sample later would be a SECOND shared-contract edit outside this guarded pass. Nothing depends on it, and the sample-removal finalization gate would refuse the handoff for it anyway."
+    },
+    {
+      "file": "games/deep-reach/src/server/init.server.luau",
+      "change": "AMENDMENT A10b: pin the PlayerRemoving hook ORDER explicitly, with a comment saying why: AnalyticsService session_end (needs the still-loaded blob) -> PlotService release (frees the dome) -> DataService session release (invalidates the blob).",
+      "why": "Three features hook the same event and nobody owned the ordering. A session_end emitted AFTER the data-layer release reads NoData, so the event fires with an empty payload and the analytics success criterion passes vacuously. The ordering is load-bearing and no single feature builder can own it."
+    },
+    {
+      "file": "games/deep-reach/src/shared/Config.luau",
+      "change": "AMENDMENT A10c: add ONE shared server-day helper (dayIndex(nowUnix) = math.floor(nowUnix / 86400)) and document the two DIFFERENT time rules this game deliberately has: the daily supply drop uses a ROLLING 20-22h window measured off daily.lastClaimUnix (per the spec), while the restock rich wreck rotates on the ABSOLUTE server-day index.",
+      "why": "Both spec bullets say \"daily\" and they are NOT the same rule. Two features will otherwise each invent a definition of a day, and the restock-resets test and the daily-window test will disagree about what a day is. Pinning one helper and naming the difference is far cheaper than reconciling two drifted clocks at the integration gate."
+    }
+  ],
+  "earnPaths": [
+    "SalvageService — manual smelter empty via salvage.collect (stored Credits -> currencies.Credits)",
+    "SalvageService — auto-collect tick empty when flags['gamepass.autoCollect'] is true (the same grant on a different trigger; it must NOT be a second code path that skips the lifetime increment)",
+    "OfflineService — the away-accrual grant on offline.claim, capped by smelter capacity",
+    "DailyService — the supply-drop reward on daily.claim (escalating with streak)",
+    "MonetizationService — the Credit pack S/M/L grant inside ProcessReceipt",
+    "EXPLICITLY NOT AN EARN — the salvage TICK itself: accrual into smelter.storedCredits is unbanked output; counting it at tick AND at collect double-counts lifetimeCredits",
+    "EXPLICITLY NOT AN EARN — the Pearls mint on resurface: stats.lifetimeCredits counts CREDITS only, so EconomyService:earn must branch on currency",
+    "EXPLICITLY NOT AN EARN — the restock rich-wreck bonus: it is a MULTIPLIER folded into the rate, so it arrives through the salvage collect path already and must not be credited separately",
+    "EXPLICITLY NOT AN EARN (spend paths, must never touch lifetimeCredits) — structures.buy, depth.descend",
+    "EXPLICITLY NOT A DECREMENT (reset path) — resurface.do zeroes currencies.Credits and wipes upgrades but MUST leave stats.lifetimeCredits untouched; it is the leaderboard's ranking key and resetting it would rank prestiged players last"
+  ],
+  "emitPoints": [
+    {
+      "event": "session_start",
+      "where": "AnalyticsService:Start -> Players.PlayerAdded, fired after the session's data load resolves (never before, or the payload has no data to describe)",
+      "owner": "contract-pass"
+    },
+    {
+      "event": "session_end",
+      "where": "AnalyticsService:Start -> Players.PlayerRemoving / DataService session release, with playtime seconds from the server clock",
+      "owner": "contract-pass"
+    },
+    {
+      "event": "currency_earned",
+      "where": "EconomyService:earn called from SalvageService's smelter collect (salvage.collect) AND its auto-collect tick empty; source=\"smelt\". NOT fired when Credits accrue into smelter.storedCredits — accrual is not an earn",
+      "owner": "salvage"
+    },
+    {
+      "event": "currency_earned",
+      "where": "EconomyService:earn in OfflineService's claim handler (offline.claim); source=\"offline\"",
+      "owner": "offline"
+    },
+    {
+      "event": "currency_earned",
+      "where": "EconomyService:earn in DailyService's supply-drop grant (daily.claim); source=\"daily\"",
+      "owner": "daily"
+    },
+    {
+      "event": "currency_earned",
+      "where": "EconomyService:earn in MonetizationService's Credit-pack grant inside ProcessReceipt; source=\"product.creditpack\"",
+      "owner": "monetization"
+    },
+    {
+      "event": "currency_earned",
+      "where": "EconomyService:earn for the Pearls mint in ResurfaceService (resurface.do); currency=\"Pearls\", source=\"resurface\" — earns Pearls, so it does NOT touch stats.lifetimeCredits",
+      "owner": "resurface"
+    },
+    {
+      "event": "currency_spent",
+      "where": "EconomyService:spend in StructuresShopService's purchase handler (structures.buy), one per catalog entry incl. the Pearl-priced ones; sink=\"structure.<key>\"",
+      "owner": "structures"
+    },
+    {
+      "event": "currency_spent",
+      "where": "EconomyService:spend in DepthService's unlock debit (depth.descend); sink=\"depth.<tier>\"",
+      "owner": "depth"
+    },
+    {
+      "event": "progression",
+      "where": "DepthService, after a successful descend commits, with the new tier index",
+      "owner": "depth"
+    },
+    {
+      "event": "progression",
+      "where": "ResurfaceService, after the reset + Pearls mint commits, with the new resurfaces count",
+      "owner": "resurface"
+    },
+    {
+      "event": "purchase",
+      "where": "MonetizationService's ProcessReceipt, after the receipt id is recorded in the receipts ledger and the grant commits (Credit packs S/M/L and the 30-min 2x boost)",
+      "owner": "monetization"
+    },
+    {
+      "event": "purchase",
+      "where": "MonetizationService's gamepass grant path — UserOwnsGamePassAsync on join and PromptGamePassPurchaseFinished on a fresh purchase — when a flags['gamepass.*'] transitions false->true",
+      "owner": "monetization"
+    },
+    {
+      "event": "loop_completed",
+      "where": "DepthService, on the first successful depth.descend of a session — the terminal step of the spec's core loop (join -> plot claimed -> buy drone -> smelter yields Credits -> buy an upgrade -> unlock Depth 2). The integration test's claim->salvage->buy->descend->resurface traversal observes it here",
+      "owner": "depth"
+    }
+  ],
+  "stubs": [
+    {
+      "name": "plot",
+      "serviceName": "PlotService",
+      "actions": [
+        "ClaimPlot",
+        "FetchPlot"
+      ],
+      "seamProvided": "ctx.plot — plotIdFor(player) -> nil, rootFor(player) -> nil, ownerOf(plotId) -> nil (stub: no plots claimed yet)"
+    },
+    {
+      "name": "daily",
+      "serviceName": "DailyDropService",
+      "actions": [
+        "ClaimDaily"
+      ],
+      "seamProvided": null
+    },
+    {
+      "name": "leaderboard",
+      "serviceName": "LeaderboardService",
+      "actions": [
+        "FetchLeaderboard"
+      ],
+      "seamProvided": null
+    },
+    {
+      "name": "salvage",
+      "serviceName": "SalvageService",
+      "actions": [
+        "CollectSmelter",
+        "FetchSalvage"
+      ],
+      "seamProvided": "ctx.salvage — rateFor(data) -> 0, capacityFor(data) -> 0 (stub: no income until the real service lands)"
+    },
+    {
+      "name": "structures",
+      "serviceName": "StructuresShopService",
+      "actions": [
+        "BuyStructure",
+        "FetchStructures"
+      ],
+      "seamProvided": null
+    },
+    {
+      "name": "depth",
+      "serviceName": "DepthService",
+      "actions": [
+        "Descend",
+        "FetchDepth"
+      ],
+      "seamProvided": "ctx.depth — valueMultiplier(data, nowUnix) -> 1 (IDENTITY: salvage multiplies by this, so 1 keeps the rate unchanged) and tierYFor(data) -> the tier-1 world Y (so PlotService places a dome at Depth 1 before Depth tiers is built)"
+    },
+    {
+      "name": "offline",
+      "serviceName": "OfflineService",
+      "actions": [
+        "ClaimOffline",
+        "FetchOffline"
+      ],
+      "seamProvided": null
+    },
+    {
+      "name": "resurface",
+      "serviceName": "ResurfaceService",
+      "actions": [
+        "Resurface",
+        "FetchResurface"
+      ],
+      "seamProvided": null
+    },
+    {
+      "name": "monetization",
+      "serviceName": "MonetizationService",
+      "actions": [],
+      "seamProvided": null
+    }
+  ],
+  "precisionNotes": [
+    "THE SCAFFOLD CARRIES THE FOUNDATION GAME'S CURRENCY. Migrations.default seeds currencies = { Stardust = 0 }, and data.spec / economy_race.spec / migration.spec assert on currencies.Stardust in ~35 places. Retarget ALL of it to Credits before fan-out, or every Credits read starts nil and nine builders inherit a red baseline they cannot distinguish from their own breakage.",
+    "DELETE the sample service, controller, spec and its Net.Actions key in THIS pass. SampleAction writes currencies.Stardust directly and is client-callable — left alive it mints a currency this game does not have, past the economy single-writer path.",
+    "PlayerRemoving hook ORDER is load-bearing and belongs to nobody else: AnalyticsService session_end (needs the loaded blob) -> PlotService release -> DataService session release.",
+    "structures.fetch must iterate the server-owned CATALOG, never the raw upgrades blob (enumerating the blob would expose upgrades.depth as purchasable).",
+    "Every service registers its actions as CLOSURES over service state inside Start(). The scaffold's SampleService registers a STATIC module table, which cannot reach service state — and offline's pending amount and leaderboard's snapshot are exactly that state.",
+    "ONE server-day helper in Config (dayIndex(now) = floor(now/86400)), and document that this game deliberately has TWO time rules: the daily supply drop is a ROLLING 20-22h window off daily.lastClaimUnix; the restock rotates on the ABSOLUTE day index.",
+    "tests/lib/mocks.luau drops any ActionContext seam it does not name — add economy/plot/salvage/depth there, or every feature test runs against a nil seam and passes against a no-op. Also add a Mocks.playerData(nowUnix) helper returning a CURRENT-version blob, so nine builders do not hand-roll nine drifting v7 blobs.",
+    "Leave a clearly marked one-line-per-feature insertion block in src/server/init.server.luau, src/client/init.client.luau and tests/run.luau SPEC_PATHS — these three registries take one line per feature and are the union-merge conflict surface.",
+    "SIX migration steps land at once on a DataStore (DeepReachData_v1) that has never held a blob. The round-trip tests are discipline, not migration safety — but write them anyway: Migrations.migrate SILENTLY swallows a missing version stamp via its non-destructive break, so an unstamped step is invisible without them."
+  ]
+}
