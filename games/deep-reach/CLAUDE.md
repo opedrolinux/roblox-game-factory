@@ -1,0 +1,184 @@
+<!--
+  TEMPLATE — this file is forked into every game by the `new-game` skill, which fills the
+  GAME_TITLE / GAME_SLUG / STORE_NAME placeholders below. Inside `core/` itself they remain
+  literal placeholders (core is the foundation, not a game). Edit the *rules* here to change
+  the contract every future game inherits; edit a game's own copy to change only that game.
+  (The scaffolder refuses to finish if any placeholder is left unfilled.)
+-->
+
+# CLAUDE.md — engineering contract for Deep Reach
+
+This is the contract **every feature subagent builds to**. It is the per-game distillation of
+the factory's rules. Policy lives in the repo-root `FACTORY.md`; structure in `ARCHITECTURE.md`;
+the foundation's design rationale in `docs/CORE-DESIGN.md`. When they disagree, FACTORY.md wins on
+policy. Read this fully before writing code for this game.
+
+## This game
+
+| | |
+|---|---|
+| **Slug** | `deep-reach` |
+| **DataStore name** | `DeepReachData_v1` — unique to this game. **Never** share a store across games (player data would cross-contaminate). Set in `src/shared/Config.luau`. |
+| **Spec** | `specs/deep-reach.md` — the one-page contract this game is built to. |
+
+This game is a **fork of `core/`**: a crash-safe data layer, a server-authoritative networking
+gateway, anti-exploit validation, an injectable clock, and a Tier-1 test harness — already built and
+green. You add *gameplay* on top of that spine; you do not rebuild the spine.
+
+## The gauntlet — nothing is "done" until this is green
+
+Every edit and every feature must pass, from this game's directory:
+
+```sh
+stylua --check .          # formatting
+selene src                # lint (roblox-fenced std: bans wait/spawn/delay)
+rojo build default.project.json --output build.rbxlx   # it compiles to a place
+lune run tests/run.luau   # Tier-1 unit tests
+```
+
+A PostToolUse hook runs stylua + selene on each edited `.luau` and feeds failures back — fix them
+in the **same turn**. A feature that can't go green is **parked** for human review, never merged.
+
+## The verification ladder — SEVEN rungs, and the gauntlet is only the first three
+
+Green above is **T1**. It is not "works". The ladder (`docs/VERIFICATION-LADDER.md`) exists because this
+game's ancestor passed 313 Lune tests and **did not boot in Roblox at all**:
+
+| rung | claim | how to run it |
+|---|---|---|
+| T0 | formats, lints, compiles to a place | `stylua --check .` · `selene src` · `rojo build` |
+| T0.5 | every `require` resolves *inside Roblox* | `gate-require` (gauntlet stage) |
+| T1 | logic correct under simulation + nothing written-never-read | `lune run tests/run.luau` · `gate-reachability` |
+| T2 | the place boots, the loop runs on the live wire | `run-in-roblox` → `tests/tier2/smoke.server.luau` |
+| T2.5 | the scene is not obviously broken (machine playtest, **edit mode**) | `run-in-roblox` → `tests/tier2/playtest.server.luau` |
+| **T2.7** | **live Studio: the real client wire, and how it LOOKS** | **`/engine-pass games/deep-reach`** |
+| T3 | a person plays it and it is **fun** | a human — never automated |
+
+**Do not skip from T2.5 to the human.** T2.5 runs with no LocalPlayer, no stepping physics and a frozen
+server clock, so *the entire client is unverified there* — HUD, motes, prompts, the client bootstrap.
+**T2.7 is the only automatable rung that can see client wiring or pixels**, and it earns its place: the
+defect that lost offline earnings *permanently* was invisible to every rung below it.
+
+Never assert a tier from a feeling or from a green test count. Ask the aggregator, which reports the
+**highest contiguous green rung** and refuses handoff while a cheaper automatable rung is red or un-run:
+
+```sh
+lune run .claude/skills/lib/tier-status.luau games/deep-reach
+```
+
+## Read first: the factory's known failure modes
+
+Before writing a feature, skim **`docs/LEARNINGS.md`** — the cross-game checklist of every real bug class
+the factory's gates have caught (economy cap-bypass on restore, the cross-service-require boot bug,
+offline-base re-stamping, tautological concurrency tests, the sample-mint, an Unknown laundering to
+"done", …). The independent gate that grades your code is *looking for these*; seeing them up front is
+cheaper than re-discovering them. Add to that file when a gate catches a new one — that is the flywheel.
+
+## Non-negotiable engineering rules (apply to ALL generated code)
+
+These are the §10 rules. They are not style preferences — most exist because violating them loses
+real player data or real money, or hands an exploiter the economy.
+
+1. **`--!strict`** on every Luau module. No untyped code.
+2. **`task.*`, never `wait`/`spawn`/`delay`.** The roblox-fenced selene std *bans* the legacy
+   globals; use `task.wait`/`task.spawn`/`task.defer`.
+3. **Server-authoritative.** The client is never trusted. On **every** inbound client request,
+   validate **type + range + ownership + rate** before acting. Requests arrive as named *actions*
+   on the single server gateway (`src/server/net/`), gated by `src/server/security/Gate.luau` — add
+   an action, don't add a per-feature RemoteEvent.
+4. **Concurrency-safe economy.** No double-spend and no currency dupes from interleaved or
+   spam-duplicated requests. Mutate balances through the single-writer data path; never read-then-write
+   a balance across a yield without the lock the data layer provides. (See the economy race tests for
+   the failure mode being defended against.)
+5. **Idempotent purchases.** Purchases MUST be processed idempotently: the receipt handler records
+   processed receipt IDs in the data layer (the `receipts` ledger already exists in the player-data
+   shape) and returns `Enum.ProductPurchaseDecision.NotProcessedYet` on any failure, so a purchase is
+   **never** double-granted or lost. Real money. *(The receipt-processing path itself is a B2/feature
+   deliverable — build it; do not assume a prebuilt `ProcessReceipt` already lives in the spine.)*
+6. **Respect DataStore budgets.** Throttle + retry same-key writes; **save on `BindToClose`**. The
+   data layer already does this — go through it, don't call DataStores directly.
+7. **Server time, injectable clock.** Time-based features (offline earnings, streaks, restock) use
+   **server** time via the injected `Clock`, never `os.time()` sprinkled around and never client time.
+   The clock is injectable so tests are deterministic.
+8. **Data only through the data layer.** All persistence goes through `src/server/data/` (DataService).
+   A structural change to the player-data shape requires a **migration** (`src/shared/Migrations.luau`)
+   with a version bump and a round-trip test.
+9. **Filter all user-displayed text.** Anything a player can see that another player authored goes
+   through text filtering.
+10. **Never fabricate an API.** If you are unsure a Roblox or core API exists or behaves as you think,
+    verify it — or mark it `-- TODO(verify):` and leave it for the gate. Do not invent signatures.
+11. **Audit every inserted asset.** No Creator-Store asset lands without a human okay (assets can hide
+    backdoors). v1 is greybox-in-code anyway.
+
+## Cross-service requires — use the dual-runtime (D1) shim, always
+
+A `require` that crosses a **Rojo service-root boundary** is the single most dangerous line a feature can
+write, because it passes every Lune check and then throws at the first require in Roblox. The project maps
+`src/shared → ReplicatedStorage.Shared`, `src/server → ServerScriptService.Server`, `src/client →
+StarterPlayer.StarterPlayerScripts.Client` — three **different** top-level services with no common `../`
+ancestor. So a bare `require("../../shared/Net")` from a server module resolves against the *filesystem*
+under Lune (where `server`/`shared` are siblings) → passes → but resolves against the *instance tree* in
+Roblox → `Server.shared` (does not exist) → **throws at boot, before any service Start.** A green gauntlet
+will not save you; this exact bug shipped a game that never booted.
+
+**The rule:**
+- **Same-mount sibling require** (both files under the same service root, e.g. `shared/Migrations` →
+  `./Types`) — a bare relative string is fine; it resolves identically in both runtimes.
+- **Cross-mount require** (shared↔server↔client) — **MUST** use the dual-runtime **D1 shim** (this is the
+  exact form the real spine uses, e.g. `services/shop/UpgradesShopService.luau`):
+  ```lua
+  local Net
+  if script == nil then
+    Net = require("../../../shared/Net") -- Lune: filesystem loader (relative path depth varies by file)
+  else
+    local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
+    Net = require((Shared :: any).Net) -- Roblox: instance tree. The `:: any` cast is REQUIRED under
+    -- --!strict — a WaitForChild result is typed `Instance`, so `.Net` errors without it.
+  end
+  ```
+  The instance branch is the always-supported engine path; both branches **must resolve to the same
+  module**. The T0.5 require gate (`gate-require.luau`) fails any bare cross-service string require and any
+  shim whose branches drift — but author it correctly, do not lean on the gate.
+- A `-- Lune-clean` / `[D1 shim]` comment is **not a correctness badge** — it marks a file whose Roblox
+  branch Lune never exercises. Treat it as a reason to *verify* the instance branch (the require gate / an
+  in-engine smoke), never as evidence to trust it.
+
+See `docs/VERIFICATION-LADDER.md` for why this rung exists.
+
+## The shared contracts are READ-ONLY to feature work
+
+`src/shared/` is the integration seam every feature touches — the action registry (`Net.luau`), the
+player-data shape (`Types.luau`), `Config.luau`, `Migrations.luau`, `Result.luau`. The **contract pass**
+writes all foreseen deltas here **once, serially, before fan-out**, so parallel features only create
+their own disjoint module files and never collide.
+
+If your feature *discovers* it needs new shared wiring mid-build, make a **controlled contract
+amendment**: pause, add the shared field/action and version-bump the data shape, propagate, then
+resume — a small, named change. Never silently diverge the shared shape.
+
+## Where your code goes
+
+| You add | Here |
+|---|---|
+| A server service (a feature's authoritative logic) | `src/server/services/<feature>/` — a module returning a table with a single `Start(context)` hook; resolve dependencies through `context`, never sibling `require`s. |
+| A client controller / UI | `src/client/controllers/<feature>/` |
+| A new server action + its validation | register on the gateway in `src/server/net/`; validate in/through `Gate` |
+| A new persisted field | `src/shared/Types.luau` (+ a migration) — **contract amendment**, not a silent edit |
+| Tests for your feature | `tests/unit/<feature>.spec.luau`, driven by `tests/run.luau` |
+
+The `sample` service/controller (`services/sample/`, `controllers/sample/`) is a **deletable**
+smoke-test of the wiring — remove it when real features replace it; keep the wiring it demonstrates.
+
+## Independent test gates
+
+The agent that *wrote* a feature is the worst judge of whether it works. After a feature builds green,
+a **separate test agent** authors fresh Tier-1 tests **from the spec** (not from your implementation),
+covering behavior, negative/abuse (malformed payloads, rate limits, economy mint/overflow, ownership),
+**concurrency/races** (interleaved + spam-duplicated requests → double-spend/dupes), boundary values,
+and migration round-trips. A feature advances only on green.
+
+---
+
+*Foundation file map and request/lock/bootstrap flows: `docs/CORE-STRUCTURE.md`. Design rationale and
+toolchain gotchas: `docs/CORE-DESIGN.md`. The autonomy fence (what this game may never do on its own):
+`FACTORY.md` §4 + `docs/FENCE.md`.*

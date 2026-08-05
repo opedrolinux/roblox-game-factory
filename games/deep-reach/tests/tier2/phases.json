@@ -1,0 +1,15 @@
+{
+	"$schema": "t25-phases/1",
+	"world": { "enabled": true },
+	"roster": [
+		{ "name": "lane-limits", "gating": true, "structural": true },
+		{ "name": "bootstrap-parity", "gating": true, "structural": true },
+		{ "name": "world-contract", "gating": true, "structural": false },
+		{ "name": "spawn-safety", "gating": true, "structural": false },
+		{ "name": "traversal", "gating": true, "structural": false },
+		{ "name": "no-log-errors", "gating": true, "structural": true },
+		{ "name": "affordance-wiring", "gating": true, "structural": false },
+		{ "name": "client-load", "gating": false, "structural": false },
+		{ "name": "example-delta", "gating": false, "structural": false }
+	]
+}
