@@ -68,15 +68,36 @@ amendments inline. Each slice is the ONLY context its builder and gate receive, 
    server's tools at connection time; enabling the bridge afterwards does not backfill a live session.
    Verified working — see `games/deep-reach/tests/engine-pass/ENGINE-FACTS.md`.
 
-## Open questions for the human — not decided, deliberately
+## Decisions — the human delegated these; they are DECIDED, do not re-open
 
-- **`gate-reachability`'s maturity probe has two states**, sample-only and mature, and flips on ANY
+**D1 — `gate-reachability`'s maturity probe stays as it is. Do NOT add a third state.**
+The tempting fix is a "contract pass done, features not built" state that reports not-applicable.
+Rejected: that state would mask a genuine written-never-read defect *introduced by the contract pass
+itself*, which is exactly the class the gate exists to catch, and it would do so at the moment the
+schema is being written — the highest-blast-radius edit in the whole build. The scoped
+`allowGauntletRedAt` override is the permanent answer for this boundary instead: it is explicit,
+logged at the point of use, owned by the orchestrator (who can actually run the gauntlet and see
+which stages are red — the script cannot), and it defaults to off. The final gate is unchanged and
+still bites: **handoff requires a genuinely green gauntlet**, so fan-out has to earn it. A red
+reachability during Workflow A is a status, not a waiver.
+
+**D2 — pacing (A8) stays a coarse order-of-magnitude band, and the handoff note says so.**
+No tuned assertion. Time-to-first-Credits and time-to-afford-Depth-2 get a generous band at the
+integration gate purely to catch a composition that is 10x off — three numeric tables built in three
+batches multiplying into something absurd. That is the only pacing failure an offline rung can
+honestly detect. The handoff note must state plainly that pacing is **unverified by machine** and is
+a human judgment at the playtest; it must not imply any rung tuned it. Do not let a green band read
+as "the pacing is right".
+
+## Open questions still for the human
+
+- (RESOLVED as D1 above — kept for the reasoning) **`gate-reachability`'s maturity probe has two states**, sample-only and mature, and flips on ANY
   non-`sample` directory under `src/server/services/`. A contract pass MUST create those, so every
   game will sit in an unrepresented third state — "contract pass done, features not built" — at this
   exact boundary. Worked around this run with a scoped, logged, orchestrator-owned override
   (`allowGauntletRedAt`). The probe itself still wants a real fix, and that is a factory-wide change
   with its own corpus tests.
-- **Pacing (amendment A8)** — ~90s to first Credits, 10–15 min to first Depth unlock — is assigned to
+- (RESOLVED as D2 above — kept for the reasoning) **Pacing (amendment A8)** — ~90s to first Credits, 10–15 min to first Depth unlock — is assigned to
   the integration gate as a coarse order-of-magnitude band only. The real numbers are a human tuning
   judgment at the playtest. The handoff note must say so rather than implying an offline rung tuned
   them.
