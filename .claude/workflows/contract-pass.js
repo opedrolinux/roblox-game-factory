@@ -121,6 +121,12 @@ const GUARD = `HARD GUARD RULES (every phase of the contract pass):
 - Do not invent fields, actions, seams or services the contract does not name.
 ${contractSource}`
 
+// Appended to the LATER phase prompts only (never to GUARD, which the already-cached earlier phases
+// hash on). Without it an agent obeys "iterate until ok:true" against a stage that CANNOT go green
+// until fan-out, and the ways out of that loop are all bad: dated waivers written in the same turn
+// that caused the findings, or gaming the maturity probe by moving services out of the tree.
+const KNOWN_RED = (input && input.knownRedNote) || ''
+
 // ---- schemas (kept terse: an over-large output schema is rejected by the safety classifier
 // before the agent ever runs, and the workflow then returns the same shape as a clean no-op) ----
 const SCHEMA_RESULT = {
@@ -202,8 +208,33 @@ const VERIFY_RESULT = {
 }
 
 // ---- helper: abort early if a phase did not go green ----
+//
+// ORCHESTRATOR OVERRIDE (args.allowGauntletRedAt: [phaseLabel, ...]).
+// A workflow script cannot run the gauntlet — it has no filesystem and no shell — so all it has is
+// the agent's own `gauntletOk` boolean. It therefore CANNOT distinguish "only the reachability
+// stage is red, because the features it checks for do not exist yet" from "the test suite is red".
+// That distinction requires actually running the gauntlet, which only the orchestrator can do.
+//
+// So the override is deliberately NOT a judgement this script makes. The orchestrator runs the
+// gauntlet itself, sees which stages are red, and passes an explicit per-phase allowance. It is
+// logged loudly at the point of use so the allowance shows up in the run record and at the human
+// gate, rather than quietly turning a red phase into a green one.
+//
+// Default is empty: with no override, ANY red gauntlet aborts the pass, as before.
+const allowGauntletRedAt = (input && input.allowGauntletRedAt) || []
 function aborted(label, r) {
-  if (!r || !r.gauntletOk) {
+  if (!r) {
+    log(`contract-pass: ${label} returned null — aborting the pass; orchestrator inspects the partial state.`)
+    return true
+  }
+  if (!r.gauntletOk) {
+    if (allowGauntletRedAt.includes(label)) {
+      log(
+        `contract-pass: ${label} did NOT end gauntlet-green, but the ORCHESTRATOR passed an explicit allowance for this phase (allowGauntletRedAt includes "${label}"). ` +
+          `Continuing. This is NOT a pass — the phase is recorded red and the reason must survive to the human gate. Agent blockers: ${(r.blockers || []).join(' ;; ')}`
+      )
+      return false
+    }
     log(`contract-pass: ${label} did NOT end gauntlet-green — aborting the pass; orchestrator inspects the partial state. blockers: ${r && r.blockers ? r.blockers.join('; ') : 'agent returned null'}`)
     return true
   }
@@ -306,7 +337,8 @@ Two invariants govern all of them:
 
 THE ONE DELIBERATE EXCEPTION to invariant 1: a retrofit whose stated purpose is to CORRECT something this game INHERITED from the foundation it was forked from (most commonly: scaffold code and tests still naming the FOUNDATION game's currency or constants) is meant to change that value — that is the entire point of the edit. For those, "preserving behavior" means preserving the test's INTENT while retargeting its subject: an assertion about a balance must still assert the same property about THIS game's balance. Retarget it; do not delete it, and do not weaken it to make the suite green. Where the retrofit list names a set of files to retarget, GREP THE WHOLE GAME for the old identifier afterwards — a list assembled by reading is usually a few sites short, and a missed site is a nil read at runtime, not a test failure.
 
-Make the gauntlet green. Existing tests must not be weakened: if a built test must change because a field legitimately appears or a subject was legitimately retargeted, prefer ADDING assertions over removing one. Return the StructuredOutput and set behaviorPreserved + lifetimeOnlyOnEarns TRUTHFULLY — a false claim here is worse than a red gauntlet.`,
+Make the gauntlet green. Existing tests must not be weakened: if a built test must change because a field legitimately appears or a subject was legitimately retargeted, prefer ADDING assertions over removing one. Return the StructuredOutput and set behaviorPreserved + lifetimeOnlyOnEarns TRUTHFULLY — a false claim here is worse than a red gauntlet.
+${KNOWN_RED}`,
     { label: 'contract:retrofits', phase: 'Retrofits', schema: RETROFIT_RESULT, effort: 'high' }
   )
 
@@ -331,7 +363,8 @@ For EACH feature in contract.stubs (${JSON.stringify(stubList.map((s) => s.name 
 - Register EVERY stub service in init.server.luau.
 - Do NOT write feature LOGIC — these are stubs. Do NOT write client controllers (each hasUI builder writes its own).
 
-Gauntlet green (all actions registered, dispatch wiring intact, no regression against the baseline). Return the StructuredOutput.`,
+Gauntlet green (all actions registered, dispatch wiring intact, no regression against the baseline). Return the StructuredOutput.
+${KNOWN_RED}`,
   { label: 'contract:stubs', phase: 'Stubs', schema: STUBS_RESULT, effort: 'high' }
 )
 
