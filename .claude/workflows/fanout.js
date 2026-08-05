@@ -133,6 +133,22 @@ for (let i = 0; i < features.length; i++) {
       effort: 'high',
     })
     fixes.push(fix || { round, fixed: false, note: 'fixer agent returned null' })
+
+    // ALREADY-CLOSED IS NOT A FAILURE. A fixer that finds the bug already fixed — because an earlier
+    // round in this same loop landed it — correctly reports fixed=false (it changed no code) with an
+    // EMPTY stillBroken. Without this branch that is indistinguishable from "I could not fix it", so
+    // the loop burns its remaining rounds and then PARKS a feature whose bugs are closed. Observed on
+    // salvage: round 1 fixed both findings, round 2 re-derived the falsification independently by
+    // reverting each fix line-by-line, confirmed both tests bite, added one more — and parked it.
+    //
+    // The bar is deliberately the same evidence any close requires: a was-RED regression test and a
+    // green gauntlet. What is relaxed is ONLY the "did you personally edit the implementation"
+    // clause, which is a question about authorship, not about whether the bug is closed.
+    if (fix && !fix.fixed && (!fix.stillBroken || fix.stillBroken.length === 0) && fix.regressionTest && fix.regressionTest.added && fix.regressionTest.wasRedBeforeFix && (fix.gauntletOk || allowGauntletRedStages.length > 0)) {
+      log(`fanout: ${f.name} — fixer applied no code change but reports NOTHING still broken, with a was-RED regression test and a green gauntlet: the finding was already closed (earlier round). Treating as fixed rather than parking a closed bug.`)
+      verdict = 'fixed'
+      break
+    }
     // The fixer closes the bug iff it applied a real fix, added a falsify-first (was-RED) regression
     // test, and the gauntlet is green. Otherwise loop (another round) or fall through to park.
     // The gauntlet clause carries the same known-red override as the build and gate steps: without

@@ -79,6 +79,34 @@ describe("services/economy/EconomyService — earn", function()
 		expect(data.stats.lifetimeCredits):toBe(5000)
 	end)
 
+	it("a REFUSED earn is atomic-or-nothing — no branch may mutate and then refuse", function()
+		-- REGRESSION (found by the salvage gate). This check used to sit BELOW the balance write, so
+		-- a missing `stats` credited currencies.Credits and THEN returned Err(Internal). Every caller
+		-- reads `if not granted.ok then <undo my side> end` as "nothing happened" — and salvage,
+		-- correctly written against that contract, restored its smelter and committed a snapshot
+		-- holding the amount in BOTH places. A mint, produced by two pieces of correct-looking code.
+		--
+		-- Asserted as the DELTA on the blob, not as the returned code: the code was always right.
+		local clock = Mocks.clock(7000)
+		local analytics = AnalyticsService.new(clock)
+		local economy = EconomyService.new(analytics)
+
+		local data = blob(100, 7, 5000)
+		data.stats = nil :: any -- the one branch that used to refuse AFTER writing
+
+		expect(economy:earn(data, "Credits", 250, "smelt")):toBeErr(Result.Codes.Internal)
+		expect(data.currencies.Credits):toBe(100) -- NOT 350 — the refusal cost the player nothing
+		expect(data.currencies.Pearls):toBe(7) -- and touched no neighbouring currency
+		expect(#analytics:eventsOfType("currency_earned")):toBe(0)
+
+		-- The same guarantee for the non-lifetime currency, which takes the other branch entirely:
+		-- Pearls never touch stats, so a missing stats table must not stop a legitimate Pearls earn.
+		local pearlsOnly = blob(0, 3, 0)
+		pearlsOnly.stats = nil :: any
+		expect(economy:earn(pearlsOnly, "Pearls", 2, "resurface")):toBeOk()
+		expect(pearlsOnly.currencies.Pearls):toBe(5)
+	end)
+
 	it("emits currency_earned through the analytics seam, with the source", function()
 		local clock = Mocks.clock(4242)
 		local analytics = AnalyticsService.new(clock)

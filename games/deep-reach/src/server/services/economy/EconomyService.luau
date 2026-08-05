@@ -149,6 +149,23 @@ function EconomyService.earn(
 	end
 	local map = (currencies :: any).value
 
+	-- EVERY REFUSAL IS DECIDED BEFORE THE FIRST MUTATION. This check used to sit BELOW the balance
+	-- write, which made `earn` non-atomic on exactly one branch: it credited currencies[currency] and
+	-- THEN returned Err(Internal) for missing stats. That is the worst possible shape for a seam whose
+	-- entire job is to be the one safe way to move a balance — every caller reasonably reads
+	-- `if not granted.ok then <undo my side> end` as "nothing happened", and on this branch something
+	-- had. The salvage gate caught it as a mint: collect zeroed the smelter, earn credited the balance
+	-- and refused, salvage restored the smelter, and the transform committed with the amount in BOTH
+	-- places — with stats.lifetimeCredits never moving, so no downstream reader could see it.
+	--
+	-- Fixed HERE rather than in the caller, because the caller was not wrong. Five features earn
+	-- through this seam (salvage, daily, offline, monetization, resurface) and each would have had to
+	-- independently discover that a documented atomic-or-nothing helper is not one. Retiring the class
+	-- at the seam is the whole reason the contract pass stood this service up.
+	if currency == EconomyService.LIFETIME_CURRENCY and type(data.stats) ~= "table" then
+		return Result.err(Result.Codes.Internal, "economy: data.stats is missing")
+	end
+
 	local before = self:balanceOf(data, currency)
 	local balance = before + amount
 	map[currency] = balance
@@ -156,9 +173,6 @@ function EconomyService.earn(
 	-- THE lifetime rule, in one branch. Pearls (and any future currency) never touch it.
 	local lifetimeCredits: number
 	if currency == EconomyService.LIFETIME_CURRENCY then
-		if type(data.stats) ~= "table" then
-			return Result.err(Result.Codes.Internal, "economy: data.stats is missing")
-		end
 		local current = data.stats.lifetimeCredits
 		if type(current) ~= "number" or current ~= current then
 			current = 0
