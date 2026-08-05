@@ -16,7 +16,13 @@ lives only in a chat log.
 | orchestrator adjudication | 11 amendments A1–A11 · `amend.js`, `plan.json` |
 | contract pass | schema v1→v7, infra, 9 stubs · commit `723534c` |
 | **HUMAN GATE** | approved: commit as-produced, then fix findings as a separate commit |
-| verifier findings fixed | see the commit after `723534c` |
+| verifier findings fixed | all 4, each with a recorded RED · commit `439985d` · **194/194 lune** |
+
+**Gauntlet right now:** stylua · selene · rojo · require · lune all GREEN (194/194).
+`reachability` RED with 28 FAIL — `view-field-read` 19, `seam-read` 6, `currency-sink` 2,
+`catalog-id-read` 1. Every one is waiting on fan-out. The count went UP from 24 when the seam
+convention was fixed, because the gate went from blind (`seams:0`) to seeing (`seams:8`) — a higher
+number in a more honest state. Do not read it as a regression.
 
 ## Next: fan-out, batch by batch
 
