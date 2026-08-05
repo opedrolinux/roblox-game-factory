@@ -60,8 +60,41 @@ if (typeof input === 'string') {
 // No game default: silently writing the schema of the WRONG game is worse than failing here.
 const gameDir = input && input.gameDir
 if (!gameDir) throw new Error(`contract-pass: args must supply {gameDir, contract} (got gameDir=${JSON.stringify(gameDir)}).`)
-const contract = (input && input.contract) || {}
-const contractJson = JSON.stringify(contract, null, 2)
+// The contract arrives one of two ways:
+//   inline  — args.contract, embedded verbatim into every phase prompt. Fine for small contracts.
+//   by file — args.contractFile, a repo-relative path. The SCRIPT cannot read it (workflow scripts
+//             have no filesystem), but every phase AGENT can, so the prompt points them at it. This
+//             is how a large contract (tens of KB) stays in one canonical place instead of being
+//             copied into five prompts. It requires args.outline, because the script itself still
+//             branches on the shape (skip the retrofit phase when there are none, etc.).
+//
+// The failure this guards: a caller passes contractFile without an outline, the script sees an
+// EMPTY contract, dutifully writes nothing, ends gauntlet-green, and returns the same shape as a
+// clean run — a no-op that looks like a pass. Fail loudly instead.
+const contractFile = input && (input.contractFile || input.contractPath)
+const inlineContract = (input && input.contract) || {}
+const outline = (input && input.outline) || null
+const contract = contractFile ? outline || {} : inlineContract
+
+const REQUIRED = ['netActions', 'typedFields', 'migrations', 'stubs']
+const missing = REQUIRED.filter((k) => !Array.isArray(contract[k] || contract[k === 'typedFields' ? 'typesFields' : k]))
+if (missing.length) {
+  throw new Error(
+    contractFile
+      ? `contract-pass: contractFile "${contractFile}" was given, but args.outline is missing/incomplete: [${missing.join(', ')}]. A workflow script cannot read files, so the outline is the only thing the SCRIPT can branch on — without it this pass would write nothing and return green.`
+      : `contract-pass: args.contract is missing/!array: [${missing.join(', ')}]. An empty contract writes nothing and returns green — refusing to run a no-op that would look like a pass.`
+  )
+}
+
+// What every phase prompt is pointed at as its single source of truth.
+const contractSource = contractFile
+  ? `READ THE APPROVED CONTRACT SPEC IN FULL, FIRST, BEFORE ANY OTHER FILE: ${contractFile} (repo-relative JSON). It is your SINGLE SOURCE OF TRUTH for what to write — every field, action, seam, service, retrofit and stub you need is named in it. Do not work from the summary below; it is only an index. If you cannot read that file, STOP and report it as a blocker rather than guessing.
+
+Index of what it contains: ${JSON.stringify(outline && outline.index ? outline.index : {}, null, 2)}`
+  : `The approved contract spec (your single source of truth for WHAT to write) — every noun you need is in here; do not invent fields, actions, seams or services it does not name:
+-----
+${JSON.stringify(inlineContract, null, 2)}
+-----`
 
 const netActions = contract.netActions || []
 const typedFields = contract.typedFields || contract.typesFields || []
@@ -85,10 +118,8 @@ const GUARD = `HARD GUARD RULES (every phase of the contract pass):
 - Write ONLY what this phase specifies. Do NOT implement feature LOGIC — the contract pass wires + stubs; feature builders fill logic later. (Exception: the named retrofits to already-built services, which ARE this pass's job.)
 - After each edit, run stylua on the files you wrote (a PostToolUse hook nags otherwise; heal with "stylua <file>"). Keep --!strict on every module.
 - VERIFY by running: lune run .claude/skills/lib/gauntlet.luau ${gameDir} — iterate until it ends {"ok":true,...}. Report the lune stage {"passed":X,"failed":Y,"total":Z}. FIRST run it BEFORE you edit anything and note the baseline pass count: the existing tests MUST NOT regress, and you need the baseline to prove that.
-- The approved contract spec (your single source of truth for WHAT to write) — every noun you need is in here; do not invent fields, actions, seams or services it does not name:
------
-${contractJson}
------`
+- Do not invent fields, actions, seams or services the contract does not name.
+${contractSource}`
 
 // ---- schemas (kept terse: an over-large output schema is rejected by the safety classifier
 // before the agent ever runs, and the workflow then returns the same shape as a clean no-op) ----
@@ -314,10 +345,7 @@ phase('Verify')
 const verify = await agent(
   `You are an INDEPENDENT VERIFIER of a just-completed contract pass for ${gameDir}. You did NOT write it. Audit the WHOLE diff against the approved contract spec and try to find what is wrong, missing, or over-reaching. Reading + reasoning + running the gauntlet ONLY — do NOT edit anything.
 
-The approved contract spec:
------
-${contractJson}
------
+${contractSource}
 
 INSPECT the current working tree (the contract pass already ran). Use "git status" and "git diff" to see EVERY file it touched rather than guessing, then read: ${gameDir}/src/shared/{Net,Types,Migrations,Result}.luau; ${gameDir}/src/server/Context.luau and init.server.luau; every service dir under ${gameDir}/src/server/services/; ${gameDir}/tests/unit/migration.spec.luau and any new tests. Run "lune run .claude/skills/lib/gauntlet.luau ${gameDir}" to confirm green yourself — do not take the makers' word for it.
 
