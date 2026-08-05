@@ -42,6 +42,18 @@ Per batch: `fanout.js` (nests `build-features`: independent builder → independ
 adversarial critics → bounded N=2 falsify-first auto-fix) → orchestrator adjudicates → `merge.luau`
 classify → union-merge → re-gauntlet.
 
+**You MUST pass `allowGauntletRedStages: ["reachability"]` + a `gauntletRedReason` to `fanout.js`,
+every batch, until the last feature lands.** Without it a builder that is green on stylua / selene /
+rojo / require / lune is still recorded `build-failed` — because reachability is red by construction
+— and `build-failed` **skips the independent test gate**. That is the most expensive failure in this
+pipeline: nine ungated services, each reported as a failed build. Fixed in `39222cd`; the flag is the
+orchestrator's to set because only the orchestrator can run the gauntlet and see WHICH stage is red.
+Write the reason from a gauntlet run you actually did — it is quoted into the agents' prompts.
+
+`mode: "gate-only"` gates whatever is already on disk, skipping the builder. Use it when a control-flow
+fix would otherwise force a verified build to be rebuilt (trading a checked implementation for an
+unchecked one), not as a way to skip building.
+
 Then: `integration-gate.js` → `adversarial-review.js` → finalization (`gate-sample.luau`,
 `tier-status.luau`, `grade.js`) → portfolio note → the human FFs `main` and pushes.
 
@@ -67,6 +79,15 @@ amendments inline. Each slice is the ONLY context its builder and gate receive, 
 6. **The Studio MCP bridge needs a `/mcp` reconnect**, not just Studio being open. MCP enumerates a
    server's tools at connection time; enabling the bridge afterwards does not backfill a live session.
    Verified working — see `games/deep-reach/tests/engine-pass/ENGINE-FACTS.md`.
+7. **Never take a `build-failed` at face value — run the gauntlet yourself.** The first plot run came
+   back `build-failed` with a build that was green on every stage it could affect. An agent's
+   `gauntletOk` is one boolean over six stages; it cannot say WHICH failed, and the workflow script
+   has no filesystem to go look. Verify before adjudicating: the whole maker≠checker structure is
+   pointless if the orchestrator forwards an agent's self-report instead of checking it.
+8. **The feature slices are FILES, not prompt text** — `docs/build-records/deep-reach/slices/*.md`,
+   generated from `plan.json` (all 9 verified to round-trip verbatim). Pass the path plus the feature
+   headline as `specSlice`; do not retype 4KB of contract into a workflow call and hope it matches.
+   Regenerate rather than hand-edit if the plan changes.
 
 ## Decisions — the human delegated these; they are DECIDED, do not re-open
 
