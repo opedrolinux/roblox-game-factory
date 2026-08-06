@@ -152,6 +152,21 @@ function DataService.loadSession(self: any, player: PlayerLike): Result<any>
 			-- docs/LEARNINGS.md). A fresh player's base comes from default(); release/autosave
 			-- advance it forward.
 			session.data.stats.joinCount = (session.data.stats.joinCount or 0) + 1
+			-- [offline join-race] SNAPSHOT THE AWAY-WINDOW BASE AT INSTALL TIME, before this session
+			-- is visible to anything. `autosaveTick` re-stamps data.timestamps.lastSeenUnix to NOW on
+			-- every flush (see flushOne), and the offline feature can only observe a session AFTER the
+			-- line below installs it — it has no hand-off from here, so it polls. A flush landing in
+			-- that gap destroys the base before anything snapshotted it, and the away window is lost
+			-- PERMANENTLY and silently (docs/LEARNINGS.md — it cost a previous game's earnings).
+			-- Written ONCE per load and never touched by autosave, save or release, so the base does
+			-- not depend on WHEN the offline hook wakes up. Captured RAW: the reader sanitizes, because
+			-- a garbage persisted stamp must read as "no base", not throw inside the load path. Lives
+			-- on the session object (not `self`), so it dies with the session and cannot go stale; the
+			-- store persists only `session.data`, so this field is never written to the DataStore.
+			local timestamps = session.data.timestamps
+			session.joinBaseUnix = if type(timestamps) == "table"
+				then timestamps.lastSeenUnix
+				else nil
 			self._sessions[player.UserId] = session
 			-- [B2] a fresh session supersedes any dead marker (rejoin recovers).
 			self._dead[player.UserId] = nil
@@ -193,6 +208,28 @@ function DataService.get(self: any, player: PlayerLike): Result<any>
 		return Result.err(Result.Codes.NoData, "session not loaded")
 	end
 	return Result.ok(session.data)
+end
+
+-- [offline join-race] The away-window BASE for this player's CURRENT session: the value
+-- `timestamps.lastSeenUnix` held at the instant loadSession installed the session, RAW (the caller
+-- sanitizes). Returns nil when no session is installed — never a substitute for `get`.
+--
+-- Read `timestamps.lastSeenUnix` off the live blob and you are reading a field autosaveTick rewrites
+-- to NOW on every flush; a reader that wakes up after a flush sees "you were not away" and there is
+-- nothing left anywhere to recover the window from. This accessor is the stable base that flush
+-- cannot move. It is deliberately NOT part of the persisted shape: it describes THIS load.
+-- Typed `any`, not `number?`, ON PURPOSE: a persisted blob can carry a garbage stamp (a string, a
+-- NaN), and narrowing here would either be a lie or would have to sanitize — which is the reader's
+-- job, so that "no usable base" stays ONE decision in ONE place.
+function DataService.joinBaseFor(self: any, player: PlayerLike): any
+	if self._dead[player.UserId] then
+		return nil
+	end
+	local session = self._sessions[player.UserId]
+	if session == nil then
+		return nil
+	end
+	return session.joinBaseUnix
 end
 
 -- Concurrency-safe mutation: transform runs under the session lock (Session:update).

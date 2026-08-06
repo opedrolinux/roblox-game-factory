@@ -1448,3 +1448,266 @@ describe("structures: an entry with no installed consumer is refused, never debi
 		end
 	)
 end)
+
+-- ── 10. REGRESSION (F1) — THE POST-WRITE PUSH CAN NEVER FAIL A COMMITTED PURCHASE ───────────────
+--
+-- THE DEFECT THESE CASES PIN. `buy`'s post-write step reads
+-- `if outcome.ok then self:pushView(self._context, player); pcall(function() self:syncWorld(...) end) end`
+-- — syncWorld is pcall'd, pushView is a BARE call, while the comment above it claims both are
+-- "guarded and pcall'd". And inside `pushView` the pcall wraps only `net:fireClient`; the
+-- `context.data:get(player)` that feeds it sits OUTSIDE. Both readings run AFTER the transform has
+-- committed the level and after ctx.economy:spend has debited and emitted currency_spent, so a throw
+-- on either escapes `buy`, and Net.dispatch turns any throw out of a handler into
+-- Err(Result.Codes.Internal) (src/shared/Net.luau:249-252). The player is told their PAID, PERSISTED
+-- purchase failed — the exact defect the salvage merge produced (docs/LEARNINGS.md: an unguarded
+-- post-write FireClient turning a committed economy write into Err(Internal)), which 352 green Lune
+-- tests called fine because nothing exercised the push path at all.
+--
+-- The escape route is live today, not hypothetical: it is benign ONLY because the ONE implementation
+-- currently behind `context.data` (DataService.get) happens to be a pure table read. The transaction
+-- is protected by its callee rather than by the file that owns it, and `context.data` is a SEAM — the
+-- server context is assembled by the bootstrap and can hold any object that answers `get`.
+--
+-- WHY THE MUTATION IS THE DEFECT AND NOT A CRUDER COUSIN: the second case replaces exactly ONE thing
+-- — the `get` on the SERVER context the push reads through (`self._context.data`) — and leaves the
+-- buy's own `ctx.data` (the transform, the debit, the commit) completely untouched. So the purchase is
+-- genuinely committed and genuinely paid for before the throw, and the only question the case asks is
+-- whether the reply describes that committed purchase or an Internal error.
+describe(
+	"structures: the post-write push cannot undo, and cannot fail, a committed purchase",
+	function()
+		-- A ctx.data stand-in whose `get` THROWS and whose `update` is the real thing. This is the seam
+		-- `pushView` reads through, and the one place the finding says is unguarded.
+		local function throwingGet(real: any): any
+			local seam: any = {}
+			function seam.get(_self: any, _player: any): any
+				error("structures spec: the data seam threw inside the post-write push", 0)
+			end
+			function seam.update(_self: any, player: any, transform: any): any
+				return real:update(player, transform)
+			end
+			return seam
+		end
+
+		it(
+			"a committed buy pushes exactly one refreshed view; a refused buy pushes none",
+			function()
+				local h = newServer()
+				local player = h:join(1)
+				h:fund(player, 1_000_000)
+				local mark = #h.pushes
+				expect(h:buy(player, "drones")):toBeOk()
+				local pushed = 0
+				for index = mark + 1, #h.pushes do
+					local push = h.pushes[index]
+					if push.channel == "data" and push.player == player then
+						pushed += 1
+					end
+				end
+				expect(pushed):toBe(1)
+
+				-- A REFUSAL pushes nothing: there is no new state to describe, and a push after a refusal
+				-- would tell the HUD a purchase happened.
+				mark = #h.pushes
+				expect(h:buy(player, "hull", { noDepth = true })):toBeErr(Result.Codes.PrereqUnmet)
+				expect(#h.pushes):toBe(mark)
+			end
+		)
+
+		it("a THROWING push seam still returns Ok(BuyInfo) — never Err(Internal)", function()
+			local h = newServer()
+			local player = h:join(1)
+			h:fund(player, 1_000_000)
+			local price = h:priceOf(player, "drones")
+			local before = h:snap(player)
+
+			-- Poison ONLY the server context the post-write push reads through. The buy's own ctx.data is
+			-- untouched, so the transform, the debit and the commit all succeed exactly as before.
+			h.startContext.data = throwingGet(h.data)
+			local harness = h:wire()
+			local result = harness.invoke(Net.Actions.BuyStructure, player, { key = "drones" })
+			h.startContext.data = h.data
+
+			local after = h:snap(player)
+			-- The purchase IS committed and IS paid for, whatever the reply says:
+			expect(after.levels.drones):toBe(1)
+			expectClose(
+				before.credits - after.credits,
+				price,
+				"the poisoned push seam changed what the purchase debited"
+			)
+			expect(after.spent):toBe(before.spent + 1)
+			-- ... so the reply must describe THAT purchase, not an Internal error.
+			expect(result):toBeOk()
+			expect((result :: any).value.key):toBe("drones")
+			expect((result :: any).value.level):toBe(1)
+			expectClose(
+				(result :: any).value.cost,
+				price,
+				"the buy reply's cost disagrees with the debit that actually happened"
+			)
+		end)
+
+		it("pushView itself absorbs a throwing seam and REPORTS the failure as false", function()
+			-- Bound at the unit, not only at `buy`: `pushView`'s own contract is "every caller ignores
+			-- the return value — a presentation failure must never turn a granted purchase into an
+			-- error", which is only true if the failure never leaves this function. The `data:get` that
+			-- feeds the push sat OUTSIDE its pcall, so the seam it reads through could throw straight
+			-- past that contract. This case pins the guard to the function that promises it, so a
+			-- caller-side pcall cannot stand in for it.
+			local h = newServer()
+			local player = h:join(1)
+			local context: any = { net = h.startContext.net, data = throwingGet(h.data) }
+			local ok, pushed = pcall(function(): any
+				return StructuresShopService:pushView(context, player)
+			end)
+			expectTrue(ok, `pushView THREW instead of reporting a failed push: {tostring(pushed)}`)
+			expect(pushed):toBe(false)
+			-- and the control: with an honest seam it really does push, so `false` above means
+			-- "the push failed", not "this function never pushes".
+			expect(StructuresShopService:pushView(h.startContext, player)):toBe(true)
+		end)
+
+		it("a throwing push seam does not throw out of a DIRECT buy either", function()
+			-- The same escape, one layer lower: without Net.dispatch's pcall in front of it, the throw is
+			-- not an Err at all — it is an exception crossing the service boundary, which any caller that
+			-- is not a dispatch (the kiosk path, a later feature, a bootstrap hook) would take unguarded.
+			local h = newServer()
+			local player = h:join(1)
+			h:fund(player, 1_000_000)
+			h.startContext.data = throwingGet(h.data)
+			local ok, result = pcall(function(): any
+				return h:buy(player, "drones")
+			end)
+			h.startContext.data = h.data
+			expectTrue(
+				ok,
+				`buy THREW out of its post-write push instead of returning a Result: {tostring(
+					result
+				)}`
+			)
+			expect(result):toBeOk()
+			expect(h:snap(player).levels.drones):toBe(1)
+		end)
+	end
+)
+
+-- ── 11. REGRESSION (F3) — ONE AUTHORITY ON WHAT A LEVEL MEANS, AND A POISONED BYTE IS REPAIRED ──
+--
+-- THE DEFECT THESE CASES PIN. A persisted level is clamped in two places that disagree: this shop
+-- clamps to the catalog's own `maxLevel` (25 for drones), while SalvageService clamps to a private
+-- MAX_UPGRADE_LEVEL of 10000 (and DepthService keeps a third copy of that 10000 for `hull`). With
+-- `upgrades.drones = 1e308` on a hacked, legacy or mis-migrated blob:
+--   * the shop reports level 25 / maxed / nextCost 0 and refuses `buy` with PrereqUnmet,
+--   * `ctx.salvage:rateFor` goes on paying a fleet of STARTER_DRONES + 10000,
+--   * and the shop ROW is inverted: `describeEntry` probes the "next" reading at
+--     `math.min(level + 1, maxLevel)` = 25, so the row advertises a rate LOWER than the one the tick
+--     is actually paying — a NEGATIVE delta on an upgrade.
+-- The two authorities describe different fleets, and nothing ever repairs the byte: `1e308` is a
+-- usable number (only NaN and ±inf are rejected), so `levelOf` floors and clamps it, the buy transform
+-- takes its `level >= maxLevel` branch and returns BEFORE the only write in the file. The poison
+-- therefore survives every purchase attempt forever and bricks that entry as permanently maxed.
+--
+-- WHY THIS IS THE DELTA, NOT A RESTATEMENT OF §4's POISON CASE: that case asserts the BALANCE is
+-- finite and was not minted and no free level was granted — all of which stay true here. These cases
+-- assert the two things it never looks at: that the shop and the income engine AGREE about what the
+-- player owns, and that the poisoned byte is REPAIRED rather than left on the blob.
+--
+-- The repair is a legal single-writer write: it happens inside the ONE lock-held ctx.data:update
+-- transform `buy` already runs (CLAUDE.md §4), on the snapshot the per-player FIFO lock just handed
+-- over — never on a read path, which is why `fetch` still cannot fix it and why the assertions below
+-- take the repair through a real buy attempt.
+describe(
+	"structures: the shop's clamp is THE authority, and it repairs the byte it clamps",
+	function()
+		-- The rate engine's own reading of a blob whose drones level is exactly `level` — i.e. what the
+		-- tick WOULD pay if the persisted byte said what the shop says it says.
+		local function rateAtLevel(h: any, blob: any, level: number): number
+			local probe = deepCopy(blob)
+			if type(probe.upgrades) ~= "table" then
+				probe.upgrades = {}
+			end
+			probe.upgrades.drones = level
+			return h.seam:rateFor(probe, h.clock:unix(), nil)
+		end
+
+		it("a shop row never advertises a NEGATIVE effect delta on a poisoned blob", function()
+			local h = newServer()
+			local player = h:join(1)
+			h:fund(player, 1_000_000)
+			h:write(player, function(d: any): ()
+				d.upgrades.drones = 1e308
+			end)
+			local row = entryOf(h:view(player), "drones")
+			expectTrue(row ~= nil, "the shop view has no row for drones")
+			expectFinite(row.effect.current, "the drones row reports a non-finite current reading")
+			expectFinite(row.effect.next, "the drones row reports a non-finite next reading")
+			expectTrue(
+				row.effect.delta >= 0,
+				`the drones row advertises a NEGATIVE delta ({row.effect.current} -> {row.effect.next}): `
+					.. "the shop is probing one level higher than IT thinks the player owns, while the rate "
+					.. "engine is paying a different, larger fleet — two authorities, one row"
+			)
+		end)
+
+		it(
+			"one buy attempt REPAIRS a poisoned level, and the two authorities then agree",
+			function()
+				local h = newServer()
+				local player = h:join(1)
+				h:fund(player, 1_000_000)
+				local maxLevel = entryOf(h:view(player), "drones").maxLevel
+				h:write(player, function(d: any): ()
+					d.upgrades.drones = 1e308
+				end)
+				local creditsBefore = h:snap(player).credits
+
+				h:buy(player, "drones") -- refused at the cap; the point is what it leaves behind
+
+				-- (c) the persisted byte is finite and within the shop's own cap
+				local persisted = persistedLevel(h:blob(player), "drones")
+				expectFinite(persisted, "a poisoned level survived a buy attempt un-repaired")
+				expectTrue(
+					persisted <= maxLevel,
+					`the persisted drones level is {persisted}, above the shop's own max of {maxLevel} — the `
+						.. "clamp applies to the READING only, so the poison stays on the blob forever and "
+						.. "bricks the entry as permanently maxed"
+				)
+				-- and the refusal is still a refusal: nothing was debited for the repair
+				expect(h:snap(player).credits):toBe(creditsBefore)
+
+				-- (a) the shop and the income engine now describe the SAME fleet
+				local shopLevel = entryOf(h:view(player), "drones").level
+				expectClose(
+					h:rate(player),
+					rateAtLevel(h, h:blob(player), shopLevel),
+					`the shop reports drones level {shopLevel} while ctx.salvage:rateFor prices a different `
+						.. "fleet off the same blob"
+				)
+			end
+		)
+
+		it("the repair is not a blanket rewrite: honest levels are left exactly alone", function()
+			-- The counterweight. A build that wrote the clamped level back on EVERY buy would satisfy the
+			-- case above and quietly seed `upgrades` keys nobody bought, so: a clean blob's bytes, and the
+			-- keys present on it, must come through a buy untouched apart from the one level purchased.
+			local h = newServer()
+			local player = h:join(1)
+			h:fund(player, 1_000_000)
+			h:write(player, function(d: any): ()
+				d.upgrades.drones = 3
+			end)
+			expect(h:buy(player, "drones")):toBeOk()
+			local blob = h:blob(player)
+			expect(persistedLevel(blob, "drones")):toBe(4)
+			for _, key in { "conveyor", "smelter", "hull", "pearlDrones" } do
+				expectTrue(
+					blob.upgrades[key] == nil,
+					`buying drones seeded the unrelated upgrade key "{key}" ({tostring(
+						blob.upgrades[key]
+					)})`
+				)
+			end
+		end)
+	end
+)

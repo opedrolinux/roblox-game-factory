@@ -52,9 +52,14 @@
 -- GUARDED exactly like the success path: `record` was read before the yield, so a rollback that did
 -- not first re-check ownership would free — and `clearContents` DESTROY the structures on — a dome
 -- somebody else is now standing on.
--- If the persist SUCCEEDS but the reservation was revoked while it yielded (the player left mid-claim
--- and PlayerLifecycle ran releaseFor), the claim is ABANDONED with Err(SessionClosed) rather than
--- re-occupying a dome the next player may already hold.
+-- If the reservation was revoked while the persist yielded (the player left mid-claim and
+-- PlayerLifecycle ran releaseFor), the claim is ABANDONED with Err(SessionClosed) rather than
+-- re-occupying a dome the next player may already hold — and it is abandoned WITHOUT WRITING, because
+-- the revocation is checked INSIDE the update transform, on the lock-held snapshot, before the field
+-- is touched (CLAUDE.md §4). A claim that writes first and disowns afterwards leaves the same
+-- half-claim the rollback above exists to prevent: an error returned to the player whose durable
+-- record nonetheless names a dome, and — on a leave + same-server rejoin — a stale write landing on
+-- top of the LIVE session's newer claim, which is what the client highlights from.
 --
 -- ── PRESENCE IS ITS OWN FACT (the departure ledger) ─────────────────────────────────────────────
 -- Occupancy answers "does this player hold a dome". It does NOT answer "is this player still here",
@@ -102,9 +107,15 @@ PlotService.name = "PlotService"
 -- registry SMALLER than MaxPlayers would refuse a legitimate joiner with Unavailable, which is a
 -- capacity bug wearing a correct-looking error code. Start sizes the registry from Players.MaxPlayers
 -- (clamped); DEFAULT_PLOT_COUNT is what Lune and an unreadable MaxPlayers get.
+--
+-- MAX_PLOT_COUNT IS ROBLOX'S OWN PER-SERVER CEILING, not a layout convenience. Nothing in this game
+-- pins MaxPlayers — it is a Studio place setting — so any ceiling BELOW what the platform lets a human
+-- type into it re-creates the exact bug this comment names: the place sells 60 seats, the registry
+-- stands up 50 domes, and joiners 51-60 are refused with a correct-looking Unavailable. The ring
+-- layout scales its radius with n (see positionFor), so a larger registry costs nothing but Parts.
 local DEFAULT_PLOT_COUNT = 12
 local MIN_PLOT_COUNT = 4
-local MAX_PLOT_COUNT = 50
+local MAX_PLOT_COUNT = 200
 
 -- The world Y a dome sits at when the ctx.depth seam is absent (Depth tiers is a later batch) — the
 -- surface tier, matching DepthService's own TIER_1_Y identity default. Not a magic fallback: a fresh
@@ -637,7 +648,23 @@ function PlotService.acquire(self: any, ctx: any, player: any): any
 
 	-- (5) PERSIST through the single-writer path. This YIELDS: the transform runs under the
 	-- per-player FIFO lock. Nothing after this point may assume the world stood still.
+	--
+	-- THE REVOCATION CHECK LIVES INSIDE THE TRANSFORM (CLAUDE.md §4: the whole read-check-write goes
+	-- in ONE ctx.data:update transform, on the lock-held snapshot, never read-then-write across a
+	-- yield). The yield is BEFORE the transform — in MockStore's forced yield and in SessionStore's
+	-- FIFO `acquire` alike — so the transform body is the first moment after the yield at which this
+	-- claim can still decide not to write. Checking only AFTERWARDS, as step (6) used to on its own,
+	-- means an abandoned claim commits `plot.plotId` and then returns an error: the player is told
+	-- their claim failed while their durable record asserts ownership of a dome the registry now
+	-- attributes to someone else, and a same-server rejoin's stale thread lands on top of the LIVE
+	-- session's own newer claim — the client renders `view.plot.plotId`, so that is a live player's
+	-- dome marker pointing at a dome another player is standing on.
+	local abandoned = false
 	local written = ctx.data:update(player, function(blob: any): any
+		if hasDeparted(player, ticket) or record.ownerUserId ~= userId then
+			abandoned = true
+			return blob -- write NOTHING: this reservation is no longer ours to record
+		end
 		local plot = blob.plot
 		if type(plot) ~= "table" then
 			plot = { plotId = "", claimedAtUnix = 0 }
@@ -667,8 +694,11 @@ function PlotService.acquire(self: any, ctx: any, player: any): any
 	-- (6) The reservation may have been revoked while (5) yielded — the player left and the pinned
 	-- leave sequence ran releaseFor. Do NOT re-occupy: the next player may already hold this dome,
 	-- and `departed` additionally covers the case where the next holder is this same player's newer
-	-- session, which `ownerUserId` alone reports as "still mine".
-	if departed or record.ownerUserId ~= userId then
+	-- session, which `ownerUserId` alone reports as "still mine". `abandoned` is the transform's own
+	-- verdict, which is the one that decided whether anything was written; the two conditions after
+	-- it re-check the same facts at the outer level, so a revocation landing in the sliver AFTER the
+	-- transform returns is still refused (it simply has no write to undo).
+	if abandoned or departed or record.ownerUserId ~= userId then
 		return Result.err(
 			Result.Codes.SessionClosed,
 			"plot: claim abandoned — the session was released mid-claim"

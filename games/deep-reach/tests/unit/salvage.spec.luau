@@ -68,6 +68,10 @@ local Config = require("../../src/shared/Config")
 local DataService = require("../../src/server/data/DataService")
 local EconomyService = require("../../src/server/services/economy/EconomyService")
 local Net = require("../../src/shared/Net")
+-- The ONE owner of PlayerRemoving (AMENDMENT A10b). The leave-path regression below drives the
+-- PRODUCTION sequence rather than poking the data layer directly, because "salvage disarms on leave"
+-- is only true if the module that owns the signal actually calls it.
+local PlayerLifecycle = require("../../src/server/framework/PlayerLifecycle")
 local Result = require("../../src/shared/Result")
 local SalvageService = require("../../src/server/services/salvage/SalvageService")
 local Types = require("../../src/shared/Types")
@@ -871,6 +875,83 @@ describe("salvage: the tick applies the slice's accrual formula", function()
 	)
 
 	it(
+		"REGRESSION (F1): a backwards clock must not rewind the tick base and re-credit a paid span",
+		function()
+			-- THE DEFECT. `accrue` stamped `smelter.lastTickUnix = nowUnix` UNCONDITIONALLY, so a
+			-- backwards wall-clock correction (Clock.real().unix is os.time(), which NTP can step
+			-- back) moved the tick base INTO THE PAST — into a span this session had already been
+			-- paid for. When the clock recovered, the next tick counted that span a SECOND time and
+			-- minted output from a clock correction. The backwards-clock case above stops at the
+			-- rewind, which is the one moment the defect is invisible: it only shows once time moves
+			-- forward again, which is exactly what this case does.
+			local h = newServer()
+			local player = h:join(1)
+			expect(h:arm(player)):toBeOk()
+			local rate = h:rate(player)
+			expect(rate > 0):toBe(true)
+
+			h.clock:advance(60)
+			expect(h:tick(player)):toBeOk() -- credits [T0, T0+60] and stamps T0+60
+			local banked = h:snap(player)
+			local paidThrough = banked.lastTick
+
+			-- The clock steps BACK 45s, and a tick lands on the rewound clock. It credits nothing...
+			h.clock:advance(-45)
+			expect(h:tick(player)):toBeOk()
+			expectClose(h:snap(player).stored, banked.stored, "a backwards clock must not credit")
+
+			-- ...and the tick base must still be the last instant actually PAID FOR, so when the
+			-- clock recovers and runs 30s past it, only those 30 seconds are new output.
+			h.clock:advance(75)
+			expect(h.clock:unix() - paidThrough):toBe(30)
+			expect(h:tick(player)):toBeOk()
+			expectClose(
+				h:snap(player).stored - banked.stored,
+				rate * 30,
+				"only the span since the last CREDITED instant may be credited"
+			)
+		end
+	)
+
+	it(
+		"REGRESSION (F4): a gap longer than an hour credits the WHOLE span, bounded only by capacity",
+		function()
+			-- THE CONTRACT, verbatim: `stored = math.min(capacityFor(data), stored + rateFor(data) *
+			-- (now - smelter.lastTickUnix))`. The counted span is (now - lastTickUnix) and the ONLY
+			-- ceiling on the result is capacity. The implementation additionally clamped the span to
+			-- 3600s — invisible on a small tank (an hour already overfills it) and a silent income
+			-- shortfall on a big one, where the hidden clamp rather than the capacity decided the
+			-- number. This case sizes the tank so capacity CANNOT be what bounds the tick.
+			local h = newServer()
+			local player = h:join(1)
+			h:write(player, function(d: any)
+				d.upgrades.smelter = 20
+			end)
+			expect(h:arm(player)):toBeOk()
+			local rate = h:rate(player)
+			local capacity = h:capacity(player)
+			local gap = 10_000
+			expect(rate > 0):toBe(true)
+			expect(rate * gap < capacity):toBe(true) -- the ceiling is NOT what bounds this tick
+			local before = h:snap(player)
+
+			h.clock:advance(gap)
+			local ticked = h:tick(player)
+			expect(ticked):toBeOk()
+			expectClose(
+				h:snap(player).stored - before.stored,
+				rate * gap,
+				"the counted span is (now - lastTickUnix), with no undeclared ceiling on it"
+			)
+			expectClose(
+				(ticked :: any).value.credited,
+				rate * gap,
+				"and the tick reports what it actually credited"
+			)
+		end
+	)
+
+	it(
 		"ONE server-wide pass ticks every live session once, and it runs with no player input",
 		function()
 			local h = newServer()
@@ -1106,6 +1187,55 @@ describe("salvage: the away window belongs to Offline accrual, never to the onli
 			"only the post-arm online span is credited"
 		)
 	end)
+
+	it(
+		"REGRESSION (F2/F3): a leave -> rejoin on the SAME server re-arms with NO tick pass in between",
+		function()
+			-- THE DEFECT. `_armed` was cleared ONLY by tickAll's prune loop, so a rejoin that beat the
+			-- next ~1s pass inherited the PREVIOUS session's armed flag. `armFor` is idempotent on
+			-- that key, so it returned Ok{armed=false} WITHOUT stamping, and the first accruing tick
+			-- computed elapsed from the persisted, week-old lastTickUnix — paying the away window
+			-- online, for a span OfflineService has already granted. The two rejoin cases above hand-
+			-- run the missing prune (`withRoster({}, tickAll)`) and so cannot see it; this one leaves
+			-- through the PRODUCTION path — PlayerLifecycle.onRemoving, the one owner of
+			-- PlayerRemoving — and never runs a tick pass at all.
+			local h = newServer()
+			local player = h:join(1)
+			h:write(player, function(d: any)
+				d.upgrades.drones = 4
+			end)
+			expect(h:arm(player)):toBeOk()
+			h.clock:advance(60)
+			expect(h:tick(player)):toBeOk()
+			local atLeave = h:snap(player)
+			expect(atLeave.stored > 0):toBe(true)
+
+			-- The real leave sequence, with NO tickAll pass anywhere.
+			PlayerLifecycle:onRemoving({ clock = h.clock, data = h.data, salvage = h.seam }, player)
+			h.clock:advance(7 * 24 * 3600)
+
+			local rejoined = h:join(1)
+			expect(h:arm(rejoined)):toBeOk()
+			local afterArm = h:snap(rejoined)
+			-- The session was ARMED, not inherited: the stamp is NOW, not the week-old one.
+			expect(afterArm.lastTick):toBe(h.clock:unix())
+			expectClose(
+				afterArm.stored,
+				atLeave.stored,
+				"the away window must credit NOTHING online"
+			)
+			expect(afterArm.credits):toBe(atLeave.credits)
+
+			local rate = h:rate(rejoined)
+			h.clock:advance(5)
+			expect(h:tick(rejoined)):toBeOk()
+			expectClose(
+				h:snap(rejoined).stored - afterArm.stored,
+				rate * 5,
+				"only the post-arm online span is credited"
+			)
+		end
+	)
 
 	it("re-arming a LIVE session must not swallow the seconds since the last tick", function()
 		local h = newServer()

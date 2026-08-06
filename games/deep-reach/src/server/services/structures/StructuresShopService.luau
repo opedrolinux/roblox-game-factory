@@ -512,10 +512,20 @@ function StructuresShopService.describeEntry(
 	local balance = balanceOf(ctx, data, entry.currency)
 	local nextCost = if maxed then 0 else nextCostOf(entry, level)
 
-	-- The effect pair, taken through the SAME functions the running server uses: once on the blob,
-	-- once on a probe one level higher. A row therefore cannot advertise a change the gameplay code
-	-- does not produce — the number it shows IS the number the game would compute.
-	local current = effect.measure(ctx, data)
+	-- The effect pair, taken through the SAME functions the running server uses: once at the level
+	-- THIS FILE SAYS the player owns, once one level higher. A row therefore cannot advertise a change
+	-- the gameplay code does not produce — the number it shows IS the number the game would compute.
+	--
+	-- BOTH READINGS GO THROUGH `probeAt`, AND THAT IS THE POINT. `current` used to be measured on the
+	-- RAW blob while `next` was measured on a probe clamped to `maxLevel`, so the pair only described
+	-- one level's difference while the persisted byte agreed with this file's clamp. A poisoned,
+	-- legacy or mis-migrated `upgrades.drones = 1e308` reads as 25 here and as its own 10000-wide clamp
+	-- in SalvageService, and the row then advertised `current` = the rate for a 10000-drone fleet
+	-- against `next` = the rate for 25 — a NEGATIVE delta on an upgrade, i.e. the shop telling the
+	-- player that buying more drones would slow them down. Probing both ends normalizes the ONE thing
+	-- this file is the authority on (what a level means) and leaves the pair differing in exactly the
+	-- one level, which is what the row claims to show. It is a no-op on every honest blob.
+	local current = effect.measure(ctx, probeAt(data, key, level))
 	local nextReading = effect.measure(ctx, probeAt(data, key, math.min(level + 1, maxLevel)))
 	local measured = current ~= nil and nextReading ~= nil
 
@@ -652,6 +662,25 @@ function StructuresShopService.buy(self: any, ctx: any, key: string): any
 		-- got here second sees the level the first one wrote and is priced off THAT.
 		local level = levelOf(data, key)
 		local maxLevel = maxLevelOf(key)
+
+		-- AND REPAIR THE BYTE THIS CLAMP JUST REINTERPRETED. A level read off a DataStore is data, not
+		-- a fact, and `levelOf` has always clamped it — but only for the READING. The persisted byte
+		-- survived untouched, so a hacked, legacy or mis-migrated `upgrades.drones = 1e308` (a usable
+		-- number: only NaN and ±inf are refused) reads as this catalog's maxLevel here, takes the
+		-- `level >= maxLevel` branch below, and returns BEFORE the only write in this file — bricking
+		-- the entry as permanently maxed forever, while SalvageService's own, WIDER clamp goes on
+		-- pricing a 10000-level fleet. Two authorities describing different fleets off one blob, and
+		-- no path that ever converges them.
+		--
+		-- So: this file is THE authority on what its own key means, and it now says so in the store.
+		-- This is the ONE lock-held transform on the snapshot the per-player FIFO lock just handed
+		-- over (CLAUDE.md §4), which is the only place a repair is legal — `fetch` is a read surface
+		-- and must never write. It is a no-op on every honest blob (an absent key stays absent, and a
+		-- level that already equals its clamp is not rewritten), so it cannot seed a key nobody bought.
+		local persisted = data.upgrades[key]
+		if persisted ~= nil and persisted ~= level then
+			data.upgrades[key] = level
+		end
 		if level >= maxLevel then
 			-- A NON-CURRENCY refusal: the balance is irrelevant, the entry is finished. Deliberately
 			-- not Insufficient (which would make "I cannot afford it" and "there is nothing left to
@@ -827,7 +856,9 @@ function StructuresShopService.buy(self: any, ctx: any, key: string): any
 	-- is how a committed economy write once came back to the client as Err(Internal)
 	-- (docs/LEARNINGS.md).
 	if outcome.ok then
-		self:pushView(self._context, player)
+		pcall(function()
+			self:pushView(self._context, player)
+		end)
 		pcall(function()
 			self:syncWorld(self._context, player)
 		end)
@@ -1078,14 +1109,23 @@ function StructuresShopService.pushView(_self: any, context: any, player: any): 
 	if net == nil or type(net.fireClient) ~= "function" or context.data == nil then
 		return false
 	end
-	local got = context.data:get(player)
-	if type(got) ~= "table" or got.ok ~= true then
-		return false
-	end
-	local ok = pcall(function()
+	-- THE WHOLE READ-THEN-FIRE BLOCK IS GUARDED, not just the fire. `context.data` is a SEAM — the
+	-- bootstrap decides what answers `get` here — and this runs AFTER the transform committed the
+	-- level and after ctx.economy:spend debited and emitted currency_spent. A throw on the READ would
+	-- escape `buy`'s post-write step, and Net.dispatch converts any throw out of a handler into
+	-- Err(Internal) (src/shared/Net.luau), telling a player their paid, persisted purchase failed:
+	-- exactly the defect the salvage merge produced (docs/LEARNINGS.md). It was benign only because
+	-- the one implementation currently behind this seam (DataService.get) happens to be a pure table
+	-- read — the transaction was protected by its callee rather than by this file.
+	local ok, fired = pcall(function(): boolean
+		local got = context.data:get(player)
+		if type(got) ~= "table" or got.ok ~= true then
+			return false -- NoData (the session is not loaded): nothing to describe, not an error
+		end
 		net:fireClient(player, "data", Types.toView(got.value))
+		return true
 	end)
-	return ok
+	return ok and fired
 end
 
 -- ── the world (greybox kiosk) ───────────────────────────────────────────────────────────────────

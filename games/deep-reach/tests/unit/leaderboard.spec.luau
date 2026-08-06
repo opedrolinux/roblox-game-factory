@@ -782,6 +782,93 @@ describe("leaderboard ranking — order, ties, top-N, own rank", function()
 		)
 	end)
 
+	it("a joiner INSIDE the cadence is ranked on their own fetch, never told unranked", function()
+		-- [REGRESSION — F1] The case above ("the JOIN WINDOW is bounded and self-consistent") accepts
+		-- EITHER answer: it asserts only that `you.ranked` agrees with whether the joiner is in
+		-- `entries`, so it is green both before and after this defect is fixed. This one pins the
+		-- answer.
+		--
+		-- The defect: `fetch` validates the CALLER'S OWN session (Ok — B is fully loaded) and then
+		-- serves `current(...)` with no force, which returns the cache whenever it is younger than
+		-- REBUILD_INTERVAL_SECONDS. B is on the roster, is loaded, and holds the HIGHEST total on the
+		-- server — and is handed `ranked = false, rank = 0, lifetimeCredits = 0`, is absent from
+		-- `entries`, and `playerCount` counts everyone but them, all inside an Ok reply the client's
+		-- JoinRetry guard cannot re-issue (it re-issues only on Err(NoData)).
+		--
+		-- The invariant: a caller whose OWN session the handler just validated as loaded, and who IS on
+		-- the roster it is about to rank, must appear in the board it is served. `ranked = false` is
+		-- reserved for a caller who genuinely is not on this server's roster (the case pinned above) —
+		-- it must not double as "the cache has not noticed you yet", because those two are
+		-- indistinguishable to the client and only one of them is true.
+		local h = newServer({ startUnix = 1000 })
+		local incumbent = h:seat(1, 100, "Aaa")
+		local harness = h:wire()
+		expect(boardOf(harness.invoke(ACTION, incumbent, nil)).playerCount):toBe(1)
+
+		h.clock:advance(1) -- 1s into a 5s interval: the cache is live and predates the joiner
+		local joiner = h:seat(2, 5000, "Bbb") -- loaded, rostered, and the richest player here
+		local board = boardOf(harness.invoke(ACTION, joiner, nil))
+
+		expect(board.you.ranked):toBe(true)
+		expect(board.you.rank):toBe(1)
+		expect(board.you.lifetimeCredits):toBe(5000)
+		expect(board.playerCount):toBe(2)
+		expect(#board.entries):toBe(2)
+		expect(board.entries[1].userId):toBe(joiner.UserId)
+		expect(board.entries[1].lifetimeCredits):toBe(5000)
+		-- and the incumbent is not evicted by the joiner's rebuild
+		local sawIncumbent = false
+		for _, standing in board.entries do
+			if standing.userId == incumbent.UserId then
+				sawIncumbent = true
+			end
+		end
+		expect(sawIncumbent):toBe(true)
+	end)
+
+	it("the joiner's rebuild costs at most ONE extra build, and never repeats", function()
+		-- [REGRESSION — F1, the cost side] The fix must not become the resource-exhaustion lever the
+		-- payload validator exists to deny: a rebuild forced on EVERY fetch that fails to find the
+		-- caller would let 5 requests/second each rebuild the whole roster. Builds are COUNTED through
+		-- the proxy (a build reads every rostered player's blob), so the claim is measured, not
+		-- inferred from a frozen clock.
+		local h = newServer({ startUnix = 1000 })
+		h:seat(1, 100, "Aaa")
+		local harness = h:wire()
+		expect(harness.invoke(ACTION, h.roster[1], nil)):toBeOk()
+
+		h.clock:advance(1)
+		local joiner = h:seat(2, 5000, "Bbb")
+		h:resetWrites()
+		-- fetch #1: 1 ownership get + a 2-player rebuild = 3
+		expect(boardOf(harness.invoke(ACTION, joiner, nil)).you.rank):toBe(1)
+		expect(h.writes.get):toBe(3)
+		-- and every fetch after it, still inside the same interval, is served from the cache: the
+		-- joiner is now IN the ranking, so nothing forces a second build.
+		h:resetWrites()
+		for _ = 1, 10 do
+			local again = boardOf(harness.invoke(ACTION, joiner, nil))
+			expect(again.you.rank):toBe(1)
+			expect(again.builtAtUnix):toBe(1001)
+		end
+		expect(h.writes.get):toBe(10)
+		expect(h.writes.update):toBe(0)
+
+		-- the OFF-ROSTER caller must NOT force a build on any of its requests: it is legitimately
+		-- unranked, and a rebuild per request is the exhaustion lever.
+		local offRoster = Mocks.player(99)
+		h.raw:loadSession(offRoster)
+		h:resetWrites()
+		for _ = 1, 10 do
+			local mine = boardOf(harness.invoke(ACTION, offRoster, nil))
+			expect(mine.you.ranked):toBe(false)
+			expect(mine.you.rank):toBe(0)
+			expect(mine.builtAtUnix):toBe(1001)
+		end
+		expect(h.writes.get):toBe(10)
+		expect(h.writes.update):toBe(0)
+	end)
+
 	it("an empty roster serves an empty board, not an error", function()
 		local h = newServer()
 		local lonely = Mocks.player(5)

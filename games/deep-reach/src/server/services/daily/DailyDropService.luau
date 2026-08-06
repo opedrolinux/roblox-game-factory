@@ -99,6 +99,16 @@ local STREAK_LAPSES_AFTER_SECONDS = 22 * HOUR_SECONDS
 DailyDropService.CLAIM_OPENS_AFTER_SECONDS = CLAIM_OPENS_AFTER_SECONDS
 DailyDropService.STREAK_LAPSES_AFTER_SECONDS = STREAK_LAPSES_AFTER_SECONDS
 
+-- ── how far ahead of THIS server's clock a stamp may sit before it is treated as broken ──────────
+-- A persisted lastClaimUnix a little ahead of the acting server is ordinary inter-server clock skew,
+-- and it is SELF-CORRECTING: `elapsed` is briefly negative, so windowFor reads CLOSED, and the moment
+-- `now` overtakes the stamp the 20h counts from the player's ACTUAL last claim. Repairing it would be
+-- a cooldown DISCOUNT — see sanitizeStamp. Only a stamp further ahead than this is a genuinely broken
+-- record (a foreign clock base, a millisecond timestamp, a mis-set clock), where waiting it out is
+-- indistinguishable from losing the feature, and only that is healed.
+local MAX_FUTURE_SKEW_SECONDS = HOUR_SECONDS
+DailyDropService.MAX_FUTURE_SKEW_SECONDS = MAX_FUTURE_SKEW_SECONDS
+
 -- ── the escalating reward ───────────────────────────────────────────────────────────────────────
 -- reward(streak) = BASE + STEP * (min(streak, CAP) - 1), i.e. 100/150/200/250/300/350/400 and then
 -- FLAT at 400 forever. THE CAP IS THE POINT: the streak is a counter with no upper bound, so a
@@ -176,17 +186,28 @@ end
 -- A persisted claim stamp, normalized against the server clock. 0 / absent / garbage all mean
 -- "never claimed".
 --
--- A stamp in the FUTURE is clamped to now, and that clamp is load-bearing: without it a stamp ahead
--- of the server clock (a record written under a mis-set clock, a blob migrated from a different clock
--- base) leaves `elapsed` negative, so the window NEVER opens again and the player silently loses the
--- feature for good. Clamping costs the player at most one window and can never grant early — it only
--- ever makes them wait a full 20h from now.
+-- A stamp ABSURDLY far in the future is clamped to now, and that clamp is load-bearing: without it a
+-- stamp ahead of the server clock (a record written under a mis-set clock, a blob migrated from a
+-- different clock base) leaves `elapsed` negative, so the window NEVER opens again and the player
+-- silently loses the feature for good.
 --
--- CLAMPING ON READ IS NOT ENOUGH, and that is the subtle half: a read-time clamp re-clamps to the NEW
--- `now` on every call, so `elapsed` is 0 every time and the lockout is permanent anyway — the repair
--- has to be PERSISTED. `healRecord` below writes the normalized value back inside the transform, so
--- the 20h then actually elapses against a fixed point. It is the one write a refused claim may make,
--- it is idempotent (a second pass finds nothing to change), and it cannot grant anything.
+-- THE CLAMP IS TOLERANCED, and that is the important half. Clamping EVERY future stamp is not free:
+-- it moves the stamp BACKWARD to `now`, so the next window opens 20h after the HEAL instead of 20h
+-- after the last claim, and the player's cooldown for that cycle is silently shortened by the skew —
+-- exactly contrary to the slice's "the claim opens once 20h have elapsed since the last claim", and
+-- repeatable (claim on a fast server, hop to a slow one, heal, claim early, every cycle). A stamp
+-- only a little ahead is ordinary inter-server skew and needs NO repair, because it is
+-- self-correcting and errs in the safe direction: `elapsed` is briefly negative, windowFor reads
+-- CLOSED, nothing can be granted early, and once `now` overtakes the stamp the 20h counts from the
+-- player's ACTUAL claim. The permanent-lockout case the clamp exists for comes from large or foreign
+-- clock bases, which MAX_FUTURE_SKEW_SECONDS still catches.
+--
+-- CLAMPING ON READ IS NOT ENOUGH, and that is the subtle part of the repair that IS made: a read-time
+-- clamp re-clamps to the NEW `now` on every call, so `elapsed` is 0 every time and the lockout is
+-- permanent anyway — the repair has to be PERSISTED. `healRecord` below writes the normalized value
+-- back inside the transform, so the 20h then actually elapses against a fixed point. It is the one
+-- write a refused claim may make, it is idempotent (a second pass finds nothing to change), and it
+-- cannot grant anything.
 local function sanitizeStamp(value: any, nowUnix: number): number
 	if type(value) ~= "number" or value ~= value then
 		return 0
@@ -197,7 +218,7 @@ local function sanitizeStamp(value: any, nowUnix: number): number
 	if value <= 0 then
 		return 0
 	end
-	if value > nowUnix then
+	if value > nowUnix + MAX_FUTURE_SKEW_SECONDS then
 		return nowUnix
 	end
 	return math.floor(value)

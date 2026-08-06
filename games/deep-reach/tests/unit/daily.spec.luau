@@ -1675,37 +1675,108 @@ describe("daily: the v3->v4 persistence shape", function()
 		expect(h:snapshot(player).credits):toBe((claimed :: any).value.reward)
 	end)
 
-	it("a future stamp costs AT MOST ONE window — the clamp is bounded and persisted", function()
-		-- This is the one place the implementation deliberately departs from a literal reading of
-		-- "the claim opens once 20h have elapsed since the last claim": a stamp AHEAD of the server
-		-- clock is clamped back to now, and the clamp is WRITTEN BACK. The sibling case above uses a
-		-- 10-day-future stamp, where the effect is unobservable. This one uses five minutes, where it
-		-- is — so the departure is BOUNDED rather than waived. Two things must hold: the clamp can
-		-- never grant early, and it can only move the stamp BACKWARD, so the skew costs the player at
-		-- most the one window they are already inside and never a second one.
-		local skew = 300
+	it(
+		"a small future skew opens the window 20h after the REAL claim, not after the heal",
+		function()
+			-- [ASSERTION FLIPPED — this case used to pin the defect it was written to describe. It read
+			--  the healed stamp back as START_UNIX and then advanced EXACTLY `OPENS` from it, calling the
+			--  result "one window later, not one window plus the skew". That is one window minus the skew
+			--  measured from the player's ACTUAL last claim: the heal was silently paying the cooldown
+			--  down. The slice's sentence is "the claim opens once 20h have elapsed since the LAST
+			--  CLAIM", so 20h is counted from the stamp the last claim wrote — the correct answer here is
+			--  OPENS after START_UNIX + skew, i.e. OPENS + skew from START_UNIX.]
+			--
+			-- A stamp a few minutes ahead of this server's clock is ordinary inter-server skew, not a
+			-- broken record: it is self-correcting (elapsed is briefly negative, so the window reads
+			-- CLOSED, and once `now` overtakes the stamp the 20h counts from the real claim), so it is
+			-- left ALONE rather than healed. Nothing is granted early and nothing is bricked.
+			local skew = 300
+			expect(skew < DailyDropService.MAX_FUTURE_SKEW_SECONDS):toBe(true)
+			local h = newServer()
+			local player = h:join(1)
+			local realClaimUnix = START_UNIX + skew
+			h.data:update(player, function(d: any): any
+				d.daily.lastClaimUnix = realClaimUnix
+				d.daily.streak = 3
+				return d
+			end)
+
+			expect(h:claim(player)):toBeErr(Result.Codes.OnCooldown) -- never early
+			expect(h:snapshot(player).credits):toBe(0)
+			-- ...and the refusal did NOT rewrite the player's stamp down to this server's clock. A heal
+			-- here is a cooldown discount: every later window would be measured from `now` instead of
+			-- from the claim the player actually made.
+			expect(h:snapshot(player).lastClaimUnix):toBe(realClaimUnix)
+
+			-- One window after the REAL claim — which is OPENS + skew from START_UNIX, not OPENS.
+			h.clock:advance(OPENS - 1)
+			expect(h:claim(player)):toBeErr(Result.Codes.OnCooldown)
+			h.clock:advance(skew)
+			expect(h:claim(player)):toBeErr(Result.Codes.OnCooldown) -- still one second short
+			expect(h:snapshot(player).credits):toBe(0)
+			h.clock:advance(1)
+			expect(h.clock:unix()):toBe(realClaimUnix + OPENS)
+			local claimed = h:claim(player)
+			expect(claimed):toBeOk()
+			expect((claimed :: any).value.streak):toBe(4) -- and the skew did not cost the streak either
+		end
+	)
+
+	it("a repeated future stamp cannot ACCELERATE the drop cycle after cycle", function()
+		-- The compounding shape the skew case bounds: claim on a server whose clock runs `skew`
+		-- ahead, hop to a slower one, let it heal the stamp down to its own `now`, and the next
+		-- window opens `skew` early — every single cycle. Three cycles of it here; each one must
+		-- cost the player a FULL 20h measured from the stamp their claim actually wrote.
+		local skew = 600
 		local h = newServer()
 		local player = h:join(1)
-		h.data:update(player, function(d: any): any
-			d.daily.lastClaimUnix = START_UNIX + skew
-			d.daily.streak = 3
-			return d
-		end)
 
-		expect(h:claim(player)):toBeErr(Result.Codes.OnCooldown) -- never early
-		expect(h:snapshot(player).credits):toBe(0)
-		-- PERSISTED at `now`, not re-clamped to a moving `now` on every request: a read-only clamp
-		-- pins elapsed at 0 forever and the drop is never claimable again.
-		expect(h:snapshot(player).lastClaimUnix):toBe(START_UNIX)
+		for _ = 1, 3 do
+			-- the fast server's stamp, as this (slower) server finds it in the blob
+			local stampedAt = h.clock:unix() + skew
+			h.data:update(player, function(d: any): any
+				d.daily.lastClaimUnix = stampedAt
+				return d
+			end)
+			local paid = h:snapshot(player).credits
 
-		-- ...so EXACTLY one window later the drop opens — not one window plus the skew.
-		h.clock:advance(OPENS - 1)
-		expect(h:claim(player)):toBeErr(Result.Codes.OnCooldown)
-		h.clock:advance(1)
-		local claimed = h:claim(player)
-		expect(claimed):toBeOk()
-		expect((claimed :: any).value.streak):toBe(4) -- and the skew did not cost the streak either
+			expect(h:claim(player)):toBeErr(Result.Codes.OnCooldown) -- the hop itself grants nothing
+			h.clock:advance(OPENS - 1)
+			expect(h:claim(player)):toBeErr(Result.Codes.OnCooldown)
+			h.clock:advance(skew) -- 20h since THIS server's clock, but only 20h - skew since the claim
+			expect(h:claim(player)):toBeErr(Result.Codes.OnCooldown)
+			expect(h:snapshot(player).credits):toBe(paid) -- nothing was minted early
+			h.clock:advance(1)
+			expect(h.clock:unix()):toBe(stampedAt + OPENS)
+			expect(h:claim(player)):toBeOk()
+		end
 	end)
+
+	it(
+		"an ABSURDLY future stamp is still healed AND persisted — the drop never bricks",
+		function()
+			-- The other half of the tolerance, and the reason the heal exists at all: a stamp so far
+			-- ahead that waiting it out is indistinguishable from losing the feature (a foreign clock
+			-- base, a millisecond timestamp) IS repaired, and the repair is WRITTEN BACK. A read-only
+			-- clamp re-clamps to the moving `now` on every request, pinning elapsed at 0 forever.
+			local h = newServer()
+			local player = h:join(1)
+			local absurd = START_UNIX + 10 * 24 * HOUR
+			expect(absurd > START_UNIX + DailyDropService.MAX_FUTURE_SKEW_SECONDS):toBe(true)
+			h.data:update(player, function(d: any): any
+				d.daily.lastClaimUnix = absurd
+				d.daily.streak = 3
+				return d
+			end)
+
+			expect(h:claim(player)):toBeErr(Result.Codes.OnCooldown)
+			expect(h:snapshot(player).lastClaimUnix):toBe(START_UNIX) -- healed, and PERSISTED at now
+			h.clock:advance(OPENS)
+			local claimed = h:claim(player)
+			expect(claimed):toBeOk() -- one window after the heal, never ten days
+			expect((claimed :: any).value.streak):toBe(4)
+		end
+	)
 end)
 
 -- ── 9. the HUD badge's data path: daily rides the replicated view ───────────────────────────────

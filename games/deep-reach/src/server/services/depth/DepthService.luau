@@ -92,13 +92,25 @@
 --       if the WRITE fails the store discards the whole snapshot: nothing was durably debited or
 --       levelled, and there is nothing to compensate.
 --
--- THE ONE PIECE OF SESSION STATE, and why it cannot double-fire: `loop_completed` must be emitted on
--- the FIRST successful descend of a session and never again. The check and the set are ONE
--- SYNCHRONOUS PAIR run AFTER the write committed (`self._loopCompleted[userId]`), with no yield
+-- THE ONE PIECE OF SESSION STATE, and why it cannot double-fire OR go silent: `loop_completed` must
+-- be emitted on the FIRST successful descend of a SESSION and never again. The check and the set are
+-- ONE SYNCHRONOUS PAIR run AFTER the write committed (`self._loopCompleted[userId]`), with no yield
 -- between them, so two descends cannot both observe "not yet emitted". It is deliberately NOT
 -- captured before the update: a value captured before a yield and acted on after it is precisely the
 -- shape being defended against, and there is nothing to roll back here — an un-set flag on a failed
 -- write simply means the next successful descend emits, which is correct.
+--
+-- WHAT THE ENTRY STORES IS THE SESSION EPOCH (`stats.joinCount`), read off the lock-held snapshot —
+-- not a boolean. A boolean encodes "this userId emitted at some point on this SERVER", which stops
+-- being the contract the moment a player leaves and rejoins the same server: their second session's
+-- first descend would find the flag still set and emit nothing, and the core-loop funnel would
+-- under-count. Nothing here may connect PlayerRemoving to notice the boundary (framework/
+-- PlayerLifecycle is the one owner of that signal and its order is pinned), and the roster sweep that
+-- does exist is a 60-second poll which a rejoining player is PRESENT for — so it skips them — and
+-- which never runs at all under Lune. Comparing a persisted per-session identity needs neither: it is
+-- pure, it is decided on the same snapshot the descend committed against, and it reads identically in
+-- both runtimes. `stats.joinCount` is bumped by DataService on every loadSession and written by
+-- nothing else; OfflineService already uses it as its session epoch for the same reason.
 --
 -- ── THE THREE ANALYTICS EMIT POINTS ─────────────────────────────────────────────────────────────
 --   * `progression`     — after a successful descend COMMITS, carrying the new tier index.
@@ -176,7 +188,8 @@ local MAX_UPGRADE_LEVEL = 10000
 --
 -- The curve: each tier roughly multiplies income by 1.6x and costs ~7x the last, so a tier is bought
 -- with the income of the one above it rather than skipped past — and the hull minimum makes that
--- ordering mandatory instead of merely economical.
+-- ordering mandatory instead of merely economical. The VIP trench steps harder than 1.6x on purpose;
+-- see its own note below.
 export type Tier = {
 	index: number,
 	label: string,
@@ -240,12 +253,23 @@ local TIERS: { Tier } = {
 	-- THE VIP TRENCH (spec monetization: "an exclusive depth tier"). It sits ABOVE the five in the
 	-- ladder and below them in the water. It is gated on the gamepass flag AND on a hull rating AND on
 	-- Credits — the pass buys ACCESS, never a skipped rung: tier 6 still requires tier 5 unlocked.
+	--
+	-- ITS MULTIPLIER MUST BEAT THE RESTOCKED READING OF EVERY RUNG BELOW IT, not merely their flat
+	-- ones. The rich wreck deliberately never lands here (RESTOCK_TIER_COUNT below covers the five
+	-- trench tiers only, so the daily hook stays reachable by the players who can actually stand in
+	-- it), which makes this the ONE rung with no compensating hot day of its own. At 12 the free
+	-- Hadal Trench read 7 x RESTOCK_MULTIPLIER = 14 one day in five and out-earned a player who had
+	-- paid 2,500,000 Credits AND a real-money pass — and depth is one-way (nothing walks
+	-- `upgrades.depth` back up but a resurface, which resets to 1), so that was a PERMANENT pay cut
+	-- on 20% of days, not a temporary swing the rotation evens out. 16 clears 14 with room for the
+	-- restock bonus to be re-tuned; the spec case "the paywalled trench out-earns EVERY restocked
+	-- tier below it" is what holds this true if either number moves again.
 	{
 		index = 6,
 		label = "The Rift",
 		cost = 2500000,
 		hullMin = 10,
-		valueMultiplier = 12,
+		valueMultiplier = 16,
 		y = -5 * TIER_DROP_STUDS,
 		requiresFlag = VIP_TRENCH_FLAG,
 	},
@@ -295,9 +319,12 @@ DepthService.RESTOCK_MULTIPLIER = RESTOCK_MULTIPLIER
 DepthService._context = nil :: any
 -- userId -> true while that player's descend is parked inside ctx.data:update (mechanism (2)).
 DepthService._descending = {} :: { [number]: boolean }
--- userId -> true once this SESSION has emitted loop_completed. Per-server memory, pruned on the day
--- loop's pass over the roster so a long-lived server cannot grow it once per join forever.
-DepthService._loopCompleted = {} :: { [number]: boolean }
+-- userId -> the SESSION EPOCH (`stats.joinCount`) that has already emitted loop_completed. NOT a
+-- boolean: a boolean makes the entry mean "this userId has emitted, ever on this server", which
+-- outlives the session it was set for (see THE ONE PIECE OF SESSION STATE in the header). Per-server
+-- memory, pruned on the day loop's pass over the roster so a long-lived server cannot grow it once
+-- per join forever.
+DepthService._loopCompleted = {} :: { [number]: number }
 -- The rich wreck Part + the day index it was placed for (Roblox only; nil under Lune).
 DepthService._wreck = nil :: any
 DepthService._wreckDay = nil :: number?
@@ -351,6 +378,25 @@ local function levelOf(data: any, key: string): number
 	return sanitizeLevel(data.upgrades[key])
 end
 
+-- THE SESSION EPOCH this blob is on — `stats.joinCount`, which DataService bumps on every
+-- loadSession and nothing else writes (DataService.luau:154; OfflineService reads it for exactly the
+-- same purpose, `epochOf`). It is a per-session identity that is already persisted, so "the FIRST
+-- successful descend of a SESSION" can be decided by comparing two numbers on a lock-held snapshot
+-- rather than by a leave signal this service is not allowed to connect (framework/PlayerLifecycle
+-- owns PlayerRemoving and its pinned order) or by a 60-second roster poll that a rejoining player
+-- walks straight through. Garbage / absent reads as 0, which is a legal epoch: the failure direction
+-- is then the old one (one emit per userId per server), never a repeated emit.
+local function epochOf(data: any): number
+	if type(data) ~= "table" or type(data.stats) ~= "table" then
+		return 0
+	end
+	local count = data.stats.joinCount
+	if not isUsableNumber(count) or count < 0 then
+		return 0
+	end
+	return math.floor(count)
+end
+
 -- A persisted boolean flag, read STRAIGHT OFF THE BLOB — no seam, so there is nothing to race. Only
 -- ever true when MonetizationService has granted it server-side; an absent flags map reads false.
 local function flagOf(data: any, key: string): boolean
@@ -374,6 +420,18 @@ end
 
 -- THE tier this blob is standing on. An absent / garbage / out-of-range `upgrades.depth` reads as
 -- tier 1 — the fresh-player state, and the value ResurfaceService writes back on a prestige.
+--
+-- OUT OF RANGE DEGRADES DOWN, NEVER UP, and that direction is a MONETIZATION BOUNDARY rather than a
+-- taste in defaults. `requiresFlag` is consulted only inside the descend transform; every READ path
+-- (the seam Salvage multiplies by, the Y PlotService places at, `describe`) trusts the index this
+-- function returns and re-checks nothing. So a value that resolved UP would hand a corrupted,
+-- rolled-back or mis-migrated record the deepest rung on the ladder — today the paywalled VIP trench,
+-- with its 12x+ salvage multiplier and its world Y — with `flags["gamepass.vipTrench"]` absent. A
+-- RANGE TEST rather than a clamp also makes the two garbage classes agree: `math.huge` and a string
+-- already read as tier 1, and there is no defensible reading in which `1e308` is worth more than
+-- infinity. Nothing legitimate reaches this branch — the only writers are this file (currentIndex+1)
+-- and ResurfaceService (back to 1) — so degrading to the fresh-player state costs a real player
+-- nothing and costs an exploited/corrupt record the paywall.
 function DepthService.tierOf(_self: any, data: any): number
 	if type(data) ~= "table" or type(data.upgrades) ~= "table" then
 		return FIRST_TIER
@@ -382,7 +440,11 @@ function DepthService.tierOf(_self: any, data: any): number
 	if not isUsableNumber(raw) then
 		return FIRST_TIER
 	end
-	return math.clamp(math.floor(raw), FIRST_TIER, MAX_TIER)
+	local floored = math.floor(raw)
+	if floored < FIRST_TIER or floored > MAX_TIER then
+		return FIRST_TIER
+	end
+	return floored
 end
 
 -- ── THE RESTOCK ROTATION (pure over the SERVER clock) ───────────────────────────────────────────
@@ -651,6 +713,11 @@ function DepthService.descend(self: any, ctx: any): any
 	end
 	local nowUnix = now :: number
 
+	-- The session epoch of the snapshot this descend commits against. Read INSIDE the transform (see
+	-- below) and consulted after the write to decide loop_completed. Declared here rather than carried
+	-- on DescendInfo, which is a client-facing reply.
+	local sessionEpoch = 0
+
 	local economy = ctx.economy
 	if economy == nil or type(economy.spend) ~= "function" then
 		-- ctx.economy is the ENFORCEMENT POINT for the spend path: it is what emits currency_spent and
@@ -687,6 +754,10 @@ function DepthService.descend(self: any, ctx: any): any
 			outcome = Result.err(Result.Codes.Internal, "depth: data blob is not a table")
 			return data
 		end
+
+		-- WHICH SESSION this snapshot belongs to, read off the SAME lock-held blob every clause below
+		-- reads. Only consulted on the success path, after the write commits.
+		sessionEpoch = epochOf(data)
 
 		-- (a) STRICTLY SEQUENTIAL, BY CONSTRUCTION. The target is derived from the snapshot; there is
 		-- no tier index on this path for a client to supply and no purchase order that can skip a rung.
@@ -802,8 +873,17 @@ function DepthService.descend(self: any, ctx: any): any
 
 	-- loop_completed on the FIRST successful descend of this session. The check and the set are ONE
 	-- synchronous pair with no yield between them, so two descends cannot both observe "not yet".
-	if self._loopCompleted[userId] == nil then
-		self._loopCompleted[userId] = true
+	--
+	-- KEYED BY THE SESSION EPOCH, NOT BY "have we ever". A boolean here meant "this userId emitted at
+	-- some point on this server", which is a different claim from the contract's ("the FIRST
+	-- successful descend of a SESSION") the moment a player rejoins the same server: the only thing
+	-- that cleared the entry was pruneSessions, a 60-second sweep over Players that skips a player who
+	-- is present again — and it never runs at all where startRuntime returns early. The comparison
+	-- below decides the session boundary from a PERSISTED per-session identity on the lock-held
+	-- snapshot, so it needs no leave signal (framework/PlayerLifecycle owns PlayerRemoving and its
+	-- pinned order) and no poll, and it reads the same under Lune as in a live server.
+	if self._loopCompleted[userId] ~= sessionEpoch then
+		self._loopCompleted[userId] = sessionEpoch
 		info.loopCompleted = true
 		self:emit(ctx, "loop_completed", {
 			userId = userId,

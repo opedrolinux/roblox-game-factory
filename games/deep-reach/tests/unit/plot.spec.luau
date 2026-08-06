@@ -220,7 +220,12 @@ describe("plot: the ctx.plot seam and the per-server registry", function()
 	it("every seat gets a dome: the registry is never smaller than the server it serves", function()
 		-- A registry SMALLER than MaxPlayers would refuse a legitimate joiner with Unavailable —
 		-- a capacity bug wearing a correct-looking error code.
-		for _, seats in { 4, 8, 12, 30, 50 } do
+		--
+		-- REGRESSION (F1/F5): the seat table deliberately runs PAST the old 50-dome ceiling. Nothing
+		-- in this game pins MaxPlayers — it is a Studio place setting and Roblox allows it up to 200 —
+		-- so a table that stopped at the clamp constant asserted the invariant in its own comment
+		-- while being constructed so it could never observe the violation.
+		for _, seats in { 4, 8, 12, 30, 50, 51, 60, 100, 200 } do
 			expect(PlotService:plotCountFor(seats)):toBe(seats)
 		end
 		-- Unreadable / nonsense seat counts must still produce a USABLE registry, never 0 (which
@@ -231,6 +236,39 @@ describe("plot: the ctx.plot seam and the per-server registry", function()
 		expect(PlotService:plotCountFor(nil) >= 1):toBe(true)
 		expect(PlotService:plotCountFor(1) >= 1):toBe(true)
 	end)
+
+	it(
+		"REGRESSION (F1/F5): a 60-seat place gets 60 DOMES — the 51st joiner is not refused Unavailable",
+		function()
+			-- `plotCountFor` answering 60 is not enough on its own: `build` re-applies the ceiling
+			-- independently, so the registry Start actually stands up is the thing that has to be
+			-- big enough. Drive the whole path the way Start does — desiredPlotCount -> build — and
+			-- then take the seat that used to fall off the end.
+			expect(PlotService:build(PlotService:plotCountFor(60))):toBe(60)
+			expect(PlotService:plotCount()):toBe(60)
+			expect(PlotService:freeCount()):toBe(60)
+			expect(#PlotService:plotIds()):toBe(60)
+
+			-- The decisive consequence, at the seat that used to be past the clamp: with 60 seats
+			-- sold, the 51st and the 60th joiner must each get a dome, not a correct-looking refusal.
+			local h = newServer({ plotCount = PlotService:plotCountFor(60) })
+			local net = h:wire()
+			local seen: { [string]: boolean } = {}
+			for seat = 1, 60 do
+				local claimed = claimVia(net, h:join(1000 + seat))
+				expect(claimed):toBeOk()
+				local plotId = (claimed :: any).value.plotId
+				expect(seen[plotId]):toBe(nil) -- and still exactly one dome per player
+				seen[plotId] = true
+			end
+			expect(PlotService:freeCount()):toBe(0)
+
+			-- The ceiling still exists and is still sane: a nonsense-huge seat count cannot ask this
+			-- server to stand up an unbounded registry.
+			expect(PlotService:plotCountFor(100000) <= 200):toBe(true)
+			expect(PlotService:plotCountFor(100000) >= 1):toBe(true)
+		end
+	)
 
 	it("build produces distinct ids and resets every claim (a clean server)", function()
 		local h = newServer({ plotCount = 5 })
@@ -776,7 +814,9 @@ describe("plot: AMENDMENT A1 — the dome starts at the persisted tier's Y", fun
 			local _, y = PlotService:positionFor(1, 8, tierY)
 			expect(y):toBe(tierY)
 		end
-		for _, count in { 4, 12, 50 } do
+		-- 200 is the registry ceiling (Roblox's per-server max): the ring must still not overlap at
+		-- full size, which is what makes raising the clamp a one-line change (F1/F5).
+		for _, count in { 4, 12, 50, 200 } do
 			local points: { { x: number, z: number } } = {}
 			for index = 1, count do
 				local x, y, z = PlotService:positionFor(index, count, -300)
@@ -1112,6 +1152,117 @@ describe(
 			expect((claimed :: any).value.plotId):toBe(dome)
 			expect(h.seam:ownerOf(dome)):toBe(7)
 		end)
+
+		it(
+			"REGRESSION (F2): an ABANDONED claim persists NOTHING — the blob never names a dome the player was refused",
+			function()
+				-- The header's promise (PlotService.luau:49-57) is that an abandoned claim leaves an
+				-- INVARIANT-CLEAN state: memory and the blob agree this player holds nothing. Today
+				-- only the failed-persist branch delivers that, and it does so trivially (the write
+				-- never landed). On the SessionClosed branch the write DID land — `plot.plotId` is
+				-- committed at the top of the transform and the revocation check runs afterwards —
+				-- so the player is handed an error while their durable record asserts ownership of a
+				-- dome the registry attributes to somebody else.
+				local h = newServer({ plotCount = 1, yieldOnUpdate = true })
+				local leaver = h:join(1)
+				local dome = PlotService:plotIds()[1]
+				expect(h:blob(leaver).plot.plotId):toBe("")
+
+				local leaverResult: any = nil
+				local co = coroutine.create(function()
+					leaverResult = PlotService:acquire(h:ctx(), leaver)
+				end)
+				expect(select(1, coroutine.resume(co))):toBe(true)
+				expect(coroutine.status(co)):toBe("suspended") -- parked inside the data write
+				expect(h.seam:ownerOf(dome)):toBe(1) -- reserved before the yield, as designed
+
+				-- The player leaves mid-claim: the pinned leave order frees the dome. The session is
+				-- deliberately NOT released yet — DataService's release YIELDS, and this window (the
+				-- blob still readable, the dome already free) is exactly where the stale write lands.
+				expect(h.seam:releaseFor(leaver)):toBe(true)
+				drain({ co })
+				expect(leaverResult):toBeErr(Result.Codes.SessionClosed)
+
+				-- THE INVARIANT: a refused claim is not a durable one.
+				expect(h.seam:plotIdFor(leaver)):toBe(nil)
+				expect(h:blob(leaver).plot.plotId):toBe("")
+				expect(h:blob(leaver).plot.claimedAtUnix):toBe(0)
+
+				-- ...and once the dome is genuinely somebody else's, the abandoned player's record
+				-- must not be asserting ownership of it. `view.plot.plotId` is what the client
+				-- highlights from (PlotController.onView), so a lie here points a live player's dome
+				-- marker at a dome another player holds.
+				local newcomer = h:join(7)
+				local claimed: any = nil
+				drain({
+					coroutine.create(function()
+						claimed = PlotService:acquire(h:ctx(), newcomer)
+					end),
+				})
+				expect(claimed):toBeOk()
+				expect(h.seam:ownerOf(dome)):toBe(7)
+				expect(h:blob(leaver).plot.plotId ~= dome):toBe(true)
+				expect(Types.toView(h:blob(leaver)).plot.plotId ~= dome):toBe(true)
+			end
+		)
+
+		it(
+			"REGRESSION (F2): the abandoned write cannot clobber the dome a REJOINED same-server session holds",
+			function()
+				-- The same-player variant. A's claim parks mid-write; A leaves; A rejoins THIS server
+				-- and is granted a DIFFERENT dome (their first is now held). The stale thread's write
+				-- must not land afterwards naming the old dome — the live session would then hold
+				-- dome B in memory while its replicated record says dome A, which another player is
+				-- standing on.
+				local h = newServer({ plotCount = 2 })
+				local a = h:join(1)
+				local first = PlotService:plotIds()[1]
+
+				-- A data layer that PARKS inside the write and then COMMITS it for real (the
+				-- yieldOnUpdate fixture's shape, but pointed at the live session so the late write
+				-- is observable through the session the player actually has).
+				local parkedData: any = {}
+				function parkedData.get(_self: any, player: any): any
+					return h.data:get(player)
+				end
+				function parkedData.update(_self: any, player: any, transform: any): any
+					coroutine.yield()
+					return h.data:update(player, transform)
+				end
+
+				local staleResult: any = nil
+				local co = coroutine.create(function()
+					staleResult = PlotService:acquire(
+						{ clock = h.clock, data = parkedData, plot = h.seam },
+						a
+					)
+				end)
+				expect(select(1, coroutine.resume(co))):toBe(true)
+				expect(coroutine.status(co)):toBe("suspended")
+				expect(h.seam:ownerOf(first)):toBe(1)
+
+				h:leave(a) -- release the dome AND the session
+				local b = h:join(2)
+				expect(PlotService:acquire(h:ctx(), b)):toBeOk()
+				expect(h.seam:ownerOf(first)):toBe(2) -- B now holds A's old dome
+
+				local returning = h:join(1) -- A comes back to the SAME server
+				local rejoin = PlotService:acquire(h:ctx(), returning)
+				expect(rejoin):toBeOk()
+				local liveDome = (rejoin :: any).value.plotId
+				expect(liveDome ~= first):toBe(true) -- the held one is not honoured
+				expect(h:blob(returning).plot.plotId):toBe(liveDome)
+
+				-- ...and NOW the stale write lands.
+				drain({ co })
+				expect(staleResult.ok):toBe(false)
+
+				expect(h.seam:plotIdFor(returning)):toBe(liveDome)
+				expect(h.seam:ownerOf(first)):toBe(2) -- B keeps their dome
+				expect(h:blob(returning).plot.plotId):toBe(liveDome) -- NOT rewritten to `first`
+				expect(Types.toView(h:blob(returning)).plot.plotId):toBe(liveDome)
+			end
+		)
 
 		it(
 			"REGRESSION: a persist that fails rolls back THIS claim only — never the dome a live player now holds",

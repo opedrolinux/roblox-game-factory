@@ -395,6 +395,28 @@ end
 
 -- ── the read ────────────────────────────────────────────────────────────────────────────────────
 
+-- Is this userId in the snapshot's FULL ordering? (Not the top-N slice — a player in 40th place is
+-- ranked, just not displayed.)
+local function rankedIn(snapshot: Snapshot, userId: number): boolean
+	for _, standing in snapshot.ranking do
+		if standing.userId == userId then
+			return true
+		end
+	end
+	return false
+end
+
+-- Is this userId on the roster the next build would rank? Read from the SAME roster list the build
+-- will use, so the two answers cannot disagree.
+local function onRoster(roster: { any }, userId: number): boolean
+	for _, player in roster do
+		if userIdOf(player) == userId then
+			return true
+		end
+	end
+	return false
+end
+
 -- THE handler body. Side-effect free by construction: it writes nothing, grants nothing and changes
 -- no player's state — the only thing it can change is this server's cache, which is a derived value.
 function LeaderboardService.fetch(self: any, ctx: any): any
@@ -416,7 +438,23 @@ function LeaderboardService.fetch(self: any, ctx: any): any
 		return got
 	end
 
-	local snapshot = self:current(ctx.data, ctx.clock, self:roster())
+	-- A caller whose own session the check above just found LOADED, and who is on the roster this
+	-- board ranks, must appear in the board they are served. The cadence legitimately serves a stale
+	-- snapshot — but a snapshot built before this player joined answers them `ranked = false, rank = 0,
+	-- lifetimeCredits = 0`, which is BYTE-IDENTICAL to the answer given a caller who genuinely is not
+	-- on this server. Those two are indistinguishable to the client, only one of them is true, and the
+	-- JoinRetry guard cannot correct it (it re-issues on Err(NoData), and this reply is Ok). So the
+	-- cadence is overridden exactly once, for exactly that caller.
+	local roster = self:roster()
+	local snapshot = self:current(ctx.data, ctx.clock, roster)
+	if not rankedIn(snapshot, userId) and onRoster(roster, userId) then
+		-- `onRoster` is load-bearing, not defensive padding. Without it a loaded-but-off-roster caller
+		-- — who can NEVER be found in any ranking — would force a full rebuild on every one of its
+		-- requests, which is precisely the resource-exhaustion lever the empty-payload validator below
+		-- exists to deny. With it the path converges after at most ONE extra build: a rostered caller
+		-- whose own get returned Ok is ranked by the rebuild, so the next fetch finds them in the cache.
+		snapshot = self:current(ctx.data, ctx.clock, roster, true)
+	end
 	return Result.ok(self:boardFor(snapshot, userId))
 end
 

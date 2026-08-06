@@ -2137,3 +2137,176 @@ describe("offline: pruning per-server memory cannot lose an owed window", functi
 		expectAmount((h:peek(rejoined) :: any).value.amount, BASE_RATE * 50)
 	end)
 end)
+
+-- ── 19. THE ADVERSE ORDERING: the autosave WINS the race to the base ────────────────────────────
+-- [REGRESSION — adversarial findings F1/F2 (the residual join race) and F3 (the claimed flag on the
+--  refused path).]
+--
+-- Section 16 proves the window survives an autosave that fires AFTER something closed it. Every case
+-- there runs prepare-or-peek FIRST, which is the FAVOURABLE ordering — and it is not the ordering the
+-- game runs in. `DataService.loadSession` installs the session and returns; the offline feature gets
+-- no hand-off from that moment, so its join hook POLLS for the session (loadWaitStepSeconds, and
+-- `task.wait` guarantees only a FLOOR, so a join storm widens the gap without bound). An autosave
+-- flush landing in that gap re-stamps `timestamps.lastSeenUnix` to NOW — unconditionally, and before
+-- its own save can fail — and the away window is erased before anything snapshotted it.
+--
+-- The loss is PERMANENT and SILENT, which is why it needs its own section rather than a variant
+-- above: the zero is MEMOIZED against the session epoch (stats.joinCount, which does not change again
+-- this session), so a later peek and a later claim both read the poisoned record. No warn, no
+-- analytics event, nothing persisted to recover it from. This is the shape that cost a previous
+-- game's earnings (docs/LEARNINGS.md), reached through the SERVER door instead of the client one.
+
+describe("offline: an autosave that lands BEFORE the join hook cannot erase the window", function()
+	it("ADVERSE ORDER join -> autosave -> join hook -> claim still pays the full window", function()
+		local away = 600
+		local h = newServer({ seed = seedAway({ { userId = 1, away = away } }) })
+		local player = h:join(1) -- loadSession resolves: the session is installed and VISIBLE
+		local expected = math.min(BASE_RATE * away, BASE_CAPACITY)
+
+		-- The flush wins the race to the base — this is the whole case, and the ordering is the point.
+		local flush = h.data:autosaveTick()
+		expect(flush.flushed):toBe(1)
+		-- NON-VACUITY: the persisted base really was destroyed, so this case cannot pass by accident.
+		expect(h:blob(player).timestamps.lastSeenUnix):toBe(h.clock:unix())
+
+		local prepared = h:prepare(player) -- the join hook finally wakes up
+		expect(prepared):toBeOk()
+		expectAmount((h:peek(player) :: any).value.amount, expected)
+
+		local before = h:snap(player)
+		local claimed = h:claim(player)
+		expect(claimed):toBeOk()
+		expectAmount((claimed :: any).value.amount, expected)
+		expectAmount(h:snap(player).credits - before.credits, expected)
+	end)
+
+	it("the peek the popup makes after that flush reports the window, not zero", function()
+		-- The read surface has to survive it too: peek is what the claim-on-join popup renders, and a
+		-- popup that says "you earned 0 while away" is how a player learns their absence paid nothing.
+		local away = 600
+		local h = newServer({ seed = seedAway({ { userId = 1, away = away } }) })
+		local player = h:join(1)
+		h.data:autosaveTick()
+		local info = (h:peek(player) :: any).value
+		expect(info.awaySeconds):toBe(away)
+		expectAmount(info.amount, math.min(BASE_RATE * away, BASE_CAPACITY))
+	end)
+
+	it("a claim that arrives with no prior peek or hook is paid after that flush too", function()
+		-- The client-first ordering: JoinRetry re-issues the claim as soon as the session answers, so
+		-- the claim itself can be the first thing to compute the window — after the flush.
+		local away = 600
+		local h = newServer({ seed = seedAway({ { userId = 1, away = away } }) })
+		local player = h:join(1)
+		h.data:autosaveTick()
+		local before = h:snap(player)
+		expect(h:claim(player)):toBeOk()
+		expectAmount(
+			h:snap(player).credits - before.credits,
+			math.min(BASE_RATE * away, BASE_CAPACITY)
+		)
+	end)
+
+	it("REPEATED flushes before the hook wakes still pay exactly ONE window, once", function()
+		-- A wide gap means several flushes, and the base is re-stamped by each. The grant must be the
+		-- window the player was actually away for — not zero, and not one window per flush.
+		local away = 600
+		local h = newServer({ seed = seedAway({ { userId = 1, away = away } }) })
+		local player = h:join(1)
+		h.data:autosaveTick()
+		h.clock:advance(120)
+		h.data:autosaveTick()
+		h.clock:advance(120)
+		h.data:autosaveTick()
+		expect(h:prepare(player)):toBeOk()
+		local expected = math.min(BASE_RATE * away, BASE_CAPACITY)
+		local before = h:snap(player)
+		expect(h:claim(player)):toBeOk()
+		expectAmount(h:snap(player).credits - before.credits, expected)
+		expect(h:claim(player)):toBeErr(Result.Codes.Insufficient)
+		expectAmount(h:snap(player).credits - before.credits, expected)
+	end)
+
+	it("a REJOIN after that flush is priced from the LEAVE, never from the old base", function()
+		-- The counter-direction: a base that survived a flush must still be REPLACED by the next load,
+		-- or the fix would pay the pre-logout window a second time on every rejoin.
+		local h = newServer({ seed = seedAway({ { userId = 1, away = 600 } }) })
+		local player = h:join(1)
+		h.data:autosaveTick()
+		expect(h:claim(player)):toBeOk()
+		h:leave(player) -- the release stamps a fresh base
+		h.clock:advance(90)
+		local rejoined = h:join(1)
+		local info = (h:peek(rejoined) :: any).value
+		expect(info.awaySeconds):toBe(90)
+		expectAmount(info.amount, BASE_RATE * 90)
+	end)
+
+	it("a fresh player is still not paid for an absence they never had", function()
+		-- The safety direction of the same fix: the load-time base must be the REAL stamp, so a player
+		-- who just joined accrues nothing. A base that read as "missing" would be clamped to 0 and
+		-- grant nothing either — this case fails only if the base is read as something OLDER than the
+		-- truth, which would mint.
+		local h = newServer() -- no seed: default() stamps lastSeenUnix = the load instant
+		local player = h:join(1)
+		local info = (h:peek(player) :: any).value
+		expect(info.awaySeconds):toBe(0)
+		expect(info.amount):toBe(0)
+		expect(h:claim(player)):toBeErr(Result.Codes.Insufficient)
+	end)
+end)
+
+-- ── 20. "nothing to claim" and "already claimed" are DIFFERENT answers ──────────────────────────
+-- [REGRESSION — adversarial finding F3.] The A5 read surface exists so the popup can show the player
+-- what their absence earned. `claimed` is its answer to "was this session's window already paid?" —
+-- so setting it on a REFUSED claim tells a player who was never away that they had already collected
+-- it. Section 8's flag case asserts the flag only after a SUCCESSFUL claim, which is true either way.
+
+describe("offline: the claimed flag distinguishes paid from never-owed", function()
+	it("a refused claim (the player was never away) leaves claimed=false", function()
+		local h = newServer() -- away = 0: there is nothing to pay
+		local player = h:join(1)
+		expect((h:peek(player) :: any).value.claimed):toBe(false)
+		expect(h:claim(player)):toBeErr(Result.Codes.Insufficient)
+		local after = (h:peek(player) :: any).value
+		expect(after.amount):toBe(0)
+		expect(after.claimed):toBe(false) -- nothing was collected, so nothing was "already collected"
+	end)
+
+	it("the flag stays false across REPEATED refusals for the whole session", function()
+		-- The record is memoized against the session epoch, so a flag written on the refused path is
+		-- never recomputed away: one stray claim would mislabel the rest of the session.
+		local h = newServer()
+		local player = h:join(1)
+		for _ = 1, 3 do
+			expect(h:claim(player)):toBeErr(Result.Codes.Insufficient)
+		end
+		h.clock:advance(600) -- and time passing does not re-open it either
+		expect((h:peek(player) :: any).value.claimed):toBe(false)
+	end)
+
+	it("a claim that DID pay reports claimed=true (the flag still means something)", function()
+		-- The other half: neutering the flag entirely would satisfy the cases above and destroy the
+		-- surface. This is section 8's guarantee restated next to its counter-case.
+		local h = newServer({ seed = seedAway({ { userId = 1, away = 300 } }) })
+		local player = h:join(1)
+		expect((h:peek(player) :: any).value.claimed):toBe(false)
+		expect(h:claim(player)):toBeOk()
+		expect((h:peek(player) :: any).value.claimed):toBe(true)
+		-- and a SECOND, refused claim does not clear it back
+		expect(h:claim(player)):toBeErr(Result.Codes.Insufficient)
+		expect((h:peek(player) :: any).value.claimed):toBe(true)
+	end)
+
+	it("a claim refused by the STORE leaves claimed=false and the window owed", function()
+		-- The restore path already clears the flag; asserting it here pins that moving the write did
+		-- not leave a window that is owed but labelled as collected.
+		local h = newServer({ seed = seedAway({ { userId = 1, away = 300 } }) })
+		local player = h:join(1)
+		local dead = failingData(h.data, 1, Result.Codes.LockStolen)
+		expect(h:claim(player, { data = dead })):toBeErr(Result.Codes.LockStolen)
+		local after = (h:peek(player) :: any).value
+		expect(after.claimed):toBe(false)
+		expectAmount(after.amount, BASE_RATE * 300)
+	end)
+end)

@@ -186,11 +186,14 @@ local CAPACITY_PER_LEVEL = 250
 -- false forever, so a poisoned balance can never be spent again.
 local MAX_UPGRADE_LEVEL = 10000
 
--- A diagnostic bound on how much wall-clock ONE tick may convert into output. It is NOT the defence
--- against re-crediting the away window (ARMING is — see the header); the capacity clamp already bounds
--- a long gap to at most one full smelter. It exists so a clock that jumps forward shows up as a capped
--- tick rather than as a silently full smelter on every player at once.
-local MAX_TICK_ELAPSED_SECONDS = 3600
+-- THERE IS NO SEPARATE BOUND ON THE COUNTED SPAN, and that is deliberate. A `MAX_TICK_ELAPSED_SECONDS
+-- = 3600` clamp used to sit here as a "diagnostic" on a forward clock jump; it was DELETED because it
+-- silently diverged from the slice's verbatim formula, which counts the whole of
+-- (now - smelter.lastTickUnix) and bounds the result by capacity alone. It never defended anything the
+-- capacity clamp did not already bound to one full smelter (ARMING and the leave hook are what keep
+-- the away window out — see the header), and on a big tank (upgrades.smelter >= 15, capacity >= 4000)
+-- it was the clamp rather than the ceiling that decided the number: a real income shortfall the
+-- contract does not sanction, invisible on every small tank a test happened to use.
 
 -- The earn-path label carried on currency_earned. Identical on BOTH collect triggers by contract —
 -- the trigger is reported on the reply, never used for math and never used as the source.
@@ -468,11 +471,12 @@ function SalvageService.capacityOf(_self: any, data: any): number
 end
 
 -- ── ctx.salvage SEAM ────────────────────────────────────────────────────────────────────────────
--- Its OWN table, literally named `SalvageSeam`, installed on context.salvage at Start. Exactly TWO
--- methods, because a seam method with no reader is a dangling promise (gate-reachability R1) — and
--- both of these have readers: the tick and the fetch below call them, and later batches read them too
--- (the Structures shop asserts a rate DELTA through rateFor; Offline accrual caps its away-window
--- grant at capacityFor).
+-- Its OWN table, literally named `SalvageSeam`, installed on context.salvage at Start. THREE methods,
+-- and no more, because a seam method with no reader is a dangling promise (gate-reachability R1) —
+-- every one of these has readers: the tick and the fetch below call rateFor/capacityFor, later
+-- batches read them too (the Structures shop asserts a rate DELTA through rateFor; Offline accrual
+-- caps its away-window grant at capacityFor), and `disarmFor` is called by framework/PlayerLifecycle
+-- as a step of the pinned leave order, exactly as PlotSeam.releaseFor is.
 --
 -- `nowUnix` and `depth` are OPTIONAL: the contract signature is rateFor(data), so a caller that has
 -- neither still gets an answer — the captured ServerContext supplies the clock and the depth seam, and
@@ -497,6 +501,33 @@ end
 -- The smelter's storage ceiling for this blob.
 function SalvageSeam.capacityFor(_self: any, data: any): number
 	return SalvageService:capacityOf(data)
+end
+
+-- THE LEAVE HOOK. Drops every per-session memo this service holds for a departing player, so the NEXT
+-- session on this same server is ARMED rather than inheriting the last one's armed flag.
+--
+-- Why it has to exist. `_armed` used to be cleared only by tickAll's prune, which runs once a cadence
+-- and builds its `present` set at the START of the pass — so a player who left and rejoined before the
+-- next pass (or who left mid-pass, and so survived that pass's prune too) came back with the flag
+-- still set. `armFor` is idempotent on that key and returns WITHOUT stamping, so the first accruing
+-- tick of the new session computed elapsed from the PERSISTED, pre-absence lastTickUnix and credited
+-- the away window online — the same span OfflineService grants for
+-- [timestamps.lastSeenUnix, now]. Paid twice, and it is precisely the invariant ARMING exists for.
+--
+-- Why it lives on the SEAM and not on a PlayerRemoving connection of our own: framework/PlayerLifecycle
+-- is the one owner of that signal (AMENDMENT A10b) and its order is load-bearing, so salvage joins the
+-- pinned sequence instead of racing it. The tickAll prune stays as the belt — it also covers a player
+-- lost with no leave event at all.
+function SalvageSeam.disarmFor(_self: any, player: any): boolean
+	local userId = userIdOf(player)
+	if userId == nil then
+		return false
+	end
+	local wasArmed = SalvageService._armed[userId] ~= nil
+	SalvageService._armed[userId] = nil
+	SalvageService._ticking[userId] = nil
+	SalvageService._collecting[userId] = nil
+	return wasArmed
 end
 
 SalvageService.seam = SalvageSeam
@@ -527,10 +558,12 @@ function SalvageService.accrue(_self: any, data: any, nowUnix: number, depth: an
 
 	local last = smelter.lastTickUnix
 	local elapsed = 0
-	-- A stamp of 0 is "never ticked" (Migrations seeds it), and a stamp in the FUTURE is a clock that
-	-- moved backwards. Neither may credit anything; both are simply re-stamped below.
+	-- A stamp of 0 is "never ticked" (Migrations seeds it) and credits nothing; a stamp in the FUTURE
+	-- is a clock that moved backwards and credits nothing either. The counted span is otherwise the
+	-- WHOLE of (now - lastTickUnix), verbatim as the slice's formula states it, with `capacity` below
+	-- as its only ceiling — see the stamp for what a backwards clock does to the base.
 	if last > 0 and nowUnix > last then
-		elapsed = math.min(nowUnix - last, MAX_TICK_ELAPSED_SECONDS)
+		elapsed = nowUnix - last
 	end
 
 	local credited = 0
@@ -542,7 +575,15 @@ function SalvageService.accrue(_self: any, data: any, nowUnix: number, depth: an
 	credited = math.max(0, stored - sanitizeAmount(smelter.storedCredits))
 
 	smelter.storedCredits = stored
-	smelter.lastTickUnix = nowUnix
+	-- THE TICK BASE ONLY EVER MOVES FORWARD. `Clock.real().unix` is os.time() — a wall clock an NTP
+	-- correction can step BACKWARDS — and an unconditional re-stamp would drop the base into a span
+	-- this session has ALREADY been paid for: the tick after the clock recovers then counts that span
+	-- a SECOND time and mints output from a clock correction. Keeping the base means a backwards clock
+	-- fails in the SAFE direction (nothing accrues until real time catches up) instead of paying
+	-- twice. `last` is normalized non-negative by smelterOf, so the never-ticked case (last = 0) still
+	-- stamps forward to nowUnix. The two ARMING stamps are deliberately NOT written this way: handing
+	-- the away window to Offline accrual is their whole job, and that requires moving the base back.
+	smelter.lastTickUnix = math.max(last, nowUnix)
 
 	return {
 		credited = credited,
@@ -1033,10 +1074,13 @@ function SalvageService.tickAll(self: any, context: any): TickPass
 		end
 	end
 
-	-- Prune arming state for players who have left. Occupancy of this table is per-server memory and a
-	-- server lives for hours: without this it grows once per join forever. Doing it here (rather than
-	-- from a second PlayerRemoving connection) keeps the pinned leave sequence owned by
-	-- framework/PlayerLifecycle, which is the only thing allowed to connect that signal.
+	-- Prune arming state for players who have left. This is the BELT, not the primary: the leave hook
+	-- (SalvageSeam.disarmFor, called from framework/PlayerLifecycle's pinned sequence) is what makes a
+	-- fast leave->rejoin re-arm, because this loop cannot — it runs once a cadence and `present` is
+	-- fixed at the START of the pass, so a rejoin that beats it inherits the stale flag. What this
+	-- still owns: a player lost with NO leave event, and the unbounded growth of a per-server table
+	-- across a server's hours of life. It never connects PlayerRemoving itself — that signal belongs
+	-- to framework/PlayerLifecycle alone.
 	for userId in self._armed do
 		if not present[userId] then
 			self._armed[userId] = nil

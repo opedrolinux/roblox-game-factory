@@ -5,7 +5,8 @@
 --
 --     AnalyticsService session_end (needs the STILL-LOADED blob)
 --       -> PlotService release (frees the dome)
---         -> DataService session release (invalidates the blob).
+--         -> SalvageService disarm (drops the session's tick memos)
+--           -> DataService session release (invalidates the blob).
 --
 -- WHY IT HAD TO BECOME CODE. Until this module existed, that order was a COMMENT in
 -- src/server/init.server.luau while DataService and AnalyticsService each connected their OWN
@@ -39,9 +40,10 @@ function PlayerLifecycle.logWarn(_self: any, message: string): ()
 end
 
 -- THE SEQUENCE. Pure, synchronous, and deliberately ordered — the ordering IS the deliverable.
--- Steps 1 and 2 are pcall-guarded: an emitter or a dome teardown that throws must never skip step 3,
--- which is the player's final durable write. Step 3 is NOT guarded — if the data layer raises, that
--- belongs in the error log, not swallowed by the module that was supposed to persist the session.
+-- Steps 1, 2 and 2b are pcall-guarded: an emitter, a dome teardown or a salvage disarm that throws
+-- must never skip step 3, which is the player's final durable write. Step 3 is NOT guarded — if the
+-- data layer raises, that belongs in the error log, not swallowed by the module that was supposed to
+-- persist the session.
 function PlayerLifecycle.onRemoving(self: any, context: any, player: any): ()
 	if context == nil or player == nil then
 		return
@@ -84,6 +86,24 @@ function PlayerLifecycle.onRemoving(self: any, context: any, player: any): ()
 		end)
 		if not ok then
 			self:logWarn(`PlayerLifecycle: plot release errored: {tostring(err)}`)
+		end
+	end
+
+	-- 2b. SALVAGE disarm — drop the departing player's per-session tick memos. Before the data
+	--     release for the same reason as the plot release, and pcall-guarded like it. WHY IT IS A
+	--     STEP HERE and not a PlayerRemoving connection of salvage's own: this module is the only
+	--     thing allowed to connect that signal, and salvage's own prune (inside its 1s tick pass)
+	--     cannot cover a leave->rejoin that lands inside one pass — the returning session would
+	--     inherit the previous one's `armed` flag, skip the arming stamp, and credit the away window
+	--     online that OfflineService has already paid for. Optional by design: ctx.salvage is nil
+	--     until SalvageService Starts, and the seam is free to not carry the method.
+	local salvage = context.salvage
+	if salvage ~= nil and type(salvage.disarmFor) == "function" then
+		local ok, err = pcall(function()
+			salvage:disarmFor(player)
+		end)
+		if not ok then
+			self:logWarn(`PlayerLifecycle: salvage disarm errored: {tostring(err)}`)
 		end
 	end
 

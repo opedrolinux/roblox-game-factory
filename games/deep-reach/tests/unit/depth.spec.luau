@@ -676,6 +676,65 @@ describe("depth: descending multiplies salvage value (measured on the running ra
 			end
 		end
 	)
+
+	-- [REGRESSION — dropped gate findings F2/F4] A persisted `upgrades.depth` is DATA, not a fact:
+	-- a rolled-back record, a botched migration or a future writer can put an out-of-range integer
+	-- there. The read path (the seam Salvage multiplies by, the Y PlotService places at, the HUD
+	-- reply) never re-checks `requiresFlag` — that clause lives only inside the descend transform —
+	-- so whatever tier an out-of-range value resolves to is handed out with NO flag check at all.
+	-- The direction of that resolution is therefore a monetization boundary: degrading DOWN gives a
+	-- corrupted record the free rung it started on, degrading UP hands it the paywalled trench's
+	-- income multiplier and world position for free. The two garbage classes must also agree: a
+	-- build where `math.huge` reads as tier 1 and `1e308` reads as the VIP trench is deciding the
+	-- paywall on the difference between two unusable numbers.
+	it(
+		"an out-of-range persisted depth degrades DOWN — never UP into the flag-gated VIP trench",
+		function()
+			local h = newServer()
+			local player = h:join(1)
+			local l = ladder()
+			expectTrue(l.vipTier ~= nil, "no rung on the ladder is gated on a gamepass flag")
+			local vip = l.vipTier :: number
+			local at = h.clock:unix()
+
+			-- The reference reading: an infinity is not a tier, and every build already degrades it.
+			-- Every other unusable value has to land in the same place.
+			h:write(player, function(d: any): ()
+				d.upgrades[DEPTH_KEY] = math.huge
+			end)
+			local reference = h:info(player).tier
+			expectTrue(
+				l.tiers[reference].requiresVip ~= true,
+				`an infinite persisted depth already resolves to the flag-gated tier {reference}`
+			)
+
+			for _, garbage in { l.maxTier + 1, 7, 999, 2 ^ 40, 1e308 } do
+				h:write(player, function(d: any): ()
+					d.upgrades[DEPTH_KEY] = garbage
+					d.flags[VIP_FLAG] = nil
+				end)
+				local info = h:info(player)
+				expect(info.vipUnlocked):toBe(false)
+				expectTrue(
+					l.tiers[info.tier].requiresVip ~= true,
+					`a persisted depth of {tostring(garbage)} resolved to tier {info.tier} `
+						.. `({info.label}), which is gated on "{VIP_FLAG}" — and this blob carries no such `
+						.. `flag. An out-of-range record must never self-upgrade into the paywall`
+				)
+				expect(info.tier):toBe(reference)
+				expectTrue(
+					h:multiplier(player, at) < l.tiers[vip].mult,
+					`a persisted depth of {tostring(garbage)} pays the paywalled trench's salvage `
+						.. `multiplier ({h:multiplier(player, at)}) with the flag absent`
+				)
+				expectTrue(
+					h.seam:tierYFor(h:blob(player)) > l.tiers[vip].y,
+					`a persisted depth of {tostring(garbage)} places the dome at the paywalled trench's `
+						.. `world Y with the flag absent`
+				)
+			end
+		end
+	)
 end)
 
 -- ── 3. THE PRESSURE GATE ────────────────────────────────────────────────────────────────────────
@@ -1592,6 +1651,55 @@ describe("depth: the restock multiplies value ONLY for the player standing in it
 		)
 	end)
 
+	-- [REGRESSION — dropped gate finding BH1] The rotation deliberately never lands the rich wreck
+	-- behind the paywall (pinned by "the wreck only ever spawns in a TRENCH tier" above). That is a
+	-- fair design decision — the daily hook must be reachable by the players who can stand there —
+	-- but it has a price: the VIP trench is the ONE rung with no compensating hot day of its own, so
+	-- its flat multiplier has to beat the RESTOCKED reading of every rung below it. Otherwise a free
+	-- tier-5 player out-earns a player who paid Credits AND real money one day in five, and depth is
+	-- one-way: nothing in the game walks `upgrades.depth` back up, so the last descend is a permanent
+	-- pay cut on those days. Measured on the RUNNING rate, the number Salvage actually multiplies by.
+	it(
+		"the paywalled trench out-earns EVERY restocked tier below it (it can never be restocked itself)",
+		function()
+			local h = newServer({ startUnix = START_UNIX })
+			local player = h:join(1)
+			local l = ladder()
+			expectTrue(l.vipTier ~= nil, "no rung on the ladder is gated on a gamepass flag")
+			local vip = l.vipTier :: number
+
+			for k = 1, vip - 1 do
+				local hot: number? = nil
+				for day = 0, 60 do
+					local candidate = START_UNIX + day * DAY_SECONDS
+					if DepthService:restockTierAt(candidate) == k then
+						hot = candidate
+						break
+					end
+				end
+				expectTrue(hot ~= nil, `no server-day within 60 puts the rich wreck in tier {k}`)
+				local at = hot :: number
+				expectTrue(
+					DepthService:restockTierAt(at) ~= vip,
+					"the paywalled trench carries the wreck on this day, so it is not the excluded rung"
+				)
+
+				h:setTier(player, k)
+				local restocked = h:rate(player, at)
+				h:setTier(player, vip)
+				local paywalled = h:rate(player, at)
+				expectTrue(
+					paywalled > restocked,
+					`on the day the rich wreck lands in tier {k} ({l.tiers[k].label}) a player standing `
+						.. `there earns {restocked}, while the paywalled {l.tiers[vip].label} — which costs `
+						.. `{l.tiers[vip].cost} Credits plus the gamepass, and which the wreck can NEVER `
+						.. `visit — earns only {paywalled}. The last rung of the ladder is a pay cut, and `
+						.. `nothing walks a player back up it`
+				)
+			end
+		end
+	)
+
 	it("a garbage clock reading never poisons the multiplier", function()
 		local h = newServer()
 		local player = h:join(1)
@@ -1647,6 +1755,42 @@ describe("depth: the three emit points", function()
 			end
 			expect(h:eventCount("loop_completed")):toBe(1)
 			expect(h:lastEvent("loop_completed").payload.tier):toBe(2)
+		end
+	)
+
+	-- [REGRESSION — dropped gate findings F1/F3] "the FIRST successful descend of a SESSION" is a
+	-- claim about SESSIONS, and a rejoin to the same server starts a new one. The suppression set is
+	-- per-SERVER memory, so a session boundary it does not observe is a funnel event that silently
+	-- never fires: the player descends, leaves, comes back, completes the core loop again, and the
+	-- analytics say nobody did. Both halves are asserted here — the SECOND session emits again, and
+	-- the second session still emits only ONCE — so the invariant cannot be satisfied by simply
+	-- emitting on every descend.
+	it(
+		"loop_completed fires again for the SAME player's SECOND session (leave -> rejoin)",
+		function()
+			local h = newServer()
+			local player = h:join(1)
+			armFor(h, player, 1)
+			expect(h:descend(player)):toBeOk()
+			expect(h:eventCount("loop_completed")):toBe(1)
+			expect(h:lastEvent("loop_completed").payload.tier):toBe(2)
+
+			-- Leave and come back exactly as a rejoin does: persist, release the session, load it again.
+			expect(h.data:save(player)):toBeOk()
+			h.data:onPlayerRemoving(player)
+			local rejoined = h:join(1)
+			expect(persistedTier(h:blob(rejoined))):toBe(2)
+
+			-- A NEW session completes the core loop again: it must be counted again.
+			armFor(h, rejoined, 2)
+			expect(h:descend(rejoined)):toBeOk()
+			expect(h:eventCount("loop_completed")):toBe(2)
+			expect(h:lastEvent("loop_completed").payload.tier):toBe(3)
+
+			-- ...and only ONCE for that session, however many rungs it walks.
+			armFor(h, rejoined, 3)
+			expect(h:descend(rejoined)):toBeOk()
+			expect(h:eventCount("loop_completed")):toBe(2)
 		end
 	)
 

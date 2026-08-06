@@ -315,19 +315,58 @@ export type Pending = {
 	computedAtUnix: number, -- the SERVER instant the window was closed at
 }
 
+-- THE BASE THE WINDOW IS MEASURED FROM, and the reason this is not simply `data.timestamps
+-- .lastSeenUnix`: that field is REWRITTEN TO NOW by DataService.autosaveTick on every flush, and this
+-- service does not get a hand-off when a session is installed — its join hook POLLS
+-- (loadWaitStepSeconds, and task.wait is a floor, so a join storm widens the gap without bound). A
+-- flush landing between the install and the first poll erases the base before anything snapshotted
+-- it, and because ensurePending MEMOIZES the record for the session's epoch, that zero poisons the
+-- peek AND the claim for the rest of the session: the earnings are gone permanently and silently,
+-- which is the exact defect that shipped in this factory's previous game (docs/LEARNINGS.md).
+--
+-- So the base is taken from the data layer's LOAD-TIME snapshot (`DataService:joinBaseFor`), which is
+-- written once when the session is installed and which autosave never touches. That makes the window
+-- independent of WHEN this service wakes up — the gap can be arbitrarily wide and the base still
+-- reads the value the player logged out at.
+--
+-- The blob remains the FALLBACK, for a source whose data layer has no such accessor (a spec's
+-- instrumented double, a foreign seam). Narrowing to the accessor alone would turn every such caller
+-- into a silent zero, which is the same failure wearing a different hat.
+local function joinBaseFor(source: any, player: any, data: any): number
+	local dataLayer = if type(source) == "table" then source.data else nil
+	if player ~= nil and dataLayer ~= nil and type(dataLayer.joinBaseFor) == "function" then
+		local ok, base = pcall(function()
+			return dataLayer:joinBaseFor(player)
+		end)
+		if ok and base ~= nil then
+			return sanitizeStamp(base)
+		end
+	end
+	if type(data) == "table" and type(data.timestamps) == "table" then
+		return sanitizeStamp(data.timestamps.lastSeenUnix)
+	end
+	return 0
+end
+
 -- Compute ONE session's away window from the loaded blob. PURE over (blob, clock, ctx.salvage): it
 -- writes nothing to the blob, stamps nothing and grants nothing — it only reads. That is what lets
 -- `offline.peek` share this path and still be strictly side-effect free (AMENDMENT A5).
-function OfflineService.computePending(self: any, source: any, data: any, nowUnix: number): any
+--
+-- `player` is optional and is used ONLY to ask the data layer for the load-time base (see above); a
+-- call without it measures from the blob, which is what a spec driving the pure math wants.
+function OfflineService.computePending(
+	self: any,
+	source: any,
+	data: any,
+	nowUnix: number,
+	player: any?
+): any
 	local rate, capacity, seamError = salvageReading(source.salvage, data)
 	if rate == nil or capacity == nil then
 		return Result.err(Result.Codes.Internal, seamError)
 	end
 
-	local lastSeen = 0
-	if type(data) == "table" and type(data.timestamps) == "table" then
-		lastSeen = sanitizeStamp(data.timestamps.lastSeenUnix)
-	end
+	local lastSeen = joinBaseFor(source, player, data)
 	local awaySeconds = self:awaySecondsFor(lastSeen, nowUnix)
 	local accrual = self:accrualFor(rate, awaySeconds, capacity)
 
@@ -389,7 +428,7 @@ function OfflineService.ensurePending(self: any, source: any, player: any): any
 		return Result.ok(existing)
 	end
 
-	local computed = self:computePending(source, data, now :: number)
+	local computed = self:computePending(source, data, now :: number, player)
 	if not computed.ok then
 		return computed
 	end
@@ -520,18 +559,28 @@ function OfflineService.claim(self: any, ctx: any): any
 	local amount = sanitizeAmount(pending.amount)
 	local capacity = sanitizeAmount(pending.capacity)
 	pending.amount = 0
-	pending.claimed = true
 
 	if amount <= 0 then
 		self._claiming[userId] = nil
 		-- Nothing to pay: either this session's window was already claimed, or the player was not
 		-- away (the fresh-player case, which is the common one). A CURRENCY shortfall, not a payload
 		-- failure and not a panic refusal.
+		--
+		-- `claimed` IS NOT SET HERE, and the ordering is the point. It is the A5 read surface's answer
+		-- to "did this session's window get paid?", so setting it on the refused path would tell a
+		-- player who was never away that they had already collected — the two states are different
+		-- and the popup is entitled to tell them apart. The ZERO above stays where it is: that write
+		-- is the load-bearing half of the one-shot guarantee (it must happen before anything can
+		-- yield) and it is already 0 on this path anyway.
 		return Result.err(
 			Result.Codes.Insufficient,
 			"offline: there is no pending away-window accrual to claim"
 		)
 	end
+
+	-- Paying from here. Flagged BEFORE the update can yield, alongside the zero, so an interleaved
+	-- peek sees a consistent record; `restore()` clears it again if nothing commits.
+	pending.claimed = true
 
 	-- Everything the transform needs, read BEFORE the yield. `outcome` is set only by the transform.
 	local outcome: any = nil
