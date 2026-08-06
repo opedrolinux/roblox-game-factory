@@ -54,6 +54,12 @@ local controllers = {
 	-- the controller does is ask Roblox to show a purchase prompt, and every grant is decided
 	-- server-side from UserOwnsGamePassAsync / PromptGamePassPurchaseFinished / ProcessReceipt)
 	require(Client.controllers.monetization.MonetizationController),
+	-- [resurface] the BottomCenter prestige prompt (count + Pearl balance, read off the replicated
+	-- view) and its Center-slot CONFIRM DIALOG: the Pearls that would be minted, the permanent
+	-- multiplier before/after, and the running rate either side of the wipe (zero authority: every
+	-- number came off a resurface.fetch / resurface.do reply the SERVER derived, and the resurface
+	-- payload carries nothing at all)
+	require(Client.controllers.resurface.ResurfaceController),
 }
 
 Bootstrap.start(controllers, context)

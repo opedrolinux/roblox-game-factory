@@ -37,6 +37,7 @@ local SPEC_PATHS = {
 	"./unit/net.spec",
 	"./unit/offline.spec", -- [feature: offline accrual] the independent gate's spec-derived tests
 	"./unit/plot.spec", -- [feature: plot ownership] the independent gate's spec-derived tests
+	"./unit/resurface.spec", -- [feature: resurface/prestige] the independent gate's spec-derived tests
 	-- (AMENDMENT A10a: ./unit/sample.spec is DELETED with the sample service it covered.)
 	"./unit/salvage.spec", -- [feature: salvage core] the independent gate's spec-derived tests
 	"./unit/selene_guard.spec",
