@@ -293,11 +293,30 @@ for (let i = 0; i < features.length; i++) {
 
   // Aggregate the gate signal. The workflow SUGGESTS a verdict; the orchestrator adjudicates,
   // applies fixes (falsify-first), and decides the merge — it does not auto-fix impl bugs here.
-  const realBugs = []
-    .concat((author && author.suspectedRealBugs) || [])
-    .concat((bughunt && bughunt.realBugsFound) || [])
-  const critics = [coverage, quality, bughunt]
+  // EVERY critic carries realBugsFound (see CRITIC_SCHEMA) — this used to read ONLY the bug-hunter's,
+  // so a real defect named by the coverage or quality critic was silently dropped: the feature landed
+  // on 'needs-review' (a park) instead of 'bug-found' (the falsify-first auto-fix loop), and the
+  // finding survived only if a human happened to read the gate transcript. It bit every batch of this
+  // game — depth's paywall-bypassing tier clamp and offline's residual join race were both found
+  // TWICE, by two independent critics, and both reported as realBugs: 0. The bug-hunter is the critic
+  // whose JOB is exploits; it is not the only one that finds them, and a gate that can only hear one
+  // of its three voices is not the gate that was designed.
+  const CRITIC_ROLES = [['coverage', coverage], ['quality', quality], ['bughunt', bughunt]]
+  const realBugs = [].concat((author && author.suspectedRealBugs) || []).map((b) => ({ ...b, foundBy: 'gate-author' }))
+  for (const [role, critic] of CRITIC_ROLES) {
+    for (const bug of (critic && critic.realBugsFound) || []) realBugs.push({ ...bug, foundBy: role })
+  }
+  const critics = CRITIC_ROLES.map(([, c]) => c)
   const anyCriticGap = critics.some((c) => !c || c.verdict !== 'pass')
+  // A critic that DIED (API error, stall) returns null, which is indistinguishable from one that ran
+  // and found gaps once it is folded into anyCriticGap. It is not the same thing at all: "the exploit
+  // hunter looked and found nothing" and "the exploit hunter never looked" produce the same verdict
+  // string but a completely different amount of evidence. Named here so the orchestrator can re-run
+  // the missing critic instead of adjudicating a gate that is quietly one-third absent.
+  const criticsMissing = CRITIC_ROLES.filter(([, c]) => !c).map(([role]) => role)
+  if (criticsMissing.length > 0) {
+    log(`build-features: ${f.name} — GATE INCOMPLETE: ${criticsMissing.join(', ')} critic(s) did not return. This verdict rests on ${3 - criticsMissing.length}/3 critics; re-run the missing one(s) before trusting it.`)
+  }
   // Same override, same reasoning, applied to the gate author: it runs the SAME gauntlet and sees the
   // SAME known-red stage, so without this every feature lands on needs-review for a reason that has
   // nothing to do with the tests it just wrote. `author` still has to EXIST and have run — the
@@ -318,6 +337,7 @@ for (let i = 0; i < features.length; i++) {
     feature: f.name,
     verdict,
     realBugs,
+    criticsMissing,
     builder,
     gate: { author, coverage, quality, bughunt },
     // Recorded on EVERY result, so a verdict reached under an override can never be read back as a

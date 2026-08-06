@@ -24,6 +24,7 @@ local SPEC_PATHS = {
 	-- trip, the toView allowlist, the analytics taxonomy, the action registry, the test seams)
 	"./unit/daily.spec", -- [feature: daily supply drop] the independent gate's spec-derived tests
 	"./unit/data.spec",
+	"./unit/depth.spec", -- [feature: depth tiers] the independent gate's spec-derived tests
 	"./unit/economy.spec", -- [contract pass] ctx.economy earn/spend inside one data:update
 	"./unit/economy_race.spec",
 	"./unit/framework.spec",
@@ -33,6 +34,7 @@ local SPEC_PATHS = {
 	"./unit/lifecycle.spec", -- [A10b] the pinned PlayerRemoving order (analytics -> plot -> data)
 	"./unit/migration.spec",
 	"./unit/net.spec",
+	"./unit/offline.spec", -- [feature: offline accrual] the independent gate's spec-derived tests
 	"./unit/plot.spec", -- [feature: plot ownership] the independent gate's spec-derived tests
 	-- (AMENDMENT A10a: ./unit/sample.spec is DELETED with the sample service it covered.)
 	"./unit/salvage.spec", -- [feature: salvage core] the independent gate's spec-derived tests

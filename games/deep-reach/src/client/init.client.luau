@@ -39,6 +39,16 @@ local controllers = {
 	require(Client.controllers.structures.StructuresController),
 	-- [leaderboard] the in-world greybox board + the LeftPanel standings list (zero authority)
 	require(Client.controllers.leaderboard.LeaderboardController),
+	-- [depth] the TopRight trench badge: current tier + multiplier, the next tier's Credits AND hull
+	-- requirement against what the player has, today's rich-wreck tier, and the descend prompt itself
+	-- (zero authority: the whole pressure gate is re-evaluated server-side inside one lock-held
+	-- transform, and the descend payload carries nothing at all)
+	require(Client.controllers.depth.DepthController),
+	-- [offline] the Center-slot claim-on-join popup: the away-window amount, whether the smelter
+	-- capacity capped it, and the claim button (zero authority: the amount is computed server-side at
+	-- session load from timestamps.lastSeenUnix and held in server memory, and both offline actions
+	-- take no arguments at all)
+	require(Client.controllers.offline.OfflineController),
 }
 
 Bootstrap.start(controllers, context)
