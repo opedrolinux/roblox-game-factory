@@ -31,6 +31,36 @@ those findings), the orchestrator adjudicated each one. Every amendment is trace
 | A10 | Six obligations no feature slice can own: the inherited `sample` mint, PlayerRemoving hook ordering, two different definitions of "day", `structures.fetch` enumerating the blob, static vs closure handlers, and seven controllers with no shared HUD root. | All six moved into the contract pass. |
 | A11 | The two whole-game success criteria (the end-to-end traversal, the adversarial pass) had **no stated owner** — and an unstated owner is how a criterion goes unrun. | Named: `integration-gate.js` and `adversarial-review.js`. |
 
+## A12 — added mid-build, from a finding the gate raised and a fixer correctly refused
+
+Unlike A1–A11 this one was not found at decompose time. It surfaced during the backlog sweep, and it
+is recorded here because a builder implemented the contract **faithfully** and the result was still
+wrong.
+
+| # | Finding | Resolution |
+|---|---|---|
+| A12 | `daily`'s escalating streak ladder is **unreachable**. The slice fixes the claim as opening at 20h and the streak as lapsing at 22h, so continuing a streak needs every claim to land in a 2-hour window that walks backward 2–4h per day. A player with an ordinary daily cadence has a 24h gap, lapses every time, and is pinned at streak 1 / reward 100 forever — six of seven rungs, the cap, and the whole re-entry hook are dead content, and the HUD badge reads 1 for the life of the account. | The lapse bound moves so a 24h cadence *climbs*. `CLAIM_OPENS_AFTER_SECONDS` stays at 20h (the `Err(OnCooldown)` contract and every other daily test lean on it). |
+
+**Why this is an amendment and not a bug fix.** The code is faithful to `slices/daily.md` and to
+`specs/deep-reach.md:41` — the contradiction is between two sentences of the spec itself: *"escalating
+reward"* and *"20-22h claim window"*. Both cannot hold. The fixer that found it declined to touch the
+constant and said so plainly rather than manufacturing a proof, which is the correct behaviour: a
+falsify-first fixer that moves a bound the slice fixes is amending the contract unilaterally, and the
+regression test it would write would assert a contract that does not exist yet.
+
+**Why this reading.** The feature's stated *purpose* is escalation, and it is named as a success
+criterion (`specs/deep-reach.md:63`, "streak counter"). Read as "the claim becomes available after
+about a day", the 20–22h phrasing is a cooldown; read as "you must claim inside a 2-hour slot", it
+makes the feature's own headline unachievable. The first reading costs a constant; the second costs
+the feature. **This is reversible in one constant** — if the punishing window was the intent, revert
+the bound and instead drop the word "escalating" from the spec and surface `lapsesAtUnix` (already
+computed) on the badge so the player can see the streak is about to die.
+
+The suite pins the *current* behaviour deliberately (`daily.spec.luau:301` asserts the 22h constant,
+and a case named "a REAL 24h cadence lapses every day" loops five claims asserting streak 1 each
+time, commented "any move of the lapse bound past 24h goes red here"). That case is the falsification
+target: it must be seen RED before, and rewritten to assert the ladder *climbs*, after.
+
 ## What the skeptic verified as already correct
 
 Worth recording, because it is the part that needed no intervention: seam-vs-migration was right on
