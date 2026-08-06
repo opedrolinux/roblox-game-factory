@@ -188,7 +188,6 @@ describe("Types.toView (the client projection is an ALLOWLIST)", function()
 		-- that catches both.
 		local view = Types.toView(Migrations.default(1000) :: any)
 		expectExactKeys(view :: any, {
-			"schemaVersion",
 			"currencies",
 			"stats",
 			"upgrades",
@@ -199,6 +198,12 @@ describe("Types.toView (the client projection is an ALLOWLIST)", function()
 			"resurfaces",
 			"boostExpiresUnix",
 		})
+		-- [A13] `stats` gets the SAME exact-set treatment as the top level, because it used to be the
+		-- one place that escaped it: toView copied data.stats wholesale, so a new PlayerData.stats
+		-- field replicated itself to every client with nobody deciding to — the precise inversion of
+		-- the allowlist rule this describe() block is named for. An exact-set assertion one level
+		-- down is what makes "allowlist" true rather than aspirational.
+		expectExactKeys(view.stats :: any, { "lifetimeCredits" })
 	end)
 
 	it(

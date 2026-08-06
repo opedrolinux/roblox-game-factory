@@ -423,21 +423,22 @@ describe("Types.toView (allowlist projection — the client-safe contract)", fun
 		expect((view :: any).analytics):toBe(nil)
 	end)
 
-	it(
-		"keeps exactly the player-facing subset (currencies/stats/upgrades/flags/version)",
-		function()
-			local data = Migrations.default(1)
-			data.currencies.Credits = 10
-			data.upgrades.CollectSpeed = 1
-			data.flags.tutorialDone = true
-			local view = Types.toView(data :: any)
-			expect(view.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
-			expect(view.currencies.Credits):toBe(10)
-			expect(view.stats.joinCount):toBe(0)
-			expect(view.upgrades.CollectSpeed):toBe(1)
-			expect(view.flags.tutorialDone):toBe(true)
-		end
-	)
+	it("keeps exactly the player-facing subset, and NOT the server bookkeeping [A13]", function()
+		local data = Migrations.default(1)
+		data.currencies.Credits = 10
+		data.upgrades.CollectSpeed = 1
+		data.flags.tutorialDone = true
+		local view = Types.toView(data :: any)
+		expect(view.currencies.Credits):toBe(10)
+		expect(view.upgrades.CollectSpeed):toBe(1)
+		expect(view.flags.tutorialDone):toBe(true)
+		-- [A13] Both used to ride the wire and neither was ever read by a client file.
+		-- schemaVersion is Migrations' business; joinCount is analytics'. Asserted as absent
+		-- rather than deleted-and-forgotten, so re-adding either is a RED, not a silent
+		-- bandwidth regression that only `reachability` would notice.
+		expect((view :: any).schemaVersion):toBe(nil)
+		expect((view.stats :: any).joinCount):toBe(nil)
+	end)
 
 	it(
 		"carries every NEW client-facing v7 field to the client (a missing line ships nil)",

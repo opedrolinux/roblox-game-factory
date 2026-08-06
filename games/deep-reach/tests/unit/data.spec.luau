@@ -80,7 +80,9 @@ describe("Types.toView (client-safe projection)", function()
 		expect((view :: any).analytics):toBe(nil)
 		-- keeps the player-facing subset
 		expect(view.currencies):toEqual(data.currencies)
-		expect(view.schemaVersion):toBe(Types.CURRENT_SCHEMA_VERSION)
+		-- [A13] schemaVersion is server bookkeeping and is NOT replicated. Asserted as an absence,
+		-- because it used to be pushed on every write with no client file reading it.
+		expect((view :: any).schemaVersion):toBe(nil)
 	end)
 end)
 

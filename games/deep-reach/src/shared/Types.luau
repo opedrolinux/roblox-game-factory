@@ -76,13 +76,16 @@ export type AnyTable = { [string]: any }
 -- Strips: receipts (idempotency ledger), analytics (server bookkeeping), and any future
 -- internal field. Keeps the player-facing subset.
 export type PlayerView = {
-	schemaVersion: SchemaVersion,
 	currencies: { [string]: number },
-	-- AMENDMENT A4: stats is a NARROW FIXED RECORD here. toView copies data.stats wholesale, so
-	-- the VALUE of lifetimeCredits arrives either way — but a client reading
-	-- view.stats.lifetimeCredits against a narrower annotation is a --!strict property error.
-	-- Widening PlayerData.stats alone would ship a leaderboard that cannot read its ranking key.
-	stats: { playtimeSeconds: number, joinCount: number, lifetimeCredits: number },
+	-- AMENDMENT A4 established that the leaderboard needs `lifetimeCredits` here, because a client
+	-- reading it against a narrower annotation is a --!strict property error.
+	-- AMENDMENT A13 narrows the REST of it back out. `stats` used to be copied WHOLESALE by toView,
+	-- which quietly made this the one place a new PlayerData.stats field would replicate itself to
+	-- every client with nobody deciding to — the exact inversion of the allowlist rule stated over
+	-- toView. `playtimeSeconds` and `joinCount` were riding along that way and no client file read
+	-- either one, so the server paid the bandwidth on every write for nothing. Add a field here the
+	-- moment a client genuinely reads it, and not one moment earlier.
+	stats: { lifetimeCredits: number },
 	upgrades: { [string]: number },
 	flags: { [string]: boolean },
 	plot: { plotId: string, claimedAtUnix: number },
@@ -100,10 +103,15 @@ Types.CURRENT_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 -- default — a field is only replicated if added here deliberately. Lune-clean, Tier-1 tested.
 function Types.toView(data: PlayerData): PlayerView
 	return {
-		schemaVersion = data.schemaVersion,
+		-- schemaVersion is NOT here [A13]: it is load-bearing server bookkeeping (Migrations reads it,
+		-- analytics stamps it) and no client file ever read it. The client and the server ship in the
+		-- same place, so there is no version skew for a client to detect — it was pure bandwidth.
 		currencies = data.currencies,
-		-- stats is copied WHOLESALE, so stats.lifetimeCredits needs no line of its own here.
-		stats = data.stats,
+		-- stats is projected FIELD BY FIELD [A13], not copied wholesale. Wholesale made this the one
+		-- hole in the allowlist: a new PlayerData.stats field replicated itself with nobody deciding
+		-- to. lifetimeCredits is here because the leaderboard reads it (A4); playtimeSeconds and
+		-- joinCount are not, because nothing does.
+		stats = { lifetimeCredits = data.stats.lifetimeCredits },
 		upgrades = data.upgrades,
 		flags = data.flags,
 		-- One allowlist line per NEW TOP-LEVEL client-facing field. receipts / analytics stay out.
