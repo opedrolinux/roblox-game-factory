@@ -33,6 +33,7 @@ local SPEC_PATHS = {
 	"./unit/leaderboard.spec", -- [feature: leaderboard] the independent gate's spec-derived tests
 	"./unit/lifecycle.spec", -- [A10b] the pinned PlayerRemoving order (analytics -> plot -> data)
 	"./unit/migration.spec",
+	"./unit/monetization.spec", -- [feature: monetization] the independent gate's spec-derived tests
 	"./unit/net.spec",
 	"./unit/offline.spec", -- [feature: offline accrual] the independent gate's spec-derived tests
 	"./unit/plot.spec", -- [feature: plot ownership] the independent gate's spec-derived tests

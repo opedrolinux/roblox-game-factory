@@ -49,6 +49,11 @@ local controllers = {
 	-- session load from timestamps.lastSeenUnix and held in server memory, and both offline actions
 	-- take no arguments at all)
 	require(Client.controllers.offline.OfflineController),
+	-- [monetization] the TopRight boost/owned-pass badge + the BottomRight store opener and its
+	-- Center-slot store panel (zero authority: this feature has NO net action at all — the only thing
+	-- the controller does is ask Roblox to show a purchase prompt, and every grant is decided
+	-- server-side from UserOwnsGamePassAsync / PromptGamePassPurchaseFinished / ProcessReceipt)
+	require(Client.controllers.monetization.MonetizationController),
 }
 
 Bootstrap.start(controllers, context)
