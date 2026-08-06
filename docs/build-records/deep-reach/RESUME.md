@@ -4,7 +4,8 @@ State as of the end of the first build session. Everything needed to continue is
 lives only in a chat log.
 
 **Branch:** `staging/deep-reach` (not pushed — `git push` is the human's).
-**Where we are:** Workflow A is done and through the human gate. Fan-out has not started.
+**Where we are:** Workflow A done and through the human gate. Fan-out batches 0–3 merged: **7 of 9
+features built**. `monetization` and `resurface` are still contract-pass stubs.
 
 ## Done
 
@@ -17,12 +18,17 @@ lives only in a chat log.
 | contract pass | schema v1→v7, infra, 9 stubs · commit `723534c` |
 | **HUMAN GATE** | approved: commit as-produced, then fix findings as a separate commit |
 | verifier findings fixed | all 4, each with a recorded RED · commit `439985d` · **194/194 lune** |
+| batch 0 — plot, daily, leaderboard | `dea420b`, `a853836` · dome leak + unguarded rollback + 17 false-green tests fixed |
+| batch 1 — salvage | `c0343ba` · its mint was fixed at the shared `EconomyService` seam, not per-caller |
+| batch 2 — structures | `85ebf38` · `hull` was a live Credits sink with no reader; its own audit could not see it |
+| batch 3 — depth, offline | `dc57664` · **714/714 lune** · 4 open gate findings, see below |
+| gate-aggregation defect + backlog | `224e11c` · 26 dropped findings recovered into `backlog/*.md` |
 
-**Gauntlet right now:** stylua · selene · rojo · require · lune all GREEN (194/194).
-`reachability` RED with 28 FAIL — `view-field-read` 19, `seam-read` 6, `currency-sink` 2,
-`catalog-id-read` 1. Every one is waiting on fan-out. The count went UP from 24 when the seam
-convention was fixed, because the gate went from blind (`seams:0`) to seeing (`seams:8`) — a higher
-number in a more honest state. Do not read it as a regression.
+**Gauntlet right now:** stylua · selene · rojo · require · lune all GREEN (**714/714**).
+`reachability` RED with **6** FAIL, all `view-field-read`: `PlayerView.boostExpiresUnix`, `flags`,
+`resurfaces`, `schemaVersion`, `stats.joinCount`, `stats.playtimeSeconds`. It was 28 at the contract
+pass; each merged feature cleared exactly the subjects it owns. Every one of the remaining 6 belongs
+to `monetization` or `resurface`. **This number is the real progress signal — not the test count.**
 
 ## Next: fan-out, batch by batch
 
@@ -30,13 +36,18 @@ Batches, in order. A later batch depends on an earlier one's REAL implementation
 adjudicates and union-merges between them — never all at once.
 
 ```
-0: plot, daily, leaderboard
-1: salvage
-2: structures
-3: depth, offline
-4: monetization
+0: plot, daily, leaderboard   MERGED
+1: salvage                    MERGED
+2: structures                 MERGED
+3: depth, offline             MERGED (4 gate findings open, being swept)
+4: monetization               <- next
 5: resurface
 ```
+
+`monetization` and `resurface` are the last two, and between them they own all 6 remaining
+`reachability` subjects — so the gauntlet cannot go fully green until both land. Keep passing
+`allowGauntletRedStages: ["reachability"]` until then, and expect the count to reach 0, not to
+shrink partway and stall.
 
 Per batch: `fanout.js` (nests `build-features`: independent builder → independent gate of author + 3
 adversarial critics → bounded N=2 falsify-first auto-fix) → orchestrator adjudicates → `merge.luau`
@@ -88,6 +99,18 @@ amendments inline. Each slice is the ONLY context its builder and gate receive, 
    generated from `plan.json` (all 9 verified to round-trip verbatim). Pass the path plus the feature
    headline as `specSlice`; do not retype 4KB of contract into a workflow call and hope it matches.
    Regenerate rather than hand-edit if the plan changes.
+9. **`realBugs: 0` was a lie for four batches.** `build-features.js` aggregated real bugs from the
+   bug-hunter critic ONLY, though all three critics carry `realBugsFound`. Coverage's and quality's
+   findings were dropped, so features with genuine defects landed on `needs-review` (a park) instead
+   of `bug-found` (the auto-fix loop) — including two defects each found INDEPENDENTLY by two critics.
+   Fixed in `dc57664`; the recovered backlog is `backlog/*.md`, swept by `backlog-sweep.js`. The
+   general rule: **every field an agent can populate must have a path into the verdict.** Check the
+   aggregation expression against the schema, not just the verdict string — and read one full gate
+   transcript per batch, because the summary is produced by the same code that might be dropping things.
+10. **A critic that DIES reads as a critic that found gaps.** depth's bug-hunter failed mid-stream;
+   `anyCriticGap` folded the `null` in with the real "gaps" verdicts, so a gate resting on 2 of 3
+   critics was indistinguishable from a complete one. `criticsMissing` now names it. Re-run the
+   missing critic before adjudicating — "found nothing" and "never looked" are not the same evidence.
 
 ## Decisions — the human delegated these; they are DECIDED, do not re-open
 
