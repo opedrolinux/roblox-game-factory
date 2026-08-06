@@ -295,10 +295,14 @@ end
 
 -- ── 1. the window constants + the pure window math ──────────────────────────────────────────────
 
-describe("daily: the 20-22h window is SERVER-derived and matches the slice", function()
-	it("the bounds are exactly 20h and 22h, in seconds", function()
+describe("daily: the claim window is SERVER-derived and matches the slice", function()
+	it("[A12] the bounds are exactly 20h and 44h, in seconds", function()
+		-- The drop opens at 20h and STAYS OPEN for a further 24h. The lapse bound was 22h, which put
+		-- the ordinary 24h cadence outside the window and made the escalating ladder unreachable —
+		-- see amendment A12 in DailyDropService and docs/build-records/deep-reach/README.md.
 		expect(OPENS):toBe(20 * HOUR)
-		expect(LAPSES):toBe(22 * HOUR)
+		expect(LAPSES):toBe(44 * HOUR)
+		expect(LAPSES - OPENS):toBe(24 * HOUR) -- a full day to come back, once it opens
 	end)
 
 	it("windowFor: never-claimed is open immediately and owes no wait", function()
@@ -316,18 +320,18 @@ describe("daily: the 20-22h window is SERVER-derived and matches the slice", fun
 		end
 	end)
 
-	it("windowFor: OPEN across [20h, 22h] — both named bounds are inside the window", function()
+	it("windowFor: OPEN across [20h, 44h] — both named bounds are inside the window", function()
 		local base = START_UNIX
-		for _, elapsed in { OPENS, OPENS + 1, 21 * HOUR, LAPSES - 1, LAPSES } do
+		for _, elapsed in { OPENS, OPENS + 1, 21 * HOUR, 24 * HOUR, LAPSES - 1, LAPSES } do
 			local status, wait = DailyDropService:windowFor(base, base + elapsed)
 			expect(status):toBe(DailyDropService.Status.Open)
 			expect(wait):toBe(0)
 		end
 	end)
 
-	it("windowFor: LAPSED the second past 22h, and stays lapsed forever", function()
+	it("windowFor: LAPSED the second past 44h, and stays lapsed forever", function()
 		local base = START_UNIX
-		for _, elapsed in { LAPSES + 1, 30 * HOUR, 365 * 24 * HOUR } do
+		for _, elapsed in { LAPSES + 1, 48 * HOUR, 365 * 24 * HOUR } do
 			local status = DailyDropService:windowFor(base, base + elapsed)
 			expect(status):toBe(DailyDropService.Status.Lapsed)
 		end
@@ -590,26 +594,57 @@ describe("daily: the streak CONTINUES inside the window and RESETS after it laps
 		expect(h:snapshot(player).streak):toBe(1)
 	end)
 
-	it("a REAL 24h cadence lapses every day: the window closes at 22h, not at a day", function()
-		-- The default player behaviour, pinned as a boundary rather than left to the "missed day"
-		-- case to imply. The slice fixes the window at 20-22h, so a player who logs in at the SAME
-		-- WALL-CLOCK TIME each day arrives 24h later — past the lapse bound — and is granted at
-		-- streak 1 every single time. That is what the slice says, so that is what is asserted; it is
-		-- also the one place a reader can see that "escalating streak" and "log in once a day" are
-		-- not the same thing in this design. Any move of the lapse bound past 24h goes red here.
+	it("[A12] a REAL 24h cadence CLIMBS the ladder — the feature's whole point", function()
+		-- THE TEST THIS FILE USED TO ASSERT THE OPPOSITE OF. With the lapse bound at 22h, continuing
+		-- a streak required every claim to land in a 2h window that walks BACKWARD 2-4h per day, so a
+		-- player who logs in at the same wall-clock time each day arrived 24h later, lapsed, and was
+		-- pinned at streak 1 / the first rung forever. Six of the seven rungs, the cap, and the entire
+		-- "escalating reward" re-entry hook were dead content — and this suite pinned that as intended,
+		-- which is why no gate could see it. Amendment A12 moved the bound; this is its falsification
+		-- target, and it must go RED against a lapse bound at or below 24h.
 		local h = newServer()
 		local player = h:join(1)
-		expect(24 * HOUR > LAPSES):toBe(true)
-		for _ = 1, 5 do
+		expect(LAPSES > 24 * HOUR):toBe(true) -- the ordinary cadence must fit INSIDE the window
+		local rewards = {}
+		for day = 1, 5 do
 			local claimed = h:claim(player)
 			expect(claimed):toBeOk()
-			expect((claimed :: any).value.streak):toBe(1)
-			expect((claimed :: any).value.continued):toBe(false)
-			expect((claimed :: any).value.reward):toBe(FIRST_REWARD)
+			expect((claimed :: any).value.streak):toBe(day)
+			expect((claimed :: any).value.continued):toBe(day > 1)
+			table.insert(rewards, (claimed :: any).value.reward)
 			h.clock:advance(24 * HOUR)
 		end
-		expect(h:snapshot(player).credits):toBe(5 * FIRST_REWARD) -- never climbs the ladder
+		-- Escalating, not merely non-decreasing: every rung must pay strictly more than the one before
+		-- it, or "escalating reward" is still a word rather than a mechanic.
+		expect(rewards[1]):toBe(FIRST_REWARD)
+		for day = 2, 5 do
+			expect(rewards[day] > rewards[day - 1]):toBe(true)
+		end
+		-- And the total must beat five days of the bottom rung — the exact quantity the old behaviour
+		-- capped the player at.
+		expect(h:snapshot(player).credits > 5 * FIRST_REWARD):toBe(true)
 	end)
+
+	it(
+		"[A12] missing a whole day still lapses — the window is forgiving, not infinite",
+		function()
+			-- The other side of A12. Moving the bound out must not turn the streak into something you
+			-- cannot lose, or the ladder escalates for everyone forever and the re-entry hook stops
+			-- being a hook. One skipped day (48h since the last claim) is past the bound and resets.
+			local h = newServer()
+			local player = h:join(1)
+			expect(48 * HOUR > LAPSES):toBe(true)
+			h:claim(player)
+			h.clock:advance(24 * HOUR)
+			local second = h:claim(player)
+			expect((second :: any).value.streak):toBe(2)
+			h.clock:advance(48 * HOUR) -- skipped a day
+			local afterSkip = h:claim(player)
+			expect((afterSkip :: any).value.streak):toBe(1)
+			expect((afterSkip :: any).value.continued):toBe(false)
+			expect((afterSkip :: any).value.reward):toBe(FIRST_REWARD)
+		end
+	)
 
 	it("a year-long absence still grants — the drop is never permanently unclaimable", function()
 		local h = newServer()

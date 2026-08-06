@@ -88,10 +88,25 @@ DailyDropService.name = "DailyDropService"
 local HOUR_SECONDS = 3600
 -- The drop OPENS once 20h have elapsed since the last claim.
 local CLAIM_OPENS_AFTER_SECONDS = 20 * HOUR_SECONDS
--- ...and the streak LAPSES once 22h have elapsed. The 2h span between them is the "20-22h claim
--- window" the re-entry hook names: come back inside it and the streak continues; come back after it
--- and you still get a drop, at streak 1.
-local STREAK_LAPSES_AFTER_SECONDS = 22 * HOUR_SECONDS
+-- ...and the streak LAPSES once 44h have elapsed — i.e. the drop opens at 20h and STAYS OPEN for a
+-- full 24h after that. Come back inside that span and the streak continues; come back after it and
+-- you still get a drop, at streak 1.
+--
+-- [AMENDMENT A12] THIS WAS 22h, AND AT 22h THE ESCALATING LADDER WAS UNREACHABLE. Continuing a
+-- streak needed every claim to land in a 2h slot that walks BACKWARD 2-4h per day, so a player who
+-- logs in at the same wall-clock time each day arrives at 24h, lapses, and is pinned at streak 1 and
+-- the bottom rung forever — six of the seven rungs, the cap, and the whole re-entry hook were dead
+-- content, and the HUD badge read 1 for the life of the account. The code was FAITHFUL to the slice;
+-- the contradiction was between two sentences of the spec itself ("escalating reward" and "20-22h
+-- claim window"), and the feature's own stated purpose is the escalation. 44h resolves it in the
+-- direction that keeps the headline: the ordinary daily cadence (24h) fits inside the window, and a
+-- genuinely skipped day (48h) does not — so the streak is forgiving, not unloseable.
+--
+-- REVERSIBLE IN THIS ONE CONSTANT. If the punishing 2h window was the intent after all, put 22h back
+-- and instead drop "escalating" from the spec and surface `lapsesAtUnix` (already computed below) on
+-- the badge, so a player can at least SEE the streak about to die. Two tests hold this honest:
+-- "[A12] a REAL 24h cadence CLIMBS the ladder" and "[A12] missing a whole day still lapses".
+local STREAK_LAPSES_AFTER_SECONDS = 44 * HOUR_SECONDS
 
 -- Boundaries are INCLUSIVE at both ends, so the window is exactly [20h, 22h]: a claim at exactly 20h
 -- is open (not closed by a rounding hair) and a claim at exactly 22h still continues the streak. A
