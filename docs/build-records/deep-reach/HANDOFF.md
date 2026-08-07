@@ -19,7 +19,7 @@ number here as "it works".
 | gate | state |
 |---|---|
 | stylua · selene · rojo · require · **reachability** · lune | **all GREEN**, `ok: true` |
-| Lune | **922 / 922** |
+| Lune | **923 / 923** |
 | reachability | **0 FAIL** (28 at the contract pass) |
 | `gate-sample` | OK — no sample scaffold remains |
 | per-feature gates | 9/9 features gated (builder + author + 3 adversarial critics each) |
@@ -63,14 +63,11 @@ number here as "it works".
 
 ## Known-open, deliberately not fixed
 
-Three LOW findings from the integration red-team, recorded rather than silently dropped:
+Two LOW findings from the integration red-team, recorded rather than silently dropped. (The third — five services reading outside the pcall in their post-write pushView — is now FIXED in `09ea68e`: it was a repeat of a defect this factory already shipped, so the cost of leaving it was known.)
 
 - **Salvage's arming flag** is written after a yielding update with no departure guard, so a leave
   landing inside an arming tick can strand it. (The same per-server-memory shape that produced three
   earlier defects; the leave hook now disarms, which narrows but does not close it.)
-- **Five services call `ctx.data:get` outside the pcall** in their post-write `pushView` — the same
-  unguarded-post-write shape that turned a committed Sell into `Err(Internal)` in the previous game.
-  Not currently reachable, but it is a known-bad pattern with a known cost.
 - **Three modal panels share HudRoot's `Center` slot** with no mutual exclusion, and `HudRoot.mount`
   adds no layout, so the offline claim popup can overlap a confirm dialog. A T2.7 concern — nothing
   below a live client can see it.
