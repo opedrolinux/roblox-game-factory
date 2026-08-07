@@ -32,6 +32,22 @@ rojo build default.project.json --output tier2.rbxlx
 `src/shared → ReplicatedStorage.Shared`, `src/client → StarterPlayer.StarterPlayerScripts.Client`.
 It deliberately does **not** map `tests/`, so the smoke script is added by hand in step 3.
 
+### 1b. Driving it from the factory instead of by hand — `t2.project.json`
+
+The steps below say "open the place, insert a Script, paste 59KB". An agent cannot open a file in
+Studio and should not push 59KB through `execute_luau`. `t2.project.json` beside this file exists for
+that path: it is `default.project.json` with **one** addition, `ServerScriptService.T2Smoke ->
+smoke.server.luau`, so a `rojo serve` of it publishes the smoke script *as part of the tree* and
+Studio can fetch it itself over the read API (`/engine-pass` STEP 1). Its `name` is `deep-reach`, so
+STEP 1's mandatory project-name confirmation still holds.
+
+> **It makes the place a HYBRID, on purpose, and T2.7 must not run against it.** The place then holds
+> one instance `default.project.json` does not, so an `/engine-pass` provenance walk would correctly
+> report a non-zero `mismatchCount` — and that rung's whole claim is that the place IS the tree on
+> disk. **Re-sync from `default.project.json` (and delete `ServerScriptService.T2Smoke`) before any
+> T2.7 run.** A T2 verdict is allowed to come from a place carrying its own test harness; a T2.7
+> verdict is not.
+
 ## 2. Open it in Studio
 
 Open `games/deep-reach/tier2.rbxlx` in Roblox Studio, with the **Roblox Studio MCP plugin**

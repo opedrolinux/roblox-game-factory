@@ -1,0 +1,16 @@
+{
+  "name": "deep-reach",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "Shared": { "$path": "../../src/shared" }
+    },
+    "ServerScriptService": {
+      "Server": { "$path": "../../src/server" },
+      "T2Smoke": { "$path": "smoke.server.luau" }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": { "Client": { "$path": "../../src/client" } }
+    }
+  }
+}
