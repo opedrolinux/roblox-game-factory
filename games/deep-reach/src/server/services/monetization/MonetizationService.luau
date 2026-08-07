@@ -863,98 +863,124 @@ function MonetizationService.processReceipt(
 
 	-- pcall'd ONLY so the reservation is released on every path: a reservation stranded `true` would
 	-- refuse every future delivery of this receipt for the life of the server.
-	local ok, written = pcall(function(): any
-		return context.data:update(player, transform)
-	end)
-	self._processing[receiptKey] = nil
+	-- (2b) THE RESERVATION IS HELD ACROSS THE DURABLE HALF, NOT JUST THE TRANSFORM.
+	--
+	-- It used to be released the instant `context.data:update` returned — one line above a `flush`
+	-- that YIELDS for 0.1-10s (ctx.data:save -> saveSession, gated by the per-key
+	-- writeMinIntervalSeconds floor and retried with backoff). Roblox does not serialise its
+	-- ProcessReceipt re-invocations, so a re-delivery of the SAME PurchaseId landing in that window
+	-- walked straight past the cleared reservation, took the replay branch, found `_pendingDurable`
+	-- still set, flushed, cleared it and emitted `purchase` — and then the first call resumed and
+	-- emitted `purchase` a second time. One payment, two revenue events, and an analytics stream
+	-- internally inconsistent with the single currency_earned the one grant produced.
+	--
+	-- The transform itself was never the problem: mechanism (1) is lock-held and the grant, the
+	-- ledger stamp and the balance all move exactly once either way. What was false was this file's
+	-- own stated property — "a duplicate that arrives while the first is parked is answered
+	-- NotProcessedYet" — which only held for the non-yielding half.
+	--
+	-- WRAPPED rather than released at each exit: there are nine return paths below, and the original
+	-- early release exists precisely because releasing at every one of them is the fragile option. A
+	-- stranded `true` would refuse every future delivery of this receipt for the life of the server,
+	-- so the pcall guarantees the release happens even if something below throws.
+	local okBody, result = pcall(function(): any
+		local ok, written = pcall(function(): any
+			return context.data:update(player, transform)
+		end)
 
-	if not ok then
-		return notProcessed("update-threw")
-	end
-	if type(written) ~= "table" or written.ok == nil then
-		return notProcessed("no-result")
-	end
-	if written.ok ~= true then
-		-- NoData / LockStolen / a transform that threw. The snapshot was discarded, so nothing was
-		-- stamped and nothing was granted — Roblox re-delivers.
-		return notProcessed(`write-{tostring((written :: any).code)}`)
-	end
-	if outcome == nil then
-		return notProcessed("no-outcome")
-	end
-	if outcome.status == "error" then
-		return notProcessed(outcome.reason or "grant-refused")
-	end
-
-	if outcome.status == "replay" then
-		-- Idempotent acknowledgement — but only once the grant this ledger entry refers to is durable.
-		-- A replay of a grant still pending on THIS server is answered NotProcessedYet so Roblox keeps
-		-- the receipt alive until the write lands.
-		local pending = self._pendingDurable[receiptKey]
-		if pending ~= nil then
-			if not self:flush(context, player) then
-				return notProcessed("awaiting-durability")
-			end
-			self._pendingDurable[receiptKey] = nil
-			-- THIS server is the one that cleared the pending grant, so THIS call is that grant's
-			-- FIRST SUCCESSFUL ACKNOWLEDGEMENT — and the acknowledgement is the emit point, not the
-			-- flush inside the granting call. The granting call committed the grant, failed its durable
-			-- write and returned NotProcessedYet BEFORE it could emit; if this branch stayed silent the
-			-- purchase would fire no `purchase` event ever, on any delivery. The payload is the one
-			-- captured at grant time (see _pendingDurable), so the numbers reported are the numbers the
-			-- grant actually moved. pushView is here for the same reason: the HUD boost timer reads
-			-- `boostExpiresUnix` off the replicated view and has no other driver.
-			self:emit(context, "purchase", pending)
-			self:pushView(context, player)
+		if not ok then
+			return notProcessed("update-threw")
 		end
+		if type(written) ~= "table" or written.ok == nil then
+			return notProcessed("no-result")
+		end
+		if written.ok ~= true then
+			-- NoData / LockStolen / a transform that threw. The snapshot was discarded, so nothing was
+			-- stamped and nothing was granted — Roblox re-delivers.
+			return notProcessed(`write-{tostring((written :: any).code)}`)
+		end
+		if outcome == nil then
+			return notProcessed("no-outcome")
+		end
+		if outcome.status == "error" then
+			return notProcessed(outcome.reason or "grant-refused")
+		end
+
+		if outcome.status == "replay" then
+			-- Idempotent acknowledgement — but only once the grant this ledger entry refers to is durable.
+			-- A replay of a grant still pending on THIS server is answered NotProcessedYet so Roblox keeps
+			-- the receipt alive until the write lands.
+			local pending = self._pendingDurable[receiptKey]
+			if pending ~= nil then
+				if not self:flush(context, player) then
+					return notProcessed("awaiting-durability")
+				end
+				self._pendingDurable[receiptKey] = nil
+				-- THIS server is the one that cleared the pending grant, so THIS call is that grant's
+				-- FIRST SUCCESSFUL ACKNOWLEDGEMENT — and the acknowledgement is the emit point, not the
+				-- flush inside the granting call. The granting call committed the grant, failed its durable
+				-- write and returned NotProcessedYet BEFORE it could emit; if this branch stayed silent the
+				-- purchase would fire no `purchase` event ever, on any delivery. The payload is the one
+				-- captured at grant time (see _pendingDurable), so the numbers reported are the numbers the
+				-- grant actually moved. pushView is here for the same reason: the HUD boost timer reads
+				-- `boostExpiresUnix` off the replicated view and has no other driver.
+				self:emit(context, "purchase", pending)
+				self:pushView(context, player)
+			end
+			return {
+				decision = MonetizationService.GRANTED,
+				granted = false,
+				replay = true,
+				key = product.key,
+			}
+		end
+
+		-- GRANTED. The write is in the session; make it durable before acknowledging. currency_earned was
+		-- already emitted by ctx.economy:earn (emitting it here too would double-count every Credit pack);
+		-- `purchase` is this feature's event, and it is emitted on the acknowledgement — either the one
+		-- below, or, if this durable write fails, the replay branch above on the delivery that recovers it.
+		local purchasePayload = {
+			userId = userId,
+			kind = "product",
+			key = product.key,
+			label = product.label,
+			developerProductId = product.developerProductId,
+			receiptId = receiptKey,
+			amount = outcome.amount,
+			balance = outcome.balance,
+			lifetimeCredits = outcome.lifetimeCredits,
+			boostExpiresUnix = outcome.boostExpiresUnix,
+			boostSecondsRemaining = outcome.boostSecondsRemaining,
+			extended = outcome.extended,
+		}
+		self._pendingDurable[receiptKey] = purchasePayload
+		if not self:flush(context, player) then
+			return notProcessed("save-failed")
+		end
+		self._pendingDurable[receiptKey] = nil
+
+		-- AFTER the grant commits AND is durable.
+		self:emit(context, "purchase", purchasePayload)
+		self:pushView(context, player)
+
 		return {
 			decision = MonetizationService.GRANTED,
-			granted = false,
-			replay = true,
+			granted = true,
+			replay = false,
 			key = product.key,
+			amount = outcome.amount,
+			balance = outcome.balance,
+			lifetimeCredits = outcome.lifetimeCredits,
+			boostExpiresUnix = outcome.boostExpiresUnix,
+			boostSecondsRemaining = outcome.boostSecondsRemaining,
+			extended = outcome.extended,
 		}
+	end)
+	self._processing[receiptKey] = nil
+	if not okBody then
+		return notProcessed("handler-threw")
 	end
-
-	-- GRANTED. The write is in the session; make it durable before acknowledging. currency_earned was
-	-- already emitted by ctx.economy:earn (emitting it here too would double-count every Credit pack);
-	-- `purchase` is this feature's event, and it is emitted on the acknowledgement — either the one
-	-- below, or, if this durable write fails, the replay branch above on the delivery that recovers it.
-	local purchasePayload = {
-		userId = userId,
-		kind = "product",
-		key = product.key,
-		label = product.label,
-		developerProductId = product.developerProductId,
-		receiptId = receiptKey,
-		amount = outcome.amount,
-		balance = outcome.balance,
-		lifetimeCredits = outcome.lifetimeCredits,
-		boostExpiresUnix = outcome.boostExpiresUnix,
-		boostSecondsRemaining = outcome.boostSecondsRemaining,
-		extended = outcome.extended,
-	}
-	self._pendingDurable[receiptKey] = purchasePayload
-	if not self:flush(context, player) then
-		return notProcessed("save-failed")
-	end
-	self._pendingDurable[receiptKey] = nil
-
-	-- AFTER the grant commits AND is durable.
-	self:emit(context, "purchase", purchasePayload)
-	self:pushView(context, player)
-
-	return {
-		decision = MonetizationService.GRANTED,
-		granted = true,
-		replay = false,
-		key = product.key,
-		amount = outcome.amount,
-		balance = outcome.balance,
-		lifetimeCredits = outcome.lifetimeCredits,
-		boostExpiresUnix = outcome.boostExpiresUnix,
-		boostSecondsRemaining = outcome.boostSecondsRemaining,
-		extended = outcome.extended,
-	}
+	return result
 end
 
 -- ── lifecycle ───────────────────────────────────────────────────────────────────────────────────

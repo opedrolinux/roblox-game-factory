@@ -1806,3 +1806,96 @@ describe("monetization: interleaved receipt deliveries (the replay double-grant)
 		expect(#h.analytics:eventsOfType("purchase")):toBe(1)
 	end)
 end)
+
+-- ── the receipt reservation must span the DURABLE half, not just the transform ───────────────────
+--
+-- The whole-game adversarial review's confirmed finding, found independently by two lenses. The
+-- reservation was released the instant ctx.data:update returned — one line above a `flush` that
+-- YIELDS (ctx.data:save -> saveSession, gated by the per-key write floor and retried with backoff,
+-- so 0.1-10s every time). Roblox does not serialise ProcessReceipt re-invocations, so a re-delivery
+-- of the SAME PurchaseId landing in that window passed the cleared reservation, took the replay
+-- branch, found _pendingDurable still set, flushed, cleared it and emitted `purchase` — and then the
+-- first call resumed and emitted `purchase` AGAIN. One real payment, two revenue events.
+--
+-- The grant itself was never at risk (the lock-held transform is mechanism 1 and it holds), which is
+-- why this is low severity — but the file's own stated property, "a duplicate that arrives while the
+-- first is parked is answered NotProcessedYet", was false for the yielding half.
+--
+-- WHY THE HARNESS NEEDS A CUSTOM data LAYER: MockStore's yield hook covers `update` only, so no
+-- existing fixture can park a caller inside `save`. This wraps the real data layer and parks the
+-- FIRST save, which is precisely the window the exploit uses. Nothing else is stubbed — the
+-- transform, the ledger, the economy seam and the emitter are all the real ones.
+describe("monetization: a re-delivery during the durable write cannot double-emit", function()
+	it(
+		"the SAME receipt re-delivered while the first save is parked is refused in-flight",
+		function()
+			local h = newServer()
+			local player = h:join(1)
+			stampIds()
+
+			-- Read the grant size off the CATALOG, never restated: the assertion tracks the product.
+			local PACK_M_AMOUNT = 0
+			for _, entry in MonetizationService.PRODUCTS do
+				if entry.key == "creditPackM" then
+					PACK_M_AMOUNT = entry.amount
+				end
+			end
+			expect(PACK_M_AMOUNT > 0):toBe(true)
+
+			local parked = 0
+			local slowData = setmetatable({}, {
+				__index = function(_t: any, key: string): any
+					local inner: any = h.data
+					local value = inner[key]
+					if key == "save" then
+						return function(_self: any, p: any): any
+							-- Park the FIRST save exactly where the real one yields; later saves pass.
+							parked += 1
+							if parked == 1 then
+								coroutine.yield()
+							end
+							return inner:save(p)
+						end
+					end
+					if type(value) == "function" then
+						return function(_self: any, ...): any
+							return value(inner, ...)
+						end
+					end
+					return value
+				end,
+			})
+
+			local ctx = h:ctx({ data = slowData })
+			local receipt = receiptFor(player, "creditPackM", "dupe-during-flush")
+			local first: any = nil
+			local second: any = nil
+
+			local co1 = coroutine.create(function()
+				first = MonetizationService:processReceipt(ctx, player, receipt)
+			end)
+			local co2 = coroutine.create(function()
+				second = MonetizationService:processReceipt(ctx, player, receipt)
+			end)
+
+			local before = h:snap(player)
+			-- co1 runs until it parks INSIDE the durable write, with the grant already committed to the
+			-- session; co2 then arrives with the same PurchaseId while co1 is still parked.
+			coroutine.resume(co1)
+			expect(parked):toBe(1)
+			drain({ co2, co1 })
+			local after = h:snap(player)
+
+			-- The reservation held: the duplicate never reached the replay branch at all.
+			expect(second).never:toBe(nil)
+			expect((second :: any).decision):toBe(NOT_PROCESSED)
+			-- The real delivery still succeeds once it resumes.
+			expect((first :: any).decision):toBe(GRANTED)
+			-- ONE payment, ONE revenue event — the invariant the exploit broke.
+			expect(after.purchases - before.purchases):toBe(1)
+			-- ...and the grant itself moved exactly once, as it did even with the bug.
+			expect(after.balance - before.balance):toBe(PACK_M_AMOUNT)
+			expect(after.lifetime - before.lifetime):toBe(PACK_M_AMOUNT)
+		end
+	)
+end)

@@ -56,6 +56,7 @@
 -- read-then-yield-then-earn claim, driven at the same yield point through the same instrumented data
 -- layer, double-grants AND is observed with two updates in flight simultaneously. That is what makes
 -- the green cases below evidence rather than decoration.
+local fs = require("@lune/fs")
 local testkit = require("../lib/testkit")
 local Mocks = require("../lib/mocks")
 local AnalyticsService = require("../../src/server/services/analytics/AnalyticsService")
@@ -2308,5 +2309,76 @@ describe("offline: the claimed flag distinguishes paid from never-owed", functio
 		local after = (h:peek(player) :: any).value
 		expect(after.claimed):toBe(false)
 		expectAmount(after.amount, BASE_RATE * 300)
+	end)
+end)
+
+-- ── the CLIENT's peek budget must outlast the SERVER's join wait ─────────────────────────────────
+--
+-- The integration red-team's HIGH finding, pinned here. OfflineController polls `offline.peek` until
+-- the session answers, then stops. Its budget was a flat 12 x 2s = 22s while every server-side join
+-- waiter budgets 50s — because DataService.loadSession can park on a contended session lock for
+-- Config.dataStore.sessionLockedWaitSeconds, and a crashed server's MemoryStore lock only expires
+-- after lockTtlSeconds. On exactly the rejoin that matters most (after a crash) every peek in the
+-- client's window answered NoData, the poll exited, the popup never appeared, and the away window
+-- was then destroyed permanently by the leave path's lastSeenUnix re-stamp.
+--
+-- The controller is a LocalScript (`game:GetService` at module scope), so it cannot be required under
+-- Lune and no runtime assertion is possible at this rung — the leaderboard.spec / selene_guard.spec
+-- idiom of asserting on the SOURCE is used instead. The assertion is a RELATIONSHIP between the two
+-- halves, not a restatement of the constant: raise a lock timeout without raising the client budget
+-- and this goes red, which is the only thing that keeps them from drifting apart again.
+local CONTROLLER_CANDIDATES = {
+	"src/client/controllers/offline/OfflineController.luau",
+	"games/deep-reach/src/client/controllers/offline/OfflineController.luau",
+	"../src/client/controllers/offline/OfflineController.luau",
+}
+
+local function readController(): string
+	for _, path in CONTROLLER_CANDIDATES do
+		if fs.isFile(path) then
+			return fs.readFile(path)
+		end
+	end
+	error(
+		`offline.spec: OfflineController not found from this cwd: {table.concat(
+			CONTROLLER_CANDIDATES,
+			", "
+		)}`
+	)
+end
+
+describe("offline: the client waits longer than the server can take to answer", function()
+	it("the controller's peek budget EXCEEDS the server's worst-case join wait", function()
+		local source = readController()
+		local total = tonumber(string.match(source, "local PEEK_TOTAL_SECONDS = (%d+)"))
+		local step = tonumber(string.match(source, "local PEEK_STEP_SECONDS = (%d+)"))
+		-- The literals must still be there. A rename that silently drops this assertion is the
+		-- failure mode of every source-level test, so absence is a hard error, not a skip.
+		expect(total).never:toBe(nil)
+		expect(step).never:toBe(nil)
+
+		-- The server's own budget for producing a loaded session, read from the server, not restated.
+		local serverWait = OfflineService.loadWaitAttempts * OfflineService.loadWaitStepSeconds
+		expect(serverWait > 0):toBe(true)
+		expect((total :: number) > serverWait):toBe(true)
+
+		-- ...and that budget must itself cover the lock waits the data layer is configured for,
+		-- which is what makes `serverWait` the right thing to measure against.
+		expect(serverWait >= Config.dataStore.sessionLockedWaitSeconds):toBe(true)
+		expect((total :: number) > Config.dataStore.lockTtlSeconds):toBe(true)
+
+		-- The step stays coarse enough that a long wait is cheap rather than a spin.
+		expect((step :: number) >= 1):toBe(true)
+	end)
+
+	it("the poll is bounded — it must not become a permanent per-player round trip", function()
+		-- The other direction. The original bound existed for a real reason, and the fix widens it
+		-- rather than removing it; an unbounded `while self._running` poll here would be a forever
+		-- background request per player. This holds the fix honest in both directions.
+		local source = readController()
+		local total = tonumber(string.match(source, "local PEEK_TOTAL_SECONDS = (%d+)"))
+		expect(total).never:toBe(nil)
+		expect((total :: number) < 600):toBe(true)
+		expect(string.match(source, "for attempt = 1, PEEK_ATTEMPTS do")).never:toBe(nil)
 	end)
 end)

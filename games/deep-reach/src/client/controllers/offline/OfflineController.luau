@@ -45,15 +45,43 @@ local HudRoot = require(Client.framework.HudRoot)
 -- "modal popups — claim-on-join and confirm dialogs (one at a time)" (HudRoot.SLOTS).
 local HUD_SLOT = "Center"
 
--- The peek poll (see the header). Bounded: after this many attempts the session is not coming, and a
--- controller that polled forever would be a permanent background round trip per player.
-local PEEK_ATTEMPTS = 12
+-- The peek poll (see the header). Bounded, because a controller that polled forever would be a
+-- permanent background round trip per player — but the bound MUST outlast the server's own worst
+-- case for producing a session, and it did not.
+--
+-- THE DEFECT THIS REPLACES (integration red-team, HIGH): the poll was a flat 12 attempts x 2s = 22s,
+-- while every server-side join waiter budgets 50s, because DataService.loadSession can park on a
+-- contended session lock for Config.dataStore.sessionLockedWaitSeconds (40s) and a crashed server's
+-- MemoryStore lock only auto-expires after lockTtlSeconds (30s). So on the exact rejoin that matters
+-- most — the one after a server crash — every peek in the client's 22s window answered Err(NoData),
+-- the poll exited, the popup never appeared, and the player could not claim. The pending grant then
+-- sat unclaimed for the whole session, and the leave path re-stamps timestamps.lastSeenUnix, so the
+-- accrual was destroyed PERMANENTLY and silently. That is this game's signature failure, arriving
+-- through the one door no server-side rung can see: the client.
+--
+-- THE BUDGET IS PINNED BY A TEST, NOT BY A LOCAL COPY OF THE SERVER'S CONFIG. The client-safe config
+-- subset deliberately withholds the data-store budgets (§3.4), and importing them here just to size a
+-- timer would leak server tuning into the client for no gain. So the number is local and explicit,
+-- and `offline.spec.luau` asserts the RELATIONSHIP that makes it correct — this total must exceed the
+-- server's own worst-case join wait (OfflineService.loadWaitAttempts x loadWaitStepSeconds, itself
+-- >= Config.dataStore.sessionLockedWaitSeconds). Raise a lock timeout without raising this and the
+-- suite goes red, which is the drift the derived-constant approach was trying to prevent anyway.
+--
+-- Both are published on the module table below, so the spec reads THESE values rather than
+-- restating them (a test that hardcodes 75 proves nothing once someone edits the constant).
 local PEEK_STEP_SECONDS = 2
+local PEEK_TOTAL_SECONDS = 75
+local PEEK_ATTEMPTS = math.ceil(PEEK_TOTAL_SECONDS / PEEK_STEP_SECONDS)
 -- How long the "claimed" confirmation stays up before the popup closes itself.
 local DISMISS_AFTER_SECONDS = 4
 
 local OfflineController = {}
 OfflineController.name = "OfflineController"
+-- Published for the spec that pins the poll budget against the SERVER's join-wait worst case. Read
+-- these; do not restate the numbers in a test, or the test stops tracking the code.
+OfflineController.PEEK_STEP_SECONDS = PEEK_STEP_SECONDS
+OfflineController.PEEK_TOTAL_SECONDS = PEEK_TOTAL_SECONDS
+OfflineController.PEEK_ATTEMPTS = PEEK_ATTEMPTS
 OfflineController._panel = nil :: any
 OfflineController._headline = nil :: any
 OfflineController._detail = nil :: any
