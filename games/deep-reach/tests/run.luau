@@ -18,6 +18,12 @@ local testkit = require("./lib/testkit") -- script-relative; resolves from any c
 -- EXPLICIT, LEXICALLY-ORDERED spec list (no fs.readDir). Each entry is a script-relative path.
 -- Adding a feature appends one line here; keep the list sorted so the JSON summary is byte-stable.
 local SPEC_PATHS = {
+	-- [INTEGRATION GATE] stands up the WHOLE game (every service, every ctx seam live) and drives the
+	-- spec's success criteria end to end: the core-loop traversal, every cross-feature seam asserted
+	-- as a DELTA on its consumer's output, the lifetime aggregate across all earn/spend paths, the
+	-- shared-balance race ACROSS features, the leave->rejoin->claim re-entry lifecycle, the full
+	-- analytics taxonomy, and the composed pacing band.
+	"./integration/wholegame.spec",
 	"./unit/analytics.spec", -- [contract pass] the emit seam + session lifecycle
 	"./unit/clock.spec",
 	"./unit/contract.spec", -- [contract pass] the shared-contract completeness spec (v1->v7 round
