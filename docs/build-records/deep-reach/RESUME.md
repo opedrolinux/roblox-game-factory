@@ -4,8 +4,12 @@ State as of the end of the first build session. Everything needed to continue is
 lives only in a chat log.
 
 **Branch:** `staging/deep-reach` (not pushed — `git push` is the human's).
-**Where we are:** Workflow A done and through the human gate. Fan-out batches 0–3 merged: **7 of 9
-features built**. `monetization` and `resurface` are still contract-pass stubs.
+**Where we are:** ALL 9 FEATURES BUILT AND MERGED. Gauntlet 6/6 green, 922/922 lune, reachability
+0 FAIL. `tier-status` = `verified-local-T1`. **Read `HANDOFF.md` next** — it leads with what is not
+done. Two things are OWED before the human gate, both cut short by the account's monthly spend
+limit: **re-run the adversarial review** (its "No open exploit" criterion is unproven, not passed)
+and **run `grade.js`**. See `docs/USAGE-BUDGET.md` for the spend problem and the per-phase-budget
+discussion it opened.
 
 ## Done
 
