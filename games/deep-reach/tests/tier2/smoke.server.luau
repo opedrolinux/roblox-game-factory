@@ -140,12 +140,37 @@ end
 
 -- `cond` true records a pass, false records a failure. There is deliberately no way for a phase body
 -- to write its own `ok`: the verdict is derived from what was observed, never declared.
-local function check(state: PhaseState, cond: boolean, label: string, detail: string?): boolean
-	local suffix = if detail ~= nil then ": " .. detail else ""
+--
+-- TWO details, because they play opposite roles and merging them made passing lines LIE. This
+-- function used to take one `detail` and append it on BOTH branches, while most callers had worded
+-- theirs for the failure case. The first real run therefore printed, among its 13 passes:
+--
+--     pass: ServerScriptService.Server exists: never appeared within 20s — the Rojo server mount is missing
+--
+-- — a passing assertion whose own prose asserts the opposite, in the artifact a human reads at the
+-- gate and a grader reads as evidence. That is a false green wearing a red coat, and the fix is not
+-- to hide details on pass: the SAME run printed
+--
+--     pass: an over-rate burst is shed with Err(RateLimited): 11 dispatches and the bucket never emptied
+--
+-- where the detail is the only thing revealing the assertion passed VACUOUSLY (the mono clock does
+-- not advance in this lane, so the bucket never refills and nothing can be shed). Suppressing detail
+-- on pass would have deleted that signal. So:
+--   failDetail — printed ONLY when the check fails. Word it as the diagnosis.
+--   observed   — printed on BOTH. Word it as a measurement ("got Ok — {...}", "position 2").
+local function check(
+	state: PhaseState,
+	cond: boolean,
+	label: string,
+	failDetail: string?,
+	observed: string?
+): boolean
+	local measured = if observed ~= nil then ": " .. observed else ""
 	if cond then
-		pass(state, label .. suffix)
+		pass(state, label .. measured)
 	else
-		fail(state, label .. suffix)
+		local why = if failDetail ~= nil then ": " .. failDetail else ""
+		fail(state, label .. why .. (if observed ~= nil then " — " .. observed else ""))
 	end
 	return cond
 end
@@ -560,6 +585,7 @@ local function phaseBootProbe(state: PhaseState): ()
 		state,
 		indexOf["context.net"] ~= nil and indexOf["context.net"] <= 2,
 		"NetServer Starts before any feature registers an action",
+		nil,
 		`context.net is at position {tostring(indexOf["context.net"])}`
 	)
 
@@ -906,6 +932,7 @@ local function phaseCoreLoop(state: PhaseState): ()
 		state,
 		isOk(claim) or codeOf(claim) == Codes.AlreadyClaimed,
 		"plot.claim replies Ok (or AlreadyClaimed, the join hook having claimed first)",
+		nil,
 		`got {codeOf(claim)} — {shortJson(claim)}`
 	)
 	local plotView = dispatch(player, Actions.FetchPlot, {})
@@ -917,6 +944,7 @@ local function phaseCoreLoop(state: PhaseState): ()
 			and type(plotInfo.plotId) == "string"
 			and plotInfo.plotId ~= "",
 		"plot.fetch reports the subject HOLDS a dome (core loop step 1 completed on the live wire)",
+		nil,
 		`got {codeOf(plotView)} — {shortJson(plotView)}`
 	)
 
@@ -930,6 +958,7 @@ local function phaseCoreLoop(state: PhaseState): ()
 		state,
 		isOk(firstCollect) or codeOf(firstCollect) == Codes.Insufficient,
 		"salvage.collect replies with a typed Result on an un-accrued smelter",
+		nil,
 		`got {codeOf(firstCollect)} — expected ok or Insufficient`
 	)
 
@@ -947,6 +976,7 @@ local function phaseCoreLoop(state: PhaseState): ()
 		state,
 		isOk(collect) and collected > 0,
 		`salvage.collect pays out after {ACCRUAL_WAIT_SECONDS}s of real accrual`,
+		nil,
 		`got {codeOf(collect)}, collected = {collected} — {shortJson(collect)}`
 	)
 	local creditsAfterCollect = creditsOf(player)
@@ -969,6 +999,7 @@ local function phaseCoreLoop(state: PhaseState): ()
 		state,
 		isOk(daily) or codeOf(daily) == Codes.OnCooldown,
 		"daily.claim replies Ok (or OnCooldown, the 20h window not yet open)",
+		nil,
 		`got {codeOf(daily)} — {shortJson(daily)}`
 	)
 	if isOk(daily) then
@@ -1001,6 +1032,7 @@ local function phaseCoreLoop(state: PhaseState): ()
 				and type(shopInfo.entries) == "table"
 				and #shopInfo.entries > 0,
 			"structures.fetch returns the server-priced catalog",
+			nil,
 			`got {codeOf(shop)} — {shortJson(shop)}`
 		)
 	then
@@ -1046,6 +1078,7 @@ local function phaseCoreLoop(state: PhaseState): ()
 		state,
 		isOk(buy),
 		`structures.buy("{target.key}") is granted for the server-derived price {target.nextCost}`,
+		nil,
 		`got {codeOf(buy)} — {shortJson(buy)}`
 	)
 	local creditsAfterBuy = creditsOf(player)
@@ -1085,6 +1118,7 @@ local function phaseCoreLoop(state: PhaseState): ()
 		state,
 		isOk(descend) or ADVANCED_OK[codeOf(descend)] == true,
 		"depth.descend is reachable and answers Ok or its own documented gate refusal",
+		nil,
 		`got {codeOf(descend)} — {shortJson(descend)}`
 	)
 	local resurface = dispatch(player, Actions.Resurface, {})
@@ -1092,6 +1126,7 @@ local function phaseCoreLoop(state: PhaseState): ()
 		state,
 		isOk(resurface) or ADVANCED_OK[codeOf(resurface)] == true,
 		"resurface.do is reachable and answers Ok or its own documented prerequisite refusal",
+		nil,
 		`got {codeOf(resurface)} — {shortJson(resurface)}`
 	)
 
@@ -1109,6 +1144,7 @@ local function phaseCoreLoop(state: PhaseState): ()
 			state,
 			type(reply) == "table" and reply.ok ~= nil,
 			`{probe.name} replies with a well-formed Result over the live wire`,
+			nil,
 			`got {codeOf(reply)}`
 		)
 	end
@@ -1117,6 +1153,7 @@ local function phaseCoreLoop(state: PhaseState): ()
 		state,
 		type(offlineClaim) == "table" and offlineClaim.ok ~= nil,
 		"offline.claim replies with a well-formed Result over the live wire",
+		nil,
 		`got {codeOf(offlineClaim)}`
 	)
 end
@@ -1286,6 +1323,7 @@ local function phaseAssertNoError(state: PhaseState): ()
 			state,
 			codeOf(reply) == case.expected,
 			`{case.label} is refused with Err({case.expected})`,
+			nil,
 			`got {codeOf(reply)} — {shortJson(reply)}`
 		)
 	end
@@ -1308,6 +1346,7 @@ local function phaseAssertNoError(state: PhaseState): ()
 		state,
 		sawRateLimited,
 		"an over-rate burst is shed with Err(RateLimited) by the real Gate on the real clock",
+		nil,
 		`{dispatched} dispatches of salvage.fetch and the bucket never emptied (mono clock advancing = {tostring(
 			BOOT.monoAdvances
 		)})`
@@ -1323,6 +1362,7 @@ local function phaseAssertNoError(state: PhaseState): ()
 			and ownerResult.ok == false
 			and ownerResult.code == Codes.NotOwner,
 		"Gate:assertOwner refuses a mismatched owner with Err(NotOwner)",
+		nil,
 		`got {codeOf(ownerResult)}`
 	)
 	note(

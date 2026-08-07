@@ -1,0 +1,1 @@
+{"tier":2,"ok":false,"phases":[{"name":"boot-probe","ok":true},{"name":"wire-present","ok":true},{"name":"core-loop","ok":false},{"name":"assert-no-error","ok":true}]}
