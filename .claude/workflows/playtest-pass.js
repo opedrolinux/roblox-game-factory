@@ -95,7 +95,11 @@ const THIRTY_DAYS = 30 * 24 * 60 * 60
 const NOT_ENGINE_VERIFIED = 'verified-local-T1 (logic only) — NOT engine-verified'
 
 const blockers = []
-const nowUnix = Math.floor(Date.now() / 1000)
+// `Date.now()` THROWS inside a workflow script (it would break resume replay), so this line used to
+// abort playtest-pass at load — before phase 1, with no agent spawned and no diagnostic naming the
+// cause. The clock comes in through args instead. Absent -> Infinity, which reads EVERY waiver as
+// expired: fail-closed, because an unknown clock must never be the thing that keeps a waiver alive.
+const nowUnix = (input && typeof input.nowUnix === 'number' && isFinite(input.nowUnix)) ? input.nowUnix : Infinity
 
 function asObject(v) {
   if (v && typeof v === 'object') return v
@@ -602,13 +606,18 @@ if (mode === 'author') {
 
 FOR EACH GATING PHASE in ${gameDir}/${PHASES_REL}: introduce ONE deliberate defect in the GAME (never in the harness) that the phase claims to catch, rerun the lane, and record the observed verdict + the detail line. Then REVERT the mutation before moving to the next. Examples of honest mutations: delete a service from the init.server bootstrap list (bootstrap-parity); replace a tuning curve with a constant so the upgrade delta vanishes (upgrade/effect phases); unanchor or zero-size a part, or delete the SpawnLocation (world-contract / spawn-safety); remove a barrier so a gated region becomes freely walkable (traversal); unregister an action handler (affordance-wiring).
 
+FIRST resolve the run-in-roblox binary, because the bare name is the WRONG BINARY on this repo's machines: this repo pins its toolchain with rokit.toml, and \`run-in-roblox --version\` off PATH can resolve to an Aftman shim that errors with "no aftman.toml files list this tool". Try \`run-in-roblox --version\`; if it does not print a version, use \`~/.rokit/bin/run-in-roblox\`. Call the working one RIR below.
+
 Run the lane exactly like this (the old RUNBOOK.md:81 recipe is BROKEN — it greps '^\\{"ok"' but the artifact begins {"verdict", key order in HttpService:JSONEncode is unspecified, the pipeline's exit status is tail's and is always 0, and '>' truncates the last good artifact before you know the run produced anything):
   set -o pipefail
-  run-in-roblox --place tier2.rbxlx --script tests/tier2/playtest.server.luau > .verify_tmp/t25.out
-  grep -m1 '^${SENTINEL}' .verify_tmp/t25.out | sed 's/^${SENTINEL}//' > .verify_tmp/t25.json
+  rojo build default.project.json -o tier2.rbxlx     # MANDATORY after EVERY mutation — see below
+  \$RIR --place tier2.rbxlx --script tests/tier2/playtest.server.luau > .verify_tmp/harvest/t25.out
+  grep -m1 '^${SENTINEL}' .verify_tmp/harvest/t25.out | sed 's/^${SENTINEL}//' > .verify_tmp/harvest/t25.json
 Scratch files go under ${'C:/Users/opedr/OneDrive/Documents/developer/roblox/roblox-game-factory/.verify_tmp/harvest/'} — never the system temp dir.
 
-If run-in-roblox is NOT on PATH you cannot observe anything: do NOT invent proofs. Return every gating phase in missingPhases with a note saying the engine lane was down, and write NO falsification file.
+**REBUILD THE PLACE AFTER EVERY MUTATION.** run-in-roblox boots a .rbxlx FILE, not your working tree. Skip the rojo build and you rerun the lane against the PREVIOUS place: your deliberate defect never reaches the engine, the phase comes back exactly as it was, and you conclude the gate does not bite when in fact the gate never saw the mutation. That failure has already shipped once in this factory as "the T2 smoke had been building NOTHING". If a mutation produces NO change in the verdict, suspect this before you suspect the phase — verify by grepping your mutation out of the freshly built tier2.rbxlx.
+
+If NEITHER run-in-roblox invocation works you cannot observe anything: do NOT invent proofs. Return every gating phase in missingPhases with a note saying the engine lane was down, and write NO falsification file.
 
 WRITE ${gameDir}/${FALSIFY_REL}:
 {"$schema":"t25-falsification/1","scriptSha256":"<sha256 of ${HARNESS_REL} at proof time>","proofs":[{"phase":"...","mutation":"what you broke, concretely","observedVerdict":"red","observedDetail":"the harness's own detail line, verbatim","ranAtUnix":<unix>}]}
@@ -628,34 +637,75 @@ HARD CONSTRAINTS: read-only git ONLY (no commit/add/checkout/reset/stash — the
 }
 
 // ── PHASE 3: RUN, or degrade honestly (§C.4) ───────────────────────────────────────────────────────
-// Lane availability = run-in-roblox on PATH AND GATE_ENGINE_LANE in {1,true}. A workflow cannot read
-// the environment, so a thin probe agent reports the raw facts and the JS decides — mirroring
-// smoke-gate.js:112-123: PREPARE THE LANE AND PARK, never skip and never guess.
+// Lane availability = a run-in-roblox binary that MEASURABLY RUNS (at the bare name or the rokit path)
+// AND rojo AND a declaration (GATE_ENGINE_LANE, or an orchestrator declaration carrying a reason). A
+// workflow cannot read the environment, so a thin probe agent reports the raw facts and the JS decides
+// — mirroring smoke-gate.js:112-123: PREPARE THE LANE AND PARK, never skip and never guess.
 const LANE_SCHEMA = {
   type: 'object',
   properties: {
-    runInRobloxOnPath: { type: 'boolean', description: 'is `run-in-roblox --version` runnable?' },
+    runInRobloxOnPath: { type: 'boolean', description: 'does the BARE `run-in-roblox --version` print a version? FALSE if it errors (e.g. an Aftman shim that refuses).' },
+    runInRobloxRokit: { type: 'boolean', description: 'does `~/.rokit/bin/run-in-roblox --version` print a version?' },
+    runInRobloxInvocation: { type: ['string', 'null'], description: 'the EXACT command that printed a version — "run-in-roblox" or "~/.rokit/bin/run-in-roblox". null if neither worked.' },
+    runInRobloxVersion: { type: ['string', 'null'], description: 'the version string it printed, verbatim' },
     gateEngineLane: { type: 'string', description: 'the literal value of the GATE_ENGINE_LANE env var, or "" if unset' },
     rojoOnPath: { type: 'boolean' },
     notes: { type: 'string' },
   },
-  required: ['runInRobloxOnPath', 'gateEngineLane', 'rojoOnPath'],
+  required: ['runInRobloxOnPath', 'runInRobloxRokit', 'runInRobloxInvocation', 'gateEngineLane', 'rojoOnPath'],
 }
 
 phase('Run')
 const lane = await agent(`Report, factually, whether the T2.5 ENGINE LANE is available on this machine. You judge nothing else and change nothing.
 
-From the repo root: (1) try \`run-in-roblox --version\` and report whether it is on PATH; (2) report the literal value of the GATE_ENGINE_LANE environment variable (PowerShell: \`$env:GATE_ENGINE_LANE\`), or "" if it is unset; (3) try \`rojo --version\`. Do NOT install anything, do NOT run git, do NOT edit any file, no network. Return the StructuredOutput.`, { label: 'playtest:lane-probe', phase: 'Run', schema: LANE_SCHEMA, effort: 'low' })
+From the repo root, run all three and report exactly what happened:
+  1. \`run-in-roblox --version\`            <- the BARE name, resolved off PATH
+  2. \`~/.rokit/bin/run-in-roblox --version\` <- the ROKIT-PINNED binary
+  3. \`rojo --version\`
+This repo pins its toolchain with rokit.toml, NOT aftman.toml, and on at least one machine the bare
+name resolves to an Aftman shim that errors with "Tried to run an Aftman-managed version of
+run-in-roblox, but no aftman.toml files list this tool". That is a WRONG SHIM, not a missing tool —
+report runInRobloxOnPath=false for it and runInRobloxRokit=true if the rokit path works, and set
+runInRobloxInvocation to whichever one actually printed a version (prefer the bare name when both work).
+Also report the literal value of the GATE_ENGINE_LANE environment variable (PowerShell:
+\`$env:GATE_ENGINE_LANE\`), or "" if unset.
 
+Do NOT install anything, do NOT run git, do NOT edit any file, no network. Return the StructuredOutput.`, { label: 'playtest:lane-probe', phase: 'Run', schema: LANE_SCHEMA, effort: 'low' })
+
+// The binary is MEASURED (the probe ran it), never declared. Only WHICH invocation works is in doubt:
+// the bare name is an Aftman shim on this machine and errors, which used to read as "the engine lane is
+// down" and park a lane that was in fact up. ENGINE-FACTS.md recorded that trap months before this
+// probe stopped falling into it.
+const RIR = (lane && typeof lane.runInRobloxInvocation === 'string' && lane.runInRobloxInvocation) || 'run-in-roblox'
+const runInRobloxWorks = !!(lane && (lane.runInRobloxOnPath === true || lane.runInRobloxRokit === true) && lane.runInRobloxInvocation)
+
+// The DECLARATION is separate from the binary, and either source satisfies it: the GATE_ENGINE_LANE env
+// var, or an explicit orchestrator declaration in args. A workflow script cannot read the environment
+// and its agents get fresh shells, so on a machine where the operator cannot export a variable into
+// every subagent, the env check alone can only ever say "down" — it stops being a measurement of the
+// lane and becomes a measurement of the shell. This mirrors `allowGauntletRedStages` in fanout.js: the
+// orchestrator is the only party who CAN measure the machine, so it declares, WITH A REASON, and the
+// declaration is logged. It is not a bypass — `runInRobloxWorks` above is still measured by the probe,
+// and a declaration with no working binary still parks.
 const gateFlag = lane && typeof lane.gateEngineLane === 'string' ? lane.gateEngineLane.trim().toLowerCase() : ''
-const laneAvailable = !!(lane && lane.runInRobloxOnPath === true && lane.rojoOnPath === true && (gateFlag === '1' || gateFlag === 'true'))
+const envDeclared = gateFlag === '1' || gateFlag === 'true'
+const declaredReason = (input && typeof input.engineLaneReason === 'string' && input.engineLaneReason.trim()) || ''
+const orchestratorDeclared = !!(input && input.engineLane === true && declaredReason)
+if (input && input.engineLane === true && !declaredReason) {
+  blockers.push('args.engineLane was declared with no engineLaneReason — an undocumented lane declaration is not a declaration')
+}
+const laneDeclared = envDeclared || orchestratorDeclared
+if (orchestratorDeclared && !envDeclared) {
+  log(`playtest-pass: engine lane declared by the ORCHESTRATOR (GATE_ENGINE_LANE is unset in the agent shell). Reason, verbatim: ${declaredReason}`)
+}
+const laneAvailable = !!(runInRobloxWorks && lane && lane.rojoOnPath === true && laneDeclared)
 
 if (!laneAvailable) {
   // Honest degradation. The lane is PREPARED (authored + a falsification plan), not run, and the
   // verdict says so. evidence: null — there is no evidence line, so no rung above T1 is claimed.
   const why = !lane
     ? 'lane probe did not run'
-    : [lane.runInRobloxOnPath === true ? null : 'run-in-roblox not on PATH', lane.rojoOnPath === true ? null : 'rojo not on PATH', (gateFlag === '1' || gateFlag === 'true') ? null : `GATE_ENGINE_LANE=${JSON.stringify(lane.gateEngineLane)}`].filter(Boolean).join('; ')
+    : [runInRobloxWorks ? null : 'run-in-roblox not runnable at either the bare name or ~/.rokit/bin', lane.rojoOnPath === true ? null : 'rojo not on PATH', laneDeclared ? null : `lane undeclared (GATE_ENGINE_LANE=${JSON.stringify(lane.gateEngineLane)}, no args.engineLane+engineLaneReason)`].filter(Boolean).join('; ')
   blockers.push(`engine lane unavailable: ${why}`)
   log(`playtest-pass PARK: engine lane unavailable (${why}). The lane is AUTHORED and the falsification plan is written, but nothing ran. verdict: T2.5-blocked-on-human. Honest status: ${NOT_ENGINE_VERIFIED}.`)
   return {
@@ -685,17 +735,19 @@ const RUN_SCHEMA = {
   required: ['ranOk', 'sentinelLineCount', 'sentinelWasLastLine', 'evidenceJson', 'wroteArtifact'],
 }
 
-log(`playtest-pass RUN: engine lane UP (run-in-roblox + rojo present, GATE_ENGINE_LANE=${lane.gateEngineLane}). Building the place and running the T2.5 harness.`)
+log(`playtest-pass RUN: engine lane UP — binary MEASURED at \`${RIR}\` (${lane.runInRobloxVersion || 'version unreported'}), rojo present, lane declared by ${envDeclared ? `GATE_ENGINE_LANE=${lane.gateEngineLane}` : 'the orchestrator'}. Building the place and running the T2.5 harness.`)
 const run = await agent(`RUN the T2.5 playtest lane for ${gameDir} and capture its evidence line. You are a runner: you do not judge the result and you do not fix anything you see.
 
 From the repo root, using EXACTLY this capture recipe (§S3 of the build contract — the RUNBOOK.md:81 recipe is broken and must not be used: it greps '^\\{"ok"' while the artifact begins {"verdict", HttpService:JSONEncode key order is unspecified, the pipeline's exit status is tail's and so is always 0, and '>' truncates the previous good artifact before you know the run produced anything):
 
   set -o pipefail
-  cd ${gameDir} && rojo build default.project.json -o tier2.rbxlx
-  run-in-roblox --place tier2.rbxlx --script ${HARNESS_REL} > ../../.verify_tmp/harvest/t25.out
+  cd ${gameDir} && rojo build default.project.json -o tier2.rbxlx    # ALWAYS rebuild: run-in-roblox boots the FILE, not your tree
+  ${RIR} --place tier2.rbxlx --script ${HARNESS_REL} > ../../.verify_tmp/harvest/t25.out
   grep -c '^${SENTINEL}' ../../.verify_tmp/harvest/t25.out          # MUST be exactly 1
   grep -m1 '^${SENTINEL}' ../../.verify_tmp/harvest/t25.out | sed 's/^${SENTINEL}//' > ../../.verify_tmp/harvest/t25.json
-  lune run -e 'require("@lune/serde").decode("json", require("@lune/fs").readFile(".verify_tmp/harvest/t25.json"))'
+  node -e 'JSON.parse(require("fs").readFileSync("../../.verify_tmp/harvest/t25.json","utf8"))'
+
+(\`${RIR}\` is the invocation the lane probe MEASURED as working on this machine — do not substitute the bare name. And note \`lune run -e\` DOES NOT EXIST in lune 0.10.4: it exits 1, so a \`&& mv\` chained behind it never fires and the previous, stale artifact silently survives as the "result". \`node -e\` is the working decode check.)
 
 ONLY after that decode succeeds, move .verify_tmp/harvest/t25.json onto ${gameDir}/tests/tier2/last-playtest.json (the committed artifact contains the JSON ONLY, sentinel stripped — tier-status.luau serde.decodes the whole file). If NO sentinel line was produced, or it is not the last line, or it does not parse: report that honestly with evidenceJson=null and wroteArtifact=false, and LEAVE THE EXISTING ARTIFACT UNTOUCHED. A missing sentinel is a RED, never an "absent" — and a truncated good artifact destroys the only prior evidence.
 
