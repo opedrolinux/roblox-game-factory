@@ -28,11 +28,11 @@ discussion it opened.
 | batch 3 — depth, offline | `dc57664` · **714/714 lune** · 4 open gate findings, see below |
 | gate-aggregation defect + backlog | `224e11c` · 26 dropped findings recovered into `backlog/*.md` |
 
-**Gauntlet right now:** stylua · selene · rojo · require · lune all GREEN (**714/714**).
-`reachability` RED with **6** FAIL, all `view-field-read`: `PlayerView.boostExpiresUnix`, `flags`,
-`resurfaces`, `schemaVersion`, `stats.joinCount`, `stats.playtimeSeconds`. It was 28 at the contract
-pass; each merged feature cleared exactly the subjects it owns. Every one of the remaining 6 belongs
-to `monetization` or `resurface`. **This number is the real progress signal — not the test count.**
+**Gauntlet right now:** ALL SIX STAGES GREEN, `ok: true` — stylua · selene · rojo · require ·
+reachability (**0 FAIL**) · lune (**922/922**). Reachability was 28 at the contract pass; each merged
+feature cleared exactly the subjects it owned, and A13 removed the last 3, which belonged to no
+slice (fields replicated to every client that no client read). **That count, not the test count, was
+the real progress signal throughout.**
 
 ## Next: fan-out, batch by batch
 
@@ -43,15 +43,15 @@ adjudicates and union-merges between them — never all at once.
 0: plot, daily, leaderboard   MERGED
 1: salvage                    MERGED
 2: structures                 MERGED
-3: depth, offline             MERGED (4 gate findings open, being swept)
-4: monetization               <- next
-5: resurface
+3: depth, offline             MERGED
+4: monetization               MERGED
+5: resurface                  MERGED   <- fan-out COMPLETE
 ```
 
-`monetization` and `resurface` are the last two, and between them they own all 6 remaining
-`reachability` subjects — so the gauntlet cannot go fully green until both land. Keep passing
-`allowGauntletRedStages: ["reachability"]` until then, and expect the count to reach 0, not to
-shrink partway and stall.
+Fan-out is done. `allowGauntletRedStages` is no longer needed — reachability is green, so a builder
+that reports `gauntletOk: false` now means something real. What remains is in `HANDOFF.md`: re-run
+`adversarial-review.js` (it was cut short by the spend limit, and its "No open exploit" criterion is
+UNPROVEN), then `grade.js`, then the engine rungs T2 → T2.5 → T2.7.
 
 Per batch: `fanout.js` (nests `build-features`: independent builder → independent gate of author + 3
 adversarial critics → bounded N=2 falsify-first auto-fix) → orchestrator adjudicates → `merge.luau`
