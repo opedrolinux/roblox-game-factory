@@ -989,10 +989,62 @@ end
 -- NOT assign context.monetization, which is the pre-existing [B2] seam), register no action (see the
 -- header), and wire the engine surfaces. Lune-callable: everything engine-shaped lives behind
 -- startRuntime, so requiring and Starting this module under Lune never throws.
+-- Which catalog entries are still on their placeholder id. An id of 0 matches NOTHING by design
+-- (see passForGamePassId / productForId), which is the correct behaviour for an unpublished asset —
+-- but it means the entry is INERT: syncPasses skips it, processReceipt answers unknown-product, and
+-- the effect it was supposed to gate never turns on.
+function MonetizationService.unconfiguredEntries(self: any): { string }
+	local out: { string } = {}
+	for _, pass in self.PASSES do
+		if type(pass.gamePassId) ~= "number" or pass.gamePassId <= 0 then
+			table.insert(out, `gamepass.{pass.key}`)
+		end
+	end
+	for _, product in self.PRODUCTS do
+		if type(product.developerProductId) ~= "number" or product.developerProductId <= 0 then
+			table.insert(out, `product.{product.key}`)
+		end
+	end
+	return out
+end
+
+-- THE BOOT AUDIT — the same posture StructuresShopService takes toward an entry whose effect nothing
+-- reads. The integration red-team's finding was that EVERY id here is 0 in the shipped catalog, so
+-- no gamepass is ever granted, no receipt is ever recognised, and `purchase` — one of the seven
+-- events the analytics taxonomy mandates — has no reachable emit point at runtime at all. Worse, it
+-- fails SILENTLY and in the shape of success: the passes simply never grant, so the 2x multiplier,
+-- auto-collect and the VIP trench are all quietly off, and the Tier-1 suite is green because it
+-- stamps real ids into the catalog before every case.
+--
+-- The ids cannot be invented — they come from a published place, which is a human step. So this does
+-- the next best thing and refuses to let it be discovered in production: one loud line at boot,
+-- naming exactly what is inert. Never an error: an unpublished place is the correct state during
+-- development, and a server that refuses to boot over it would block every non-monetization test.
+function MonetizationService.auditCatalog(self: any, warnFn: any): ()
+	local unconfigured = self:unconfiguredEntries()
+	if #unconfigured == 0 then
+		return
+	end
+	local emit = if type(warnFn) == "function" then warnFn else warn
+	emit(
+		`[monetization] {#unconfigured} catalog entr{if #unconfigured == 1
+			then "y is"
+			else "ies are"} UNCONFIGURED (asset id 0) and therefore INERT: {table.concat(
+			unconfigured,
+			", "
+		)}. `
+			.. "No gamepass will be granted and no receipt will be recognised for these, so their effects "
+			.. "(2x Credits, auto-collect, the VIP trench, Credit packs, the 30-min boost) are OFF and the "
+			.. "`purchase` analytics event has no reachable emit point. Fill the ids from the published "
+			.. "place — see the TODO(verify) above MonetizationService.PASSES."
+	)
+end
+
 function MonetizationService.Start(self: any, context: any): ()
 	self._context = context
 	self._processing = {}
 	self._pendingDurable = {}
+	self:auditCatalog(context ~= nil and context.logWarn or nil)
 	self:startRuntime(context)
 end
 

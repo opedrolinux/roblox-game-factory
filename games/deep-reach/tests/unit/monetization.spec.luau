@@ -1899,3 +1899,56 @@ describe("monetization: a re-delivery during the durable write cannot double-emi
 		end
 	)
 end)
+
+-- ── the boot audit refuses to let an inert catalog ship silently ─────────────────────────────────
+--
+-- The integration red-team's MEDIUM finding: every asset id in the shipped catalog is 0, so
+-- syncPasses skips every pass, processReceipt answers unknown-product for every receipt, and the
+-- three gamepass effects plus both dev products are OFF — with `purchase`, one of the seven events
+-- the taxonomy mandates, having no reachable emit point in the built game at all. It fails in the
+-- shape of success: nothing errors, the passes simply never grant.
+--
+-- The ids come from a published place, so filling them is a human step and NOT something this suite
+-- can assert. What it CAN assert is that the condition is loud. These cases are the reason the
+-- warning cannot be quietly deleted later.
+describe(
+	"monetization: an unconfigured catalog is announced at boot, not discovered live",
+	function()
+		it("unconfiguredEntries names every entry still on a placeholder id", function()
+			withUnconfiguredProduct("creditPackM", function()
+				local names = MonetizationService:unconfiguredEntries()
+				local found = false
+				for _, name in names do
+					if name == "product.creditPackM" then
+						found = true
+					end
+				end
+				expect(found):toBe(true)
+			end)
+		end)
+
+		it("a fully configured catalog is SILENT (the warning means something)", function()
+			stampIds()
+			expect(#MonetizationService:unconfiguredEntries()):toBe(0)
+			local warned = 0
+			MonetizationService:auditCatalog(function()
+				warned += 1
+			end)
+			-- A warning that fires unconditionally is noise, and noise is how a real one gets ignored.
+			expect(warned):toBe(0)
+		end)
+
+		it("an unconfigured entry WARNS, and the message names what is inert", function()
+			withUnconfiguredPass("vipTrench", function()
+				local messages: { string } = {}
+				MonetizationService:auditCatalog(function(message: string)
+					table.insert(messages, message)
+				end)
+				expect(#messages):toBe(1)
+				-- The name must be IN the message: a warning that says "something is wrong" without
+				-- saying what costs more time than it saves.
+				expect(string.find(messages[1], "gamepass.vipTrench", 1, true)).never:toBe(nil)
+			end)
+		end)
+	end
+)
