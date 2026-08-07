@@ -709,14 +709,23 @@ function OfflineService.pushView(_self: any, context: any, player: any): boolean
 	if net == nil or type(net.fireClient) ~= "function" or context.data == nil then
 		return false
 	end
-	local got = context.data:get(player)
-	if type(got) ~= "table" or got.ok ~= true then
-		return false
-	end
-	local ok = pcall(function()
+	-- THE READ IS INSIDE THE pcall, WITH THE PUSH. `context.data:get` returning Err is ordinary and
+	-- handled below — but a data layer that THROWS (a released session, a metatable that errors, a
+	-- future refactor) would propagate straight out of this function and into the caller's return
+	-- path. Every caller here is a POST-WRITE presentation step, so that throw turns an already
+	-- committed grant into an Err the player sees as a failure while their balance has moved. That is
+	-- the exact defect this factory shipped once before: an unguarded post-write FireClient turned a
+	-- committed Sell into Err(Internal), invisible to 352 green Lune tests. Presentation must never be
+	-- able to fail a transaction that already succeeded.
+	local ok, pushed = pcall(function(): boolean
+		local got = context.data:get(player)
+		if type(got) ~= "table" or got.ok ~= true then
+			return false
+		end
 		net:fireClient(player, "data", Types.toView(got.value))
+		return true
 	end)
-	return ok
+	return ok and pushed == true
 end
 
 -- ── the actions ─────────────────────────────────────────────────────────────────────────────────

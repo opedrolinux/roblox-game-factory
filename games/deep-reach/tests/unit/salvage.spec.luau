@@ -2382,3 +2382,56 @@ describe("salvage: boundaries and the persisted smelter record", function()
 		end
 	end)
 end)
+
+-- ── presentation must never be able to fail a transaction that already committed ────────────────
+--
+-- The integration red-team's finding, and a repeat of a defect this factory SHIPPED once: an
+-- unguarded post-write FireClient turned a committed Sell into Err(Internal) in the previous game,
+-- invisible to 352 green Lune tests. Here the shape was `context.data:get(player)` sitting OUTSIDE
+-- the pcall in pushView. An Err from `get` was handled — but a data layer that THROWS (a released
+-- session, an erroring metatable, a future refactor) propagated straight out of pushView and into
+-- the caller's return path. Every caller is a POST-WRITE presentation step, so the player would see
+-- an error for a grant their balance had already received.
+--
+-- Seven services carried the identical block. This case pins the contract for salvage, the one whose
+-- analogue actually shipped the bug.
+describe("salvage: a throwing data layer cannot turn a committed write into a failure", function()
+	it("pushView SWALLOWS a get() that throws, and reports false", function()
+		local h = newServer()
+		local player = h:join(1)
+
+		-- A data layer whose `get` raises rather than returning Err — the case the old code let
+		-- escape. Everything else delegates to the real one.
+		local throwingData = setmetatable({}, {
+			__index = function(_t: any, key: string): any
+				local inner: any = h.data
+				if key == "get" then
+					return function(): any
+						error("data layer exploded", 0)
+					end
+				end
+				local value = inner[key]
+				if type(value) == "function" then
+					return function(_self: any, ...): any
+						return value(inner, ...)
+					end
+				end
+				return value
+			end,
+		})
+
+		local ctx = h:ctx(player, { data = throwingData })
+		ctx.net = {
+			fireClient = function(): ()
+				error("pushView reached the wire despite a throwing get", 0)
+			end,
+		}
+
+		-- The whole assertion: it RETURNS, it does not propagate. A raised error here is the defect.
+		local ok, pushed = pcall(function(): boolean
+			return SalvageService:pushView(ctx, player)
+		end)
+		expect(ok):toBe(true)
+		expect(pushed):toBe(false)
+	end)
+end)
