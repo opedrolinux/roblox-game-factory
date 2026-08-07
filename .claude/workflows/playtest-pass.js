@@ -42,7 +42,14 @@
 //   `if t2 == "green"`. With the T2 lane down, a RECORDED RED PLAYTEST IS SILENTLY IGNORED and handoff
 //   still returns ready. A red is red regardless of the rung beneath it.
 //
-// args (JSON): { gameDir, specPath?, mode?, evidencePath?, result? }
+// DO NOT RUN THIS CONCURRENTLY WITH ANY WORKFLOW THAT READS THE GAME SOURCE. The Falsify phase's whole
+// method is to introduce a REAL defect into the GAME, observe the phase go red, and revert — so for
+// minutes at a time the working tree is deliberately broken. Any reader running beside it
+// (adversarial-review's hunters, integration-gate, grade's judge) is auditing a game that does not
+// exist, and will report defects nobody wrote. The findings look real: they cite a true file, a true
+// line, and code that was genuinely there when it looked. Serialize this lane against every reader.
+//
+// args (JSON): { gameDir, specPath?, mode?, evidencePath?, result?, nowUnix?, engineLane?, engineLaneReason? }
 //   mode: 'author' (default — author + falsify + run + ingest) | 'run' (run + ingest) | 'ingest'
 //   result: a pasted evidence JSON string/object (ingest without touching the filesystem)
 
