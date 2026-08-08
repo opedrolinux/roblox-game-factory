@@ -78,6 +78,13 @@ function AnalyticsService.new(clock: ClockLike): any
 	-- userId -> what we knew about this session at join. Two jobs: the session_end playtime base,
 	-- and the NON-EMPTY fallback payload described at onPlayerRemoving below.
 	self._sessions = {} :: { [number]: any }
+	-- userId -> how many times this player has DEPARTED on this server. Presence is its own fact,
+	-- exactly as PlotService's header argues: `_sessions` cannot answer "is this player still here",
+	-- because it is empty both BEFORE a session starts and AFTER it ends. A monotonic counter can,
+	-- and a join hook that captured its value before yielding can tell those two apart. Only ever
+	-- incremented — never cleared mid-session, or an in-flight ticket would compare equal after a
+	-- real departure and the guard would be exactly as blind as no guard at all.
+	self._departures = {} :: { [number]: number }
 	self._connections = {} :: { any }
 	-- Tunable so a spec can drive the join wait without yielding for 50 seconds.
 	self.loadWaitAttempts = LOAD_WAIT_ATTEMPTS
@@ -226,12 +233,48 @@ function AnalyticsService.awaitLoaded(self: any, dataService: any, player: any):
 	return nil
 end
 
+-- The departure ledger's two readers. `ticket` is taken BEFORE anything yields; `hasDeparted` asks
+-- whether THIS join's player has left since that moment — never whether the userId has ever left,
+-- which would silently stop describing every returning player.
+function AnalyticsService.departureTicket(self: any, player: any): number
+	if player == nil or type(player.UserId) ~= "number" then
+		return 0
+	end
+	return self._departures[player.UserId] or 0
+end
+
+function AnalyticsService.hasDeparted(self: any, player: any, ticket: number): boolean
+	return self:departureTicket(player) ~= ticket
+end
+
 -- THE join lifecycle hook. Fires session_start AFTER the load resolves. Returns the emitted Event,
 -- or nil when the load never resolved (a kicked / departed player emits nothing rather than
--- emitting an empty session).
+-- emitting an empty session), when the player LEFT while it waited, or when this session already
+-- has a start.
+--
+-- BOTH REFUSALS ARE ORDINARY ORDERINGS, not adversarial ones:
+--   * A DEPARTURE DURING THE WAIT. The pinned leave order (AMENDMENT A10b) fires session_end FIRST,
+--     while the blob is still loaded — which is precisely the window in which this parked thread's
+--     next poll finally succeeds. Without the ticket, session_start emits AFTER its own session_end:
+--     an unmatched event in the funnel, and a `_sessions` snapshot nothing will ever consume, whose
+--     joinedAtUnix a later session_end would happily measure a phantom playtime from.
+--   * TWO HOOKS FOR ONE SESSION. Start iterates Players:GetPlayers() AND connects PlayerAdded, so a
+--     player joining across that boundary is seen by both. The harm is not the duplicate event but
+--     the RESET playtime base: every affected session_end then reports a session shorter than the
+--     one that happened.
+--
+-- The load-resolved check stays first: a player who never loaded has nothing to describe either way,
+-- and reporting that as a departure would be a different (and wrong) story.
 function AnalyticsService.onPlayerAdded(self: any, dataService: any, player: any): Event?
+	local ticket = self:departureTicket(player)
 	local data = self:awaitLoaded(dataService, player)
 	if data == nil then
+		return nil
+	end
+	if self:hasDeparted(player, ticket) then
+		return nil
+	end
+	if player ~= nil and self._sessions[player.UserId] ~= nil then
 		return nil
 	end
 	return self:sessionStart(player, data)
@@ -250,6 +293,12 @@ end
 -- already gone, the join-time snapshot supplies the payload and the event is never empty. A
 -- session_end carrying stale = true in a live server now means the pinned order was bypassed.
 function AnalyticsService.onPlayerRemoving(self: any, dataService: any, player: any): Event
+	-- RECORD THE DEPARTURE FIRST, before anything below can yield or emit. A join thread parked in
+	-- awaitLoaded is resumed by the very poll that this method's window makes succeed, so a bump
+	-- placed after the emit would still let a session_start slip in behind its own session_end.
+	if player ~= nil and type(player.UserId) == "number" then
+		self._departures[player.UserId] = (self._departures[player.UserId] or 0) + 1
+	end
 	local data: any = nil
 	if dataService ~= nil then
 		local got = dataService:get(player)

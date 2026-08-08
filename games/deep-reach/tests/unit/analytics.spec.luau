@@ -194,6 +194,111 @@ describe("services/analytics/AnalyticsService — session lifecycle", function()
 	end)
 end)
 
+-- ── the join hook's departure guard ─────────────────────────────────────────────────────────────
+-- [REGRESSION — adversarial finding F3.] `onPlayerAdded` waits out loadSession's yield and then
+-- fires session_start with whatever it finds. It had no idea whether the player it is describing is
+-- still here. Two orderings break it, and both are ordinary rather than adversarial:
+--
+--   * A DEPARTURE DURING THE WAIT. The pinned leave order (AMENDMENT A10b) runs session_end FIRST,
+--     while the blob is still loaded — which is exactly the window in which the parked join thread
+--     finally sees a loaded blob. session_start then fires AFTER its own session_end, unmatched, and
+--     the snapshot it writes into `_sessions` is never consumed by anything: a per-server leak of one
+--     entry per occurrence, carrying a joinedAtUnix that a later session_end would measure from.
+--   * TWO HOOKS FOR ONE SESSION. Start iterates Players:GetPlayers() AND connects PlayerAdded, so a
+--     player who joins across that boundary is seen by both. The second start RESETS the playtime
+--     base, so the session_end that follows reports a session shorter than the one that happened.
+--
+-- PlotService already carries the guard this needs (`departures` / `departureTicket` / `hasDeparted`)
+-- and its header explains why presence has to be its own fact. These cases drive the same ledger
+-- here. The last one is the counter-direction: a guard that also suppressed a genuine REJOIN would
+-- be a worse bug wearing the fix's clothes.
+
+describe("services/analytics/AnalyticsService — the join hook knows who left", function()
+	it("a departure during the load wait cancels the session_start it would follow", function()
+		local clock = Mocks.clock(1000)
+		local service = AnalyticsService.new(clock)
+		service.loadWaitAttempts = 4
+		local data = fakeData(sampleBlob())
+		local player = Mocks.player(12, "Bounced")
+
+		-- The join thread is parked in the wait. In that window the player leaves, and the pinned
+		-- leave order fires session_end while the blob is STILL loaded — which is the same instant
+		-- the parked thread's next poll will finally succeed.
+		service._wait = function(_self: any, _seconds: number): ()
+			data:load()
+			service:onPlayerRemoving(data, player)
+		end
+
+		local record = service:onPlayerAdded(data, player)
+		expect(record):toBe(nil)
+		local events = service:events()
+		expect(#events):toBe(1)
+		expect(events[1].event):toBe("session_end")
+		expect(#service:eventsOfType("session_start")):toBe(0)
+	end)
+
+	it("the cancelled start leaves no snapshot for a later session_end to measure from", function()
+		-- The leak, observed through behaviour rather than through a private field: a stale
+		-- `_sessions` entry would give the next session_end a playtime measured from a session that
+		-- already ended.
+		local clock = Mocks.clock(1000)
+		local service = AnalyticsService.new(clock)
+		service.loadWaitAttempts = 4
+		local data = fakeData(sampleBlob())
+		local player = Mocks.player(13, "Ghost")
+		service._wait = function(_self: any, _seconds: number): ()
+			data:load()
+			service:onPlayerRemoving(data, player)
+		end
+		service:onPlayerAdded(data, player)
+
+		clock:advance(5000)
+		local again = service:onPlayerRemoving(data, player)
+		expect(again.payload.sessionSeconds):toBe(0)
+	end)
+
+	it("two join hooks for ONE live session emit ONE session_start", function()
+		local clock = Mocks.clock(1000)
+		local service = AnalyticsService.new(clock)
+		service.loadWaitAttempts = 1
+		local data = fakeData(sampleBlob())
+		data:load()
+		local player = Mocks.player(14, "Doubled")
+
+		expect(service:onPlayerAdded(data, player) ~= nil):toBe(true)
+		clock:advance(300)
+		expect(service:onPlayerAdded(data, player)):toBe(nil)
+		expect(#service:eventsOfType("session_start")):toBe(1)
+
+		-- ...and the playtime base survived the second hook. A reset base is the harm, not the
+		-- duplicate event: it makes every affected session look shorter than it was.
+		local record = service:onPlayerRemoving(data, player)
+		expect(record.payload.sessionSeconds):toBe(300)
+	end)
+
+	it("a genuine REJOIN after a departure still emits its own session_start", function()
+		-- COUNTER-DIRECTION. The ledger must gate on "did THIS join's player leave since it began",
+		-- never on "has this userId ever left" — the latter would silently stop describing every
+		-- returning player, which is worse than the defect being fixed.
+		local clock = Mocks.clock(1000)
+		local service = AnalyticsService.new(clock)
+		service.loadWaitAttempts = 1
+		local data = fakeData(sampleBlob())
+		data:load()
+		local player = Mocks.player(15, "Regular")
+
+		expect(service:onPlayerAdded(data, player) ~= nil):toBe(true)
+		clock:advance(120)
+		expect(service:onPlayerRemoving(data, player).payload.sessionSeconds):toBe(120)
+
+		clock:advance(3600) -- away, then back to the same server
+		expect(service:onPlayerAdded(data, player) ~= nil):toBe(true)
+		expect(#service:eventsOfType("session_start")):toBe(2)
+		clock:advance(45)
+		expect(service:onPlayerRemoving(data, player).payload.sessionSeconds):toBe(45)
+	end)
+end)
+
 describe("services/analytics/AnalyticsService — seam installation", function()
 	it("Start refuses to run when ctx.analytics is not this service", function()
 		local service = AnalyticsService.new(Mocks.clock(1))
