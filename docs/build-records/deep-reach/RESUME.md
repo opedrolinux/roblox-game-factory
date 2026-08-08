@@ -1,15 +1,40 @@
 # Deep Reach — resume here
 
-State as of the end of the first build session. Everything needed to continue is committed; nothing
-lives only in a chat log.
+Everything needed to continue is committed; nothing lives only in a chat log.
 
 **Branch:** `staging/deep-reach` (not pushed — `git push` is the human's).
-**Where we are:** ALL 9 FEATURES BUILT AND MERGED. Gauntlet 6/6 green, 922/922 lune, reachability
-0 FAIL. `tier-status` = `verified-local-T1`. **Read `HANDOFF.md` next** — it leads with what is not
-done. Two things are OWED before the human gate, both cut short by the account's monthly spend
-limit: **re-run the adversarial review** (its "No open exploit" criterion is unproven, not passed)
-and **run `grade.js`**. See `docs/USAGE-BUDGET.md` for the spend problem and the per-phase-budget
-discussion it opened.
+
+## Where we are — 2026-08-08
+
+**The game boots in Roblox and its core loop runs on the live wire.** That was not true at the end of
+the first session, and every line below the "Done" table dates from then — read it as history.
+
+| rung | state |
+|---|---|
+| T0 / T0.5 / T1 | green — gauntlet 6/6, **943/943** lune, reachability 0 FAIL |
+| **T2 in-engine smoke** | **GREEN** — 4/4 phases, real Player, real `SessionStore` |
+| T2.5 automated playtest | parked — the `run-in-roblox` lane is down for TWO environment reasons, neither of them the game |
+| **T2.7 live Studio** | ran, **PARKED** — 5/6 phases green, 14/14 actions on the real client wire |
+| T3 human playtest | **the next rung** |
+
+`tier-status` reports `highest=T2 | in-progress (T2.7 red), NOT ready`.
+
+**Both things this file used to say were owed are now resolved or superseded:**
+
+- The **four confirmed adversarial findings are all fixed** — `8a434ab` (HIGH), `c98e538`,
+  `3ce04fc`, `d7ad232` — each falsified against the ORIGINAL defect first. The *seven dropped*
+  findings from the interrupted first review were never adjudicated (their skeptics died on the spend
+  limit) and are still un-re-run: `resumeFromRunId: 'wf_7d303062-2f6'`, ~0.7–1.4M.
+- **`grade.js` has now run.** See `HANDOFF.md`.
+
+**Read `HANDOFF.md` next.** It leads with the two OPEN findings from the Studio pass, because both
+change what a human sees on the first frame: the game configures **no `Lighting` at all** (an abyssal
+trench opens on a bright blue afternoon sky), and a player **spawns 917 studs from their own dome**.
+Neither was fixed, and the handoff says why for each.
+
+## History — the first build session
+
+State as of the end of the first build session (superseded above, kept for the record).
 
 ## Done
 
