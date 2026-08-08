@@ -13,7 +13,7 @@ lune run .claude/skills/lib/tier-status.luau games/deep-reach
 
 | rung | state | evidence |
 |---|---|---|
-| T0 static · T0.5 require · T1 Lune + reachability | **green** | gauntlet 6/6, **943 / 943** lune, reachability 0 FAIL |
+| T0 static · T0.5 require · T1 Lune + reachability | **green** | gauntlet 6/6, **945 / 945** lune, reachability 0 FAIL |
 | **T2 in-engine smoke** | **GREEN** | `tests/tier2/last-smoke.json` — 4/4 phases; `smoke-gate` INGEST returned `T2-green` |
 | T2.5 automated playtest | **parked — environment, not the game** | see *The T2.5 lane* below |
 | **T2.7 live Studio** | **ran, PARKED** | `tests/engine-pass/last-studio.json` — 5 of 6 phases green |
@@ -23,7 +23,7 @@ lune run .claude/skills/lib/tier-status.luau games/deep-reach
 file was last written. But read the two open findings below before you play: one of them changes what
 you will see on the first frame.
 
-## The four adversarial findings are all fixed
+## The four adversarial findings are all fixed (a fifth is below)
 
 Each was falsified against the **original** defect first — the mutation reproduced the exact reported
 failure, was observed RED, and was then restored by inverting the edit (never `git checkout`, which
@@ -35,6 +35,54 @@ restores HEAD and on an uncommitted file is a delete).
 | 1 | MED | The away window's **end** was measured whenever something first asked, not at session load. `SalvageService` arms on first sight and pays per second from that instant, so a window ending later overlapped the online tick and every overlapping second was paid twice. Both ends now come from the install. | `c98e538` |
 | 2 | MED | `DataService.save` — the **real-money receipt path** — persisted the offline grant without advancing `lastSeenUnix`, so a durable record held both the payment and an unconsumed claim on it. Stamping moved to the two funnels every durable write passes through. | `3ce04fc` |
 | 3 | LOW | The analytics join hook fired `session_start` after its own `session_end` (and twice per session), leaking a stale playtime base. Fixed with the departure-ticket guard `PlotService` already carried. | `d7ad232` |
+
+## The done-condition grade — `done: false`, and both reasons are honest
+
+`grade.js` ran (2 agents, ~188k tokens). Independent fresh models, maker != checker.
+
+| | |
+|---|---|
+| **verdict** | **`done: false`** — fail-closed |
+| success criteria | **9 pass / 1 unknown / 0 fail** |
+| quality judge | **pass**, spec-match **0.76** |
+| tier | `highest=T2`, not ready |
+
+**Blocker 1 — the tier.** `in-progress (T2.7 red), NOT ready`. See the gate-design question above.
+
+**Blocker 2 — `No open exploit` is UNKNOWN, and that is the correct verdict.** All five *named*
+vectors are concretely defended and the grader cited the tests for each — salvage-rate spoof
+(`salvage.spec:1873`, 12 spoof payloads), plot-claim hijack (`plot.spec:494`), offline-time forgery
+(`offline.spec:1363`, 17 forged payloads on both actions), depth-gate bypass (`wholegame.spec:1595`),
+receipt replay (`monetization.spec:973/1034/1589/1816`). **But the criterion's own method never
+completed**: the whole-game adversarial sweep died on the spend limit, only round 1 ran, and no
+result artifact exists in the repo. Named vectors pass, the sweep is un-run ⇒ **unknown, not pass**.
+An Unknown is surfaced, never counted as a pass — which is the exact "Unknown laundering to done"
+failure this factory documented.
+
+**The grader independently found the two things the Studio pass found**, having never seen it:
+theme unbuilt ("the game does not yet LOOK like the game the spec describes") and monetization inert.
+That agreement is worth more than either finding alone.
+
+**It also surfaced a real defect no gate had caught** — see the fifth fix below.
+
+## A FIFTH fix, found by the grader rather than by a gate
+
+`908ca14`. `disarmFor` already existed to stop a rejoining player inheriting the previous session's
+armed flag — **and was defeated by its own ordering.** `tickPlayer` writes `_armed[userId]` *after*
+`ctx.data:update` returns, and that update yields, so a leave landing inside the yield clears a flag
+that is not set yet and the write then re-arms a player who is gone. Their rejoin is never stamped,
+and the first accruing tick credits the whole absence into the smelter **while OfflineService pays the
+same window again**.
+
+Same shape as `d7ad232`, same fix: a monotonic departure counter captured before the yield and
+compared after it, because `_armed` is empty both *before* a session arms and *after* it is disarmed
+and cannot tell those apart.
+
+Falsified first — and **the second case had to be repaired before it meant anything.** My first draft
+seeded a stale `lastTickUnix` *before* arming and passed against the defect, because the arming write
+commits its stamp and consumes that span. The window that actually double-pays is the one the player
+is away for *after* the leaked write. Corrected: rejoin-armed `false → true`, smelter
+`rate*(3600+10) → rate*10`.
 
 ## Two OPEN findings from the Studio pass — read these before playing
 

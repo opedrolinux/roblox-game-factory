@@ -11,7 +11,7 @@ the first session, and every line below the "Done" table dates from then — rea
 
 | rung | state |
 |---|---|
-| T0 / T0.5 / T1 | green — gauntlet 6/6, **943/943** lune, reachability 0 FAIL |
+| T0 / T0.5 / T1 | green — gauntlet 6/6, **945/945** lune, reachability 0 FAIL |
 | **T2 in-engine smoke** | **GREEN** — 4/4 phases, real Player, real `SessionStore` |
 | T2.5 automated playtest | parked — the `run-in-roblox` lane is down for TWO environment reasons, neither of them the game |
 | **T2.7 live Studio** | ran, **PARKED** — 5/6 phases green, 14/14 actions on the real client wire |
@@ -25,7 +25,7 @@ the first session, and every line below the "Done" table dates from then — rea
   `3ce04fc`, `d7ad232` — each falsified against the ORIGINAL defect first. The *seven dropped*
   findings from the interrupted first review were never adjudicated (their skeptics died on the spend
   limit) and are still un-re-run: `resumeFromRunId: 'wf_7d303062-2f6'`, ~0.7–1.4M.
-- **`grade.js` has now run.** See `HANDOFF.md`.
+- **`grade.js` has now run:** `done: false` (fail-closed) — 9 criteria pass, 1 UNKNOWN (`No open exploit`: the named vectors pass, the sweep never completed), quality judge **pass**. It also surfaced **a fifth real defect** no gate had caught, now fixed in `908ca14`. See `HANDOFF.md`.
 
 **Read `HANDOFF.md` next.** It leads with the two OPEN findings from the Studio pass, because both
 change what a human sees on the first frame: the game configures **no `Lighting` at all** (an abyssal
