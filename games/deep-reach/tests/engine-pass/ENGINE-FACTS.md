@@ -234,3 +234,46 @@ engine failure as ready. An honest `blocked-on-human` beats a manufactured red.
 `GATE_ENGINE_LANE` is therefore deliberately left UNDECLARED and `tests/tier2/last-playtest.json`
 deliberately absent, so the aggregator reports T2.5 as blocked-on-human from evidence rather than
 from an assertion.
+
+## 2026-08-08 (later) — the port was only the FIRST blocker; there is a second one under it
+
+The human cycled WinNAT (`net stop winnat && net start winnat`, elevated). That worked and is worth
+recording as a fix that fixes something:
+
+| # | measurement | result |
+|---|---|---|
+| 1 | `netsh interface ipv4 show excludedportrange protocol=tcp` after the cycle | reserved ranges are now **5357, 50000–50059, 54235** — the 50305–50404 block is GONE and **50312 is free** |
+| 2 | `run-in-roblox --place ... --script ...` | **no bind error** — it gets further than it did all day |
+| 3 | the new failure | `called 'Result::unwrap()' on an 'Err' value: The system cannot find the file specified. (os error 2)`, same `src/main.rs:75` |
+
+### What the second blocker actually is
+
+`os error 2` is `ERROR_FILE_NOT_FOUND`, which Windows also returns for a **missing registry key**.
+
+| # | measurement | result |
+|---|---|---|
+| 4 | `reg query "HKCU\Software\Roblox\RobloxStudioBrowser\roblox-studio"` | **does not exist** |
+| 5 | `reg query "HKCU\Software\Roblox\RobloxStudioBrowser"` | the whole parent tree **does not exist** |
+| 6 | `reg query "HKCU\Software\Roblox"` | only `Retention` and `RobloxStudio` remain |
+| 7 | Studio itself | **installed and working** — `version-c6a4e493f57f4df0\RobloxStudioBeta.exe` exists, and `HKCU\Software\Classes\roblox-studio\shell\open\command` points at it correctly |
+| 8 | with Studio OPEN and the MCP bridge connected | the key is *still* absent, so merely running Studio does not recreate it |
+
+`run-in-roblox` 0.3.0 locates Studio through `roblox_install`, which reads that
+`RobloxStudioBrowser\roblox-studio` key rather than the `Classes` handler that is present. So the lane
+is looking in the one place Roblox has stopped writing. **This is a locator bug in a pinned 2021-era
+tool meeting a 2026 Studio install, not a missing engine and not a defect in the game.**
+
+### Why the agent did not fix it
+
+Three routes, all outside what an agent should do unattended:
+
+1. `reg add "HKCU\Software\Roblox\RobloxStudioBrowser\roblox-studio" /v version /t REG_SZ /d version-c6a4e493f57f4df0`
+   — a registry write. Reversible and user-scoped, but still a system-settings change, and the human
+   had explicitly gone away.
+2. Upgrade `run-in-roblox` past 0.3.0 in `rokit.toml` — the repo change IS the agent's job, but
+   verifying a newer release exists needs network egress, and `curl` to api.github.com is **fenced**.
+3. Reinstall / repair Studio so it rewrites the key — a human action by definition.
+
+So T2.5 stays parked and `GATE_ENGINE_LANE` stays undeclared. **The honest statement is now much
+sharper than "the lane is down": the port is fixed, the engine is present, and one stale registry
+lookup is all that stands between here and a T2.5 run.**
