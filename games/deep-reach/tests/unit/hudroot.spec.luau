@@ -12,12 +12,33 @@
 --
 -- SCOPE HONESTY: no rung below T2.7 can see a pixel. This spec says the layout is well-formed; it
 -- says nothing about how the HUD looks.
+local fs = require("@lune/fs")
 local testkit = require("../lib/testkit")
 local HudRoot = require("../../src/client/framework/HudRoot")
 
 local describe = testkit.describe
 local it = testkit.it
 local expect = testkit.expect
+
+-- `ensure()` builds the slot frames and CANNOT run here — Instance/UDim2/Vector2 are nil under Lune,
+-- which is the same reason this module keeps its layout as plain numbers. So the one property that
+-- lives inside `ensure` is asserted against the SOURCE, the leaderboard.spec / offline.spec idiom for
+-- Roblox-only code. Absence is a hard error, never a skip: a rename that silently drops the assertion
+-- is the failure mode of every source-level test.
+local HUDROOT_CANDIDATES = {
+	"src/client/framework/HudRoot.luau",
+	"games/deep-reach/src/client/framework/HudRoot.luau",
+	"../src/client/framework/HudRoot.luau",
+}
+
+local function readHudRoot(): string
+	for _, path in HUDROOT_CANDIDATES do
+		if fs.isFile(path) then
+			return fs.readFile(path)
+		end
+	end
+	error(`hudroot.spec: HudRoot not found from this cwd: {table.concat(HUDROOT_CANDIDATES, ", ")}`)
+end
 
 describe("client/framework/HudRoot — the slot vocabulary", function()
 	it("declares slots, and slotNames matches SLOTS exactly", function()
@@ -70,6 +91,40 @@ describe("client/framework/HudRoot — the slot vocabulary", function()
 			expect(slot.anchorY):toBe(slot.posYScale)
 			expect(slot.anchorX >= 0 and slot.anchorX <= 1):toBe(true)
 			expect(slot.anchorY >= 0 and slot.anchorY <= 1):toBe(true)
+		end
+	end)
+end)
+
+-- ── the slot must CLIP ──────────────────────────────────────────────────────────────────────────
+-- [REGRESSION — T2.7 finding hud-panel-overflow.] Every slot is sized in SCALE against the viewport
+-- while the content controllers mount into it is fixed-height, so below roughly 1000px of viewport
+-- height the content is taller than its slot. Without clipping it did not truncate — it drew over the
+-- neighbouring slots. Measured live at 1220x455: the RightPanel catalog spilled 165px past its frame
+-- and TopRight's badges 138px, giving six pairs of effectively-visible text from DIFFERENT slots
+-- overlapping by more than 8px in both axes. Two readable things in the same pixels is worse than one
+-- being absent — the player can read neither — and no rung below T2.7 can see it: 941 Lune tests were
+-- green throughout.
+--
+-- The vocabulary cases above prove the slots are SEPARATE regions. This proves they STAY separate when
+-- their contents do not fit, which is the half that was missing and the half that actually shipped.
+
+describe("client/framework/HudRoot — a slot that does not clip is not a region", function()
+	it("every slot frame is built with ClipsDescendants = true", function()
+		local source = readHudRoot()
+		-- NON-VACUITY: the construction site must still be here. If `ensure` were renamed or the frame
+		-- construction moved, matching only the clip line would pass against a file that no longer
+		-- builds slots at all.
+		expect(string.find(source, 'instanceGlobal.new("Frame")', 1, true) ~= nil):toBe(true)
+		expect(string.find(source, "frame.ClipsDescendants = true", 1, true) ~= nil):toBe(true)
+	end)
+
+	it("no slot covers the whole screen, so clipping cannot be a whole-screen no-op", function()
+		-- The counter-direction, and the reason this pairs with the vocabulary cases: clipping a slot
+		-- that already spanned the viewport would change nothing at all. Each slot must be strictly
+		-- smaller than the screen on at least one axis for the clip to bite.
+		for _, slot in HudRoot.SLOTS do
+			expect(slot.sizeXScale < 1 or slot.sizeYScale < 1):toBe(true)
+			expect(slot.sizeXScale > 0 and slot.sizeYScale > 0):toBe(true)
 		end
 	end)
 end)

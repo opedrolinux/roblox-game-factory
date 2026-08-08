@@ -226,6 +226,26 @@ function HudRoot.ensure(playerGui: any): any
 			frame.Name = slot.name
 			frame.BackgroundTransparency = 1 -- a slot is a region, never a visible panel
 			frame.BorderSizePixel = 0
+			-- A SLOT THAT DOES NOT CLIP IS NOT A REGION. [T2.7 finding hud-panel-overflow]
+			--
+			-- Every slot is sized in SCALE against the viewport (TopRight 0.25 of height, RightPanel
+			-- 0.45), while the content controllers mount into them is fixed-height. Above roughly
+			-- 1000px of viewport height everything fits. Below it, content did not truncate — it drew
+			-- straight over the neighbouring slots, because nothing clipped. MEASURED in a live Studio
+			-- session at 1220x455: the RightPanel catalog spilled 165px past its own frame and the
+			-- TopRight badges 138px, producing SIX pairs of effectively-visible text from different
+			-- slots overlapping by more than 8px in both axes — "Hull Plating · Lv 0" under "STORE",
+			-- "400 Credits" under "HIDE SHOP", "DEPTH 1 · x1" over the structures list. Two readable
+			-- things in the same pixels is worse than one of them being absent: the player cannot read
+			-- EITHER, and nothing in a log or a Tier-1 suite can see it (941 tests were green).
+			--
+			-- Clipping here rather than in each controller for the same reason the slot vocabulary is
+			-- here: a per-controller fix is one every future controller has to remember, and this file
+			-- already argues that case ("a full-screen slot is the overlap problem wearing a slot's
+			-- name"). The remaining half — letting a taller-than-its-slot catalog SCROLL instead of
+			-- being truncated — is a per-controller affordance and is named in the T2.7 artifact
+			-- rather than silently absorbed here.
+			frame.ClipsDescendants = true
 			frame.AnchorPoint = vector2Global.new(slot.anchorX, slot.anchorY)
 			frame.Position =
 				udim2Global.new(slot.posXScale, slot.posXOffset, slot.posYScale, slot.posYOffset)
