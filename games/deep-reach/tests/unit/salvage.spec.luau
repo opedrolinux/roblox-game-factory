@@ -2435,3 +2435,114 @@ describe("salvage: a throwing data layer cannot turn a committed write into a fa
 		expect(pushed):toBe(false)
 	end)
 end)
+
+-- ── the arming flag must LOSE to a departure that lands inside its own yield ────────────────────
+-- [REGRESSION — surfaced by the independent /goal grader as a known-open finding.]
+--
+-- `disarmFor` already exists, and its header explains the defect it was written for: a player who
+-- left and rejoined before the next prune came back with `_armed` still set, `armFor` returned
+-- WITHOUT stamping, and the first accruing tick credited the away window from the PERSISTED
+-- pre-absence `lastTickUnix` — the same span OfflineService grants. Paid twice.
+--
+-- That fix is DEFEATED BY ITS OWN ORDERING. `tickPlayer` writes `self._armed[userId] = nowUnix`
+-- AFTER `context.data:update` returns, and that update YIELDS. So:
+--
+--   1. the arming tick enters the store and parks
+--   2. the player leaves; the pinned leave sequence calls `disarmFor`, which clears a flag that is
+--      not set yet
+--   3. the update returns and the tick sets `_armed[userId]` — FOR A PLAYER WHO IS GONE
+--   4. they rejoin on this same server; `armFor` is idempotent on that key and returns without
+--      stamping, so the new session is never armed
+--   5. the first accruing tick credits from the pre-absence stamp — the away window, into the
+--      smelter, while OfflineService pays the same window again
+--
+-- This is the exact shape of the analytics departure-guard defect fixed in d7ad232: a hook that
+-- completes after a departure and writes per-session state for someone who already left. Same fix,
+-- same reason — presence has to be its own fact, because `_armed` is empty both BEFORE a session
+-- arms and AFTER it is disarmed and cannot tell those apart.
+
+describe("salvage: a departure inside the arming yield must not leave the flag set", function()
+	it("HEADLINE: leave during the arming update, and the REJOIN is still armed", function()
+		local h = newServer()
+		local player = h:join(1)
+		-- A real away window in the persisted stamp: this is what must NOT be credited online.
+		local away = 3600
+		h:write(player, function(d: any)
+			d.smelter.lastTickUnix = h.clock:unix() - away
+			d.smelter.storedCredits = 0
+		end)
+
+		h:setYield(true)
+		local armResult: any = nil
+		local co = coroutine.create(function()
+			armResult = h:arm(player)
+		end)
+		-- Enter the arming update and park inside the store's critical section.
+		coroutine.resume(co)
+		expect(coroutine.status(co)):toBe("suspended")
+
+		-- The player leaves WHILE the arming write is parked. The pinned leave sequence runs.
+		SalvageService.seam:disarmFor(player)
+		h:leave(player)
+
+		-- The write lands afterwards. This is the line that used to re-arm a departed player.
+		drain({ co })
+		h:setYield(false)
+
+		-- NON-VACUITY: the arming attempt really did run and really did commit.
+		expect(armResult ~= nil):toBe(true)
+
+		-- The rejoin. A fresh session on the same server, with the same userId.
+		local rejoined = h:join(1)
+		local armed = h:arm(rejoined)
+		expect(armed):toBeOk()
+		-- THE ASSERTION: the new session must actually ARM — stamp now, credit nothing. If the
+		-- departed player's flag survived, armFor short-circuits, `armed` is false, and the away
+		-- window is about to be credited into the smelter on top of OfflineService's grant.
+		expect((armed :: any).value.armed):toBe(true)
+		expect(h:blob(rejoined).smelter.lastTickUnix):toBe(h.clock:unix())
+	end)
+
+	it("and the away window is NOT credited into the smelter after that rejoin", function()
+		-- The harm, asserted in CREDITS rather than in a boolean.
+		--
+		-- The absence has to fall BETWEEN the two sessions, not before the first. An earlier draft
+		-- seeded a stale lastTickUnix before arming and passed against the defect: the arming write
+		-- commits its stamp, so by the time the flag leaks the stale span is already consumed. The
+		-- window that gets double-paid is the one the player is away for AFTER the leaked write.
+		local h = newServer()
+		local player = h:join(2)
+		h:write(player, function(d: any)
+			d.smelter.storedCredits = 0
+		end)
+
+		h:setYield(true)
+		local co = coroutine.create(function()
+			h:arm(player)
+		end)
+		coroutine.resume(co)
+		SalvageService.seam:disarmFor(player)
+		h:leave(player)
+		drain({ co }) -- the leaked `_armed` write lands here, for a departed player
+		h:setYield(false)
+
+		-- THE ABSENCE. This is the span OfflineService owns and grants for.
+		local away = 3600
+		h.clock:advance(away)
+
+		local rejoined = h:join(2)
+		expect(h:arm(rejoined)):toBeOk()
+		local online = 10
+		h.clock:advance(online)
+		expect(h:tick(rejoined)):toBeOk()
+
+		local stored = h:blob(rejoined).smelter.storedCredits
+		local rate = h:rate(rejoined)
+		-- Exactly the online seconds. A stale flag would put rate * (away + online) here.
+		expect(math.abs(stored - rate * online) < 1e-9):toBe(true)
+		-- ...and say so in numbers if it is not, rather than just "false ~= true".
+		if math.abs(stored - rate * online) >= 1e-9 then
+			expect(stored):toBe(rate * online)
+		end
+	end)
+end)

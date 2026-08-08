@@ -231,6 +231,18 @@ SalvageService._context = nil :: any
 -- (see ARMING in the header). Pruned in tickAll against the live roster, so it cannot grow unbounded
 -- over a server's lifetime.
 SalvageService._armed = {} :: { [number]: number }
+-- userId -> how many times this player has DEPARTED on this server. Monotonic, never cleared.
+--
+-- `disarmFor` alone is not enough, and the ordering is the whole reason. `tickPlayer` writes
+-- `_armed[userId]` AFTER `ctx.data:update` returns, and that update YIELDS — so a leave landing inside
+-- the yield clears a flag that is not set yet, and the write then re-arms A PLAYER WHO IS GONE. Their
+-- rejoin finds `armFor` idempotent on that key, is never stamped, and the first accruing tick credits
+-- the ABSENCE from the pre-departure `lastTickUnix` — the same span OfflineService grants. Paid twice.
+--
+-- `_armed` cannot detect this itself: it is empty both BEFORE a session arms and AFTER it is disarmed,
+-- so it cannot tell those two apart. A counter can, and a tick that captured it before yielding can.
+-- Same fix and same argument as AnalyticsService's join hook and PlotService's claim path.
+SalvageService._departures = {} :: { [number]: number }
 -- userId -> true while that player's collect is parked inside ctx.data:update (mechanism (2)).
 SalvageService._collecting = {} :: { [number]: boolean }
 -- userId -> true while that player's TICK is parked inside ctx.data:update. A tick that is still
@@ -524,6 +536,10 @@ function SalvageSeam.disarmFor(_self: any, player: any): boolean
 		return false
 	end
 	local wasArmed = SalvageService._armed[userId] ~= nil
+	-- BUMP FIRST, before clearing anything. A tick parked inside its arming update captured the old
+	-- value before it yielded; bumping here is what lets it discover, when it resumes, that the player
+	-- it was arming has since left — and skip the write instead of re-arming a departed session.
+	SalvageService._departures[userId] = (SalvageService._departures[userId] or 0) + 1
 	SalvageService._armed[userId] = nil
 	SalvageService._ticking[userId] = nil
 	SalvageService._collecting[userId] = nil
@@ -910,6 +926,10 @@ function SalvageService.tickPlayer(self: any, context: any, player: any): any
 	-- Read BEFORE the yield; committed AFTER the write lands, so a failed arming write is retried on
 	-- the next tick instead of silently arming a session whose stamp never persisted.
 	local arming = self._armed[userId] == nil
+	-- Captured BEFORE the yield too, and for the same reason the flag is written after it: this is the
+	-- only way the resumed thread can tell "still the session I started arming" from "that player left
+	-- and this userId now means someone else's session". See _departures.
+	local departureTicket = self._departures[userId] or 0
 	local depth = context.depth
 	local economy = context.economy
 	local outcome: any = nil
@@ -978,8 +998,16 @@ function SalvageService.tickPlayer(self: any, context: any, player: any): any
 	if written.ok ~= true then
 		return written -- NoData while the session loads, LockStolen, ... — nothing was persisted
 	end
-	if arming then
-		-- Only NOW, after the stamp is durable, is this session allowed to accrue.
+	if arming and (self._departures[userId] or 0) == departureTicket then
+		-- Only NOW, after the stamp is durable, is this session allowed to accrue — and only if the
+		-- player has not LEFT while this update was parked in the store. Re-arming a departed session
+		-- is not a harmless stale entry: `armFor` is idempotent on this key, so their rejoin is never
+		-- stamped and the first accruing tick credits the whole absence from the pre-departure
+		-- lastTickUnix, which is the span OfflineService is already granting. Paid twice.
+		--
+		-- The stamp this write committed is NOT lost by skipping: it is in the persisted blob, so the
+		-- rejoin's own arming re-stamps from there and simply credits nothing, which is the correct
+		-- outcome for a session that was not here.
 		self._armed[userId] = nowUnix
 	end
 	if outcome == nil then
