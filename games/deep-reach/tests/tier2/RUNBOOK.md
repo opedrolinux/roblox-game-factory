@@ -1,13 +1,56 @@
 # T2 — running the in-engine smoke gate for Deep Reach
 
-`smoke.server.luau` beside this file is the Tier-2 gate. It is a **Roblox server Script**: it runs
-only inside a real DataModel, it is inert under Lune, and **nobody has run it yet**. Everything below
-is what a human does once to turn it into evidence.
+`smoke.server.luau` beside this file is the Tier-2 gate. It runs only inside a real DataModel and is
+inert under Lune.
 
-> **Until the JSON line in step 4 exists, the honest status of this game is**
-> **`verified-local-T1 (logic only) — NOT engine-verified`.**
-> Never record T2-green without it. A missing line is a **FAIL**, not an "unrun" — that is the whole
-> reason the line prints last.
+> **STATUS: T2 is GREEN as of 2026-08-08** — 4/4 phases, driven from the agent over the Studio MCP
+> bridge against a real Player. Evidence: `last-smoke.json` beside this file; the full measurement
+> record is `tests/engine-pass/ENGINE-FACTS.md` (2026-08-08).
+>
+> Without that JSON line the honest status is `verified-local-T1 (logic only) — NOT engine-verified`.
+> A missing line is a **FAIL**, not an "unrun" — that is the whole reason the line prints last.
+
+## ⚠ READ THIS BEFORE FOLLOWING §3 — the by-hand procedure DOES NOT WORK
+
+**§3 below ("insert a Script, paste, press F5") fails, and always did.** Phase `boot-probe` reads the
+entrypoint's `.Source`, which needs the `PluginOrOpenCloud` capability. A capability belongs to the
+**thread**, not to the place, and a plain server `Script` does not have it:
+
+```
+The current thread cannot read 'Source' (lacking capability PluginOrOpenCloud)
+```
+
+`boot-probe` fails, and every later phase short-circuits on it — a 0/4 run. The `run-in-roblox` lane
+hid this for months by injecting its script *with* that capability, which is why `boot-probe` was
+green there and nowhere else. Meanwhile `core-loop` needs a real Player and an advancing `time()`,
+which `run-in-roblox`'s edit-mode lane does not have.
+
+**Exactly one lane can green all four phases: the MCP plugin thread inside a Play session.** Use §3a.
+`smoke.server.luau` auto-runs when mounted as a Script (so the `run-in-roblox` lane is unchanged) and
+*also* returns a `{ run }` handle for that lane.
+
+### §3a — the procedure that works (agent-driven)
+
+1. `rojo serve tests/tier2/t2.project.json --port 34872` from the repo root; confirm
+   `GET /api/rojo` reports `projectName: deep-reach` **before writing anything into the place**.
+2. From `execute_luau` (datamodel `Edit`): enable HTTP, `GET /api/read/<rootInstanceId>`, and rebuild
+   each mount. Rename any pre-existing collider `<Name>_PRE_EXISTING_<stamp>`; **never destroy what
+   this pass did not create** (tag what it does create, so a re-sync can replace its own work).
+3. Set **`ServerScriptService.Server.Disabled = true`** and **`T2Smoke.Disabled = true`**.
+   - `Server` off because with Studio API access ON (see §0) two bootstraps install two real
+     `SessionStore`s and steal each other's session lock. Disabling one boot removes the race the
+     same way the §0 setting would; the smoke supports it and reports *"this is the only boot"*.
+   - `T2Smoke` off because it must not run as a Script — see the capability wall above.
+4. `start_stop_play(true)`, wait for the Player to exist.
+5. From `execute_luau` (datamodel `Server`): copy `T2Smoke.Source` into a **ModuleScript**, `require`
+   it, and `task.spawn(smoke.run)`. Reading the mounted instance's own `Source` is what makes this
+   provably the script Rojo mounted, and it keeps 62KB off the wire. The capability survives
+   `task.spawn`, `coroutine.resume` and yields — all four measured.
+6. Poll, then `get_console_output` and take the single `{"tier":2` line. Continue at §4.
+
+**If API access is ON, the run uses the REAL `SessionStore`** (`persistenceDegraded = false`): a real
+session record and MemoryStore lock exist for the Studio user's UserId for the length of the run.
+Stop Play normally so `BindToClose` → `DataService.Stop` releases them.
 
 ---
 

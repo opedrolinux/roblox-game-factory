@@ -111,3 +111,80 @@ Also fixed there: the run recipe's `lune run -e` decode check, which **does not 
 
 Measurement 2 proves the lane RUNS a script. It proves nothing about the game: no smoke phases, no
 playtest phases, no screenshots. T2, T2.5 and T2.7 all remain `unrun` until their artifacts exist.
+
+## 2026-08-08 — T2 is GREEN, and the runbook it was written against could never have gone green
+
+Every line below is an experiment run in a live Studio session (place `tycoon-rgf`, placeId
+122922729769251), not a reading of a doc.
+
+### The capability wall — the reason `boot-probe` had never passed outside `run-in-roblox`
+
+Phase `boot-probe` reads `ServerScriptService.Server.Source` and parses the ordered service list out
+of it. That is the assertion keeping the boot order from being a hand-kept mirror — and it needs the
+`PluginOrOpenCloud` capability, which belongs to the **thread**, not to the place.
+
+| # | thread | `Server.Source` |
+|---|---|---|
+| 1 | a real server `Script` (what RUNBOOK §3 tells a human to create) | **refused** — `The current thread cannot read 'Source' (lacking capability PluginOrOpenCloud)` |
+| 2 | the MCP plugin thread (`execute_luau`, datamodel `Server`) | **readable, 6340 bytes** |
+| 3 | a `ModuleScript` **required from** the plugin thread | **readable** |
+| 4 | the same handle across `task.spawn` / `coroutine.resume` / after a yield | **readable in all three** — the capability is inherited, not consumed |
+
+So the runbook's own procedure — *insert a Script, paste 59KB, press F5* — fails `boot-probe`, and
+with it every later phase (they short-circuit on a failed boot). **It had never been executed.** The
+`run-in-roblox` lane hid this by injecting its script *with* that capability, which is exactly why
+`boot-probe` was green there and nowhere else. Measurement 1 is what a live server would also see.
+
+### The lane intersection
+
+|  | `boot-probe` (needs plugin capability) | `core-loop` (needs a real Player + advancing `time()`) |
+|---|---|---|
+| `run-in-roblox`, edit mode | ✅ | ❌ no Player, frozen mono clock |
+| Studio Play, as a `Script` | ❌ measurement 1 | ✅ |
+| **Studio Play, from the plugin thread** | **✅** | **✅** |
+
+The last row is the only lane that can green all four phases. `smoke.server.luau` now auto-runs when
+mounted as a Script (the `run-in-roblox` lane, unchanged) **and** hands back a `run` handle, so a
+plugin thread can `require` and drive it. Under Lune `script` is nil and neither branch fires.
+
+### Two deviations from RUNBOOK §0, recorded rather than glossed
+
+1. **Studio API access was ON.** `DataStoreService` and `MemoryStoreService` both answered
+   (`canPersist()` therefore returns true). §0 asks for it OFF so both bootstraps fall back to
+   MockStore and cannot steal each other's session lock — but that setting is not scriptable. The race
+   was removed the other way instead: `ServerScriptService.Server.Disabled = true`, so there is exactly
+   **one** bootstrap. The smoke supports this explicitly and said so: *"the place's own init.server
+   bootstrap did NOT boot within the budget (this is the only boot)"*.
+2. **The run therefore used the REAL `SessionStore`, not MockStore** — `persistenceDegraded = false`.
+   A real session record and a real MemoryStore lock existed for UserId 630638360 in
+   `DeepReachData_v1` for the length of the run, and Play was stopped normally so `BindToClose` →
+   `DataService.Stop` released it. That is a *stronger* T2 than §0 intended (the real persistence path
+   was exercised in-engine), but it is a side effect on a live DataStore and is named here for that
+   reason.
+
+### The green run — what it actually observed
+
+`boot-probe` 13 pass / 0 fail · `wire-present` 9/0 · `core-loop` 19/0 · `assert-no-error` 13/0.
+
+Not a shape check — the numbers moved:
+
+- subject was a **real Player** (`pedrolinux`, UserId 630638360), session loaded through the real
+  `DataService`; the 14-service boot order parsed straight out of the entrypoint's Source
+- 8 real seconds of smelter accrual on the real server clock → `salvage.collect` paid **4 Credits**,
+  and the **persisted `Types.toView` balance** rose with it
+- `structures.buy("drones")` charged the **server-derived** price 50 (balance 104 → 54), and the
+  income rate **another service** reports rose 0.5 → 1.0 Credits/s — the written-never-read pattern
+  asserted as a delta a second service can see, not as "a level incremented"
+- `depth.descend` and `resurface.do` answered their own documented gate refusals (`PrereqUnmet`),
+  not `Internal` — reachable and gated, which is the distinction that matters
+- **zero engine errors**; the rejection matrix returned the exact codes (`UnknownAction`, `BadType`,
+  `BadPayload` ×3 including the client-supplied-price and plot-hijack payloads, `RateLimited` off the
+  real Gate on the real clock over 11 dispatches, `NotOwner` from `Gate:assertOwner`)
+- all **33** Result envelopes remote-serializable
+
+### Still not proven by any of this
+
+A server script cannot cross the replication boundary, so the client wire and every pixel remain
+unverified — that is T2.7's job, and it is still `unrun`. `0 of 14` registered actions declare
+`ownerOf`, so `Net.dispatch`'s ownership step is dead code on the live wire; the phase says so and
+asserts `Gate:assertOwner` directly instead of pretending the wire covered it.

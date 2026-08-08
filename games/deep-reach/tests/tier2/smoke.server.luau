@@ -1408,19 +1408,47 @@ end
 -- than an abort that eats the verdict. The emit is the last statement in the file; there is no path
 -- that prints it early and no path that prints it twice.
 
-say("Deep Reach — Tier-2 in-engine smoke gate starting")
-say(
-	`RunService:IsRunning() = {tostring(RunService:IsRunning())}, players present = {#Players:GetPlayers()}`
-)
+local function runSmoke(): ()
+	say("Deep Reach — Tier-2 in-engine smoke gate starting")
+	say(
+		`RunService:IsRunning() = {tostring(RunService:IsRunning())}, players present = {#Players:GetPlayers()}`
+	)
 
-runPhase("boot-probe", phaseBootProbe)
-runPhase("wire-present", phaseWirePresent)
-runPhase("core-loop", phaseCoreLoop)
-runPhase("assert-no-error", phaseAssertNoError)
+	runPhase("boot-probe", phaseBootProbe)
+	runPhase("wire-present", phaseWirePresent)
+	runPhase("core-loop", phaseCoreLoop)
+	runPhase("assert-no-error", phaseAssertNoError)
 
-if logConnection ~= nil then
-	logConnection:Disconnect()
+	if logConnection ~= nil then
+		logConnection:Disconnect()
+	end
+
+	say("copy the single JSON line below and feed it to `smoke-gate` INGEST mode (see RUNBOOK.md)")
+	emitVerdict()
 end
 
-say("copy the single JSON line below and feed it to `smoke-gate` INGEST mode (see RUNBOOK.md)")
-emitVerdict()
+-- ── WHY THIS FILE IS BOTH A SCRIPT AND A MODULE (a MEASURED capability limit, not a preference) ──
+-- Phase `boot-probe` reads the entrypoint's `.Source` — the assertion that keeps the boot order from
+-- being a hand-kept mirror. Reading `Source` needs the `PluginOrOpenCloud` capability, and a capability
+-- belongs to the THREAD, not to the place. Measured on 2026-08-08 in a live Studio session:
+--
+--     a real server Script   -> "The current thread cannot read 'Source' (lacking capability
+--                               PluginOrOpenCloud)"   -- boot-probe FAILS, and every later phase with it
+--     the plugin thread      -> readable (6340 bytes)
+--     a ModuleScript REQUIRED from the plugin thread -> readable; and the capability survives
+--                               task.spawn, coroutine.resume and yields
+--
+-- So the RUNBOOK's original procedure — insert a Script, paste, press F5 — could never have gone
+-- green, and neither could any live server. The `run-in-roblox` lane hid it by injecting the script
+-- WITH that capability, which is exactly why it passed there and nowhere else. Meanwhile `core-loop`
+-- needs a real Player and an advancing `time()`, which `run-in-roblox`'s edit-mode lane does not have.
+-- The plugin thread inside a Play session is the ONLY lane that has both.
+--
+-- Hence: auto-run when mounted as a Script (the run-in-roblox lane, unchanged), and ALSO hand back a
+-- `run` handle so a plugin thread can require and drive it. Under Lune `script` is nil and neither
+-- branch fires, so the file stays inert there.
+if script ~= nil and not script:IsA("ModuleScript") then
+	runSmoke()
+end
+
+return { run = runSmoke }
