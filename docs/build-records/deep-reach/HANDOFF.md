@@ -68,7 +68,7 @@ because its screens phase genuinely failed on the scene, which is exactly what i
 | item | why it is yours |
 |---|---|
 | **The 7 monetization asset ids** (all `0`, all inert; the game warns by name at boot) | they can only be created on the published place |
-| **`git push`** — 4 commits on `staging/deep-reach` | fenced |
+| **`git push`** — `staging/deep-reach` is **60 commits** ahead of `main`, tree clean | fenced |
 | **Is it too dark when you zoom out?** | a taste judgement. Knobs named in `last-studio.json` → finding `scene-dark-at-zoom`; `world.spec` leaves headroom (Brightness ≤ 1.5, FogEnd ≤ 600) |
 | **HUD content truncates below ~820px viewport height** | unbuilt scope — panels no longer overlap, but the catalog needs to SCROLL |
 | **`FogEnd = 420` vs the spec's "legible from across the map"** | a real tension: you cannot see the far side of an 1152-stud world. Deliberate, and your call |
