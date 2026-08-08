@@ -2257,6 +2257,112 @@ describe("offline: an autosave that lands BEFORE the join hook cannot erase the 
 	end)
 end)
 
+-- ── 19b. THE WINDOW'S END IS PINNED TO THE SESSION LOAD, NOT TO WHOEVER ASKS FIRST ──────────────
+-- [REGRESSION — adversarial finding F1.] Section 19 pinned the window's START against the autosave
+-- that erases it. Its END was left un-pinned: the window was measured to `ctx.clock:unix()` AT THE
+-- MOMENT SOMETHING FIRST ASKED, and nothing guarantees that moment is the session load.
+-- `startRuntime.onAdded` discards prepareOnJoin's Result and never retries, so a hook that gives up
+-- (loadWaitAttempts x loadWaitStepSeconds of an unloaded session) leaves the first ask to the CLIENT
+-- — whose own budget is deliberately LONGER than the server's (section 21). The end of the away
+-- window then becomes client-scheduled, which is the one thing the whole feature refuses to allow.
+--
+-- The harm is a DOUBLE PAY, and the second payer is already in this harness. SalvageService arms a
+-- session on FIRST SIGHT — it stamps `smelter.lastTickUnix = now` and credits NOTHING, in its own
+-- words because "the span between the persisted stamp and now is the AWAY WINDOW, and it belongs
+-- exclusively to Offline accrual". From that arming instant the online tick pays that player per
+-- second. An away window ending LATER than the arming instant therefore OVERLAPS the online tick,
+-- and every second of the overlap is paid twice: once into the smelter, once inside the offline
+-- grant. Neither service can see it alone, which is why both are driven here.
+--
+-- These cases reproduce the original defect's shape exactly — join, arm, let time pass with NOTHING
+-- touching offline, then ask — because a cruder mutation (peeking at join, say) memoises the window
+-- and would prove nothing (docs/LEARNINGS.md: falsify against the ORIGINAL defect). Every span is
+-- kept under the fill point on purpose: a capped grant pays one smelter-full either way, so the cap
+-- would MASK the double-pay. That is also exactly why the exploit's yield is bounded rather than
+-- unbounded — the cap survives it — and why this is a correctness fix, not a panic.
+
+describe("offline: the away window ENDS at the session load, not at the first ask", function()
+	it("HEADLINE: seconds the smelter already paid are not paid AGAIN as away time", function()
+		local away = 200
+		local online = 150
+		-- NON-VACUITY: both spans and their sum must stay below the fill point, or the cap decides
+		-- the outcome and this case is green against the defect.
+		expect(away + online < CAP_SECONDS):toBe(true)
+
+		local h = newServer({ seed = seedAway({ { userId = 1, away = away } }) })
+		local player = h:join(1)
+
+		-- Salvage's join hook arms at the load instant: stamp, credit nothing.
+		local armed = SalvageService:armFor(h.startContext, player)
+		expect(armed):toBeOk()
+		expect((armed :: any).value.armed):toBe(true)
+		expect(h:blob(player).smelter.lastTickUnix):toBe(h.clock:unix())
+
+		-- The player is ONLINE for `online` seconds and the smelter pays for every one of them.
+		-- Offline's hook never ran — nothing has computed a window yet.
+		h.clock:advance(online)
+		expect(SalvageService:tickPlayer(h.startContext, player)):toBeOk()
+		expectAmount(h:blob(player).smelter.storedCredits, BASE_RATE * online)
+
+		-- NOW the client asks, for the first time. The window must be the one the player was away
+		-- for — not the one ending at this instant.
+		local info = (h:peek(player) :: any).value
+		expect(info.awaySeconds):toBe(away)
+		expectAmount(info.amount, BASE_RATE * away)
+
+		local before = h:snap(player)
+		local claimed = h:claim(player)
+		expect(claimed):toBeOk()
+		expectAmount((claimed :: any).value.amount, BASE_RATE * away)
+		expectAmount(h:snap(player).credits - before.credits, BASE_RATE * away)
+	end)
+
+	it("the two payers' spans ABUT: no second is inside both", function()
+		-- The invariant behind the headline, stated once as a relationship rather than as numbers:
+		-- the offline window ends no later than the instant the smelter's own clock starts.
+		local away = 300
+		local online = 100
+		expect(away + online < CAP_SECONDS):toBe(true)
+		local h = newServer({ seed = seedAway({ { userId = 2, away = away } }) })
+		local player = h:join(2)
+		expect(SalvageService:armFor(h.startContext, player)):toBeOk()
+		local armStamp = h:blob(player).smelter.lastTickUnix
+		h.clock:advance(online)
+
+		local info = (h:peek(player) :: any).value
+		expect(info.awaySeconds):toBe(away)
+		expect(info.lastSeenUnix + info.awaySeconds <= armStamp):toBe(true)
+	end)
+
+	it("a CLAIM that is the first ask after an unattended stretch pays the same window", function()
+		-- The client-first ordering, which is the one the discarded prepareOnJoin Result leaves
+		-- behind: JoinRetry re-issues the claim, and the claim itself computes the window.
+		local away = 250
+		local late = 200
+		expect(away + late < CAP_SECONDS):toBe(true)
+		local h = newServer({ seed = seedAway({ { userId = 3, away = away } }) })
+		local player = h:join(3)
+		h.clock:advance(late)
+		local before = h:snap(player)
+		expect(h:claim(player)):toBeOk()
+		expectAmount(h:snap(player).credits - before.credits, BASE_RATE * away)
+	end)
+
+	it("the pinned end does not shrink a window the join hook DID close on time", function()
+		-- The counter-direction. Pinning must not become a second way to lose the window: a hook that
+		-- ran at the load instant already measured to that instant, so the fix changes nothing here.
+		local away = 400
+		local h = newServer({ seed = seedAway({ { userId = 4, away = away } }) })
+		local player = h:join(4)
+		expect(h:prepare(player)):toBeOk()
+		local expected = math.min(BASE_RATE * away, BASE_CAPACITY)
+		expectAmount((h:peek(player) :: any).value.amount, expected)
+		local before = h:snap(player)
+		expect(h:claim(player)):toBeOk()
+		expectAmount(h:snap(player).credits - before.credits, expected)
+	end)
+end)
+
 -- ── 20. "nothing to claim" and "already claimed" are DIFFERENT answers ──────────────────────────
 -- [REGRESSION — adversarial finding F3.] The A5 read surface exists so the popup can show the player
 -- what their absence earned. `claimed` is its answer to "was this session's window already paid?" —

@@ -1,7 +1,10 @@
 --!strict
 -- games/deep-reach/src/server/services/offline/OfflineService.luau   [feature: offline accrual]
 --
--- THE authoritative owner of the AWAY WINDOW: the span `[timestamps.lastSeenUnix, ctx.clock:unix()]`,
+-- THE authoritative owner of the AWAY WINDOW: the span from `timestamps.lastSeenUnix` to the instant
+-- this session was INSTALLED (both ends snapshotted at load — see joinBaseFor / windowEndFor, and note
+-- that the end is NOT `ctx.clock:unix()` at compute time; measuring it there overlapped the online
+-- salvage tick and paid the overlap twice),
 -- what the drones produced across it, the smelter-capacity cap that bounds it, and the ONE-SHOT claim
 -- that pays it. Replaces the contract-pass stub in place, preserving every contract decision the stub
 -- pinned: the two action names (Net.Actions.ClaimOffline / Net.Actions.FetchOffline), their
@@ -312,7 +315,8 @@ export type Pending = {
 	rate: number,
 	awaySeconds: number,
 	lastSeenUnix: number, -- the base the window was measured from (SERVER stamp)
-	computedAtUnix: number, -- the SERVER instant the window was closed at
+	windowEndUnix: number, -- the SERVER instant the window CLOSES at (the session install)
+	computedAtUnix: number, -- the SERVER instant this record was computed — NOT the window's end
 }
 
 -- THE BASE THE WINDOW IS MEASURED FROM, and the reason this is not simply `data.timestamps
@@ -348,6 +352,46 @@ local function joinBaseFor(source: any, player: any, data: any): number
 	return 0
 end
 
+-- THE OTHER END OF THE WINDOW, and it is pinned for the same reason the base above is.
+--
+-- The window used to end at `ctx.clock:unix()` read AT COMPUTE TIME, which is whenever something
+-- first ASKED. Nothing makes that instant the session load. `startRuntime.onAdded` discards
+-- prepareOnJoin's Result and never retries, so a hook that gives up (loadWaitAttempts x
+-- loadWaitStepSeconds against an unloaded session) hands the first ask to the CLIENT — whose peek
+-- budget is deliberately longer than the server's. The end of the away window then becomes
+-- client-scheduled, which is exactly what NO CLIENT TIME ANYWHERE exists to prevent, reached without
+-- the client ever sending a number.
+--
+-- And it double-pays. SalvageService ARMS a session on first sight, stamping smelter.lastTickUnix =
+-- now and crediting nothing, precisely because that span "belongs exclusively to Offline accrual";
+-- from the arming instant its online tick pays this player per second. A window ending after the
+-- arming instant overlaps that tick, and every overlapping second is paid twice — once into the
+-- smelter, once inside this grant. Bounded by the capacity cap, so it is a correctness defect rather
+-- than an unbounded mint; bounded is not the same as absent.
+--
+-- Pinning to the session-install instant makes the window depend on NEITHER hook's schedule. The
+-- residual is a GAP, not an overlap: if Salvage arms a moment after the install, that sliver is paid
+-- by nobody. That is the correct failure direction and this file's stated one — pay nothing, never
+-- pay twice.
+--
+-- The fallback is the caller's `now`, i.e. the previous behaviour, for a source whose data layer has
+-- no such accessor (a spec's instrumented double, a foreign seam) — the same reasoning as
+-- joinBaseFor: narrowing to the accessor alone would turn every such caller into a window of zero.
+local function windowEndFor(source: any, player: any, nowUnix: number): number
+	local dataLayer = if type(source) == "table" then source.data else nil
+	if player ~= nil and dataLayer ~= nil and type(dataLayer.joinAtFor) == "function" then
+		local ok, joinedAt = pcall(function()
+			return dataLayer:joinAtFor(player)
+		end)
+		if ok and isUsableNumber(joinedAt) and joinedAt > 0 then
+			-- Never widen the window: a stamp AHEAD of now could only come from a clock that moved
+			-- backwards, and taking it would mint the difference.
+			return math.min(math.floor(joinedAt), nowUnix)
+		end
+	end
+	return nowUnix
+end
+
 -- Compute ONE session's away window from the loaded blob. PURE over (blob, clock, ctx.salvage): it
 -- writes nothing to the blob, stamps nothing and grants nothing — it only reads. That is what lets
 -- `offline.peek` share this path and still be strictly side-effect free (AMENDMENT A5).
@@ -367,7 +411,9 @@ function OfflineService.computePending(
 	end
 
 	local lastSeen = joinBaseFor(source, player, data)
-	local awaySeconds = self:awaySecondsFor(lastSeen, nowUnix)
+	-- BOTH ENDS COME FROM THE SESSION INSTALL, not from when this ran. See windowEndFor.
+	local windowEnd = windowEndFor(source, player, nowUnix)
+	local awaySeconds = self:awaySecondsFor(lastSeen, windowEnd)
 	local accrual = self:accrualFor(rate, awaySeconds, capacity)
 
 	local pending: Pending = {
@@ -380,6 +426,7 @@ function OfflineService.computePending(
 		rate = accrual.rate,
 		awaySeconds = accrual.awaySeconds,
 		lastSeenUnix = lastSeen,
+		windowEndUnix = windowEnd,
 		computedAtUnix = nowUnix,
 	}
 	return Result.ok(pending)

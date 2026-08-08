@@ -167,6 +167,15 @@ function DataService.loadSession(self: any, player: PlayerLike): Result<any>
 			session.joinBaseUnix = if type(timestamps) == "table"
 				then timestamps.lastSeenUnix
 				else nil
+			-- [offline join-race] ...AND THE OTHER END OF THE SAME WINDOW. The base above says when the
+			-- away window STARTED; this says when it ENDED. Both have to be pinned here for the same
+			-- reason: a reader that measures the end with its own `clock:unix()` measures to whenever
+			-- IT woke up, and no reader controls that. SalvageService starts paying this player per
+			-- second from the moment it arms (which is this instant), so an away window ending later
+			-- than this overlaps the online tick and every overlapping second is paid TWICE.
+			-- Server-clock only, written once, never advanced — same lifetime as joinBaseUnix, and
+			-- likewise not part of `session.data`, so it never reaches the DataStore.
+			session.joinAtUnix = clock:unix()
 			self._sessions[player.UserId] = session
 			-- [B2] a fresh session supersedes any dead marker (rejoin recovers).
 			self._dead[player.UserId] = nil
@@ -230,6 +239,21 @@ function DataService.joinBaseFor(self: any, player: PlayerLike): any
 		return nil
 	end
 	return session.joinBaseUnix
+end
+
+-- [offline join-race] The instant this player's CURRENT session was installed, on the server clock.
+-- The away window's END, and the companion to joinBaseFor above — see the comment at the write site.
+-- Returns nil when no session is installed, so a caller with no session falls back to its own clock
+-- rather than silently measuring from nothing.
+function DataService.joinAtFor(self: any, player: PlayerLike): any
+	if self._dead[player.UserId] then
+		return nil
+	end
+	local session = self._sessions[player.UserId]
+	if session == nil then
+		return nil
+	end
+	return session.joinAtUnix
 end
 
 -- Concurrency-safe mutation: transform runs under the session lock (Session:update).

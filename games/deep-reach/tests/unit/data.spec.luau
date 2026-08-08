@@ -139,6 +139,31 @@ describe("DataService load/get/update/save/release", function()
 		end
 	)
 
+	it("joinAtFor() pins the INSTALL instant and never advances with the clock", function()
+		-- [REGRESSION — adversarial finding F1.] The away window's END. Offline accrual and Salvage's
+		-- online tick meet at this instant: Salvage arms here and pays per second from here, so an
+		-- away window measured to any LATER reading overlaps it and the overlap is paid twice. The
+		-- accessor is what makes the end independent of when either hook wakes up, so the property
+		-- under test is that it does not move — not merely that it returns a number.
+		local clock = Mocks.clock(2000)
+		local config = testConfig(3)
+		local store = Mocks.store({ clock = clock, config = config })
+		local service = DataService.new(store, clock, config, Mocks.logWarn)
+		local player = Mocks.player(1)
+		expect(service:joinAtFor(player)):toBe(nil) -- no session: no instant to report
+		expect(service:loadSession(player)):toBeOk()
+		expect(service:joinAtFor(player)):toBe(2000)
+		clock:advance(600)
+		service:autosaveTick() -- the flush that rewrites lastSeenUnix must not touch this either
+		expect(service:joinAtFor(player)):toBe(2000)
+		-- A REJOIN is a new session and therefore a new instant, or the window would be priced from
+		-- a previous session's load forever.
+		service:onPlayerRemoving(player)
+		clock:advance(90)
+		expect(service:loadSession(player)):toBeOk()
+		expect(service:joinAtFor(player)):toBe(2690)
+	end)
+
 	it("save() retries per budget and SUCCEEDS once throttling clears", function()
 		local clock = Mocks.clock(1000)
 		local config = testConfig(5) -- generous budget
