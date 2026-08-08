@@ -16,6 +16,11 @@ local PlayerLifecycle = require(Server.framework.PlayerLifecycle)
 -- PROVIDES one, installs its ctx seam with the IDENTITY DEFAULT. Each feature builder replaces its
 -- own file in place; this registry does not change again during fan-out, which is the point —
 -- src/server/init.server.luau is the #1 union-merge conflict surface.
+-- [2026-08-08] WorldService owns the scene (Lighting/Atmosphere) and the game's ONE SpawnLocation.
+-- It is not a spec feature — it exists because `rojo build` produced a place with an empty Workspace
+-- and stock Lighting, and everything T2.7 saw in Workspace belonged to the Studio place the tree was
+-- synced into. Published from the built place, a joiner would have fallen through the origin forever.
+local WorldService = require(Server.services.world.WorldService)
 local DepthService = require(Server.services.depth.DepthService)
 local SalvageService = require(Server.services.salvage.SalvageService)
 local PlotService = require(Server.services.plot.PlotService)
@@ -74,6 +79,11 @@ local services = {
 	--   depth   provides valueMultiplier (salvage multiplies by it) + tierYFor (plot places by it)
 	--   salvage provides rateFor / capacityFor (offline caps its away-accrual by capacity)
 	--   plot    provides plotIdFor / rootFor / ownerOf
+	-- WorldService FIRST among the features: the light and the ground the game is played on should
+	-- exist before any player can be handed a dome (PlotService) or seated on one. It registers no
+	-- action, reads no seam, and is depended upon by nothing — the ordering is for the scene, not for
+	-- correctness.
+	WorldService,
 	DepthService,
 	SalvageService,
 	PlotService,

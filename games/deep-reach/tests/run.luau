@@ -36,6 +36,7 @@ local SPEC_PATHS = {
 	"./unit/framework.spec",
 	"./unit/hudroot.spec", -- [contract pass] the shared HUD root's slot layout
 	"./unit/joinretry.spec", -- [contract pass] the client join-race guard + its install seam
+	"./unit/layout.spec", -- [2026-08-08] the shared ring/floor geometry BOTH plot and depth derive from
 	"./unit/leaderboard.spec", -- [feature: leaderboard] the independent gate's spec-derived tests
 	"./unit/lifecycle.spec", -- [A10b] the pinned PlayerRemoving order (analytics -> plot -> data)
 	"./unit/migration.spec",
@@ -50,6 +51,7 @@ local SPEC_PATHS = {
 	"./unit/structures.spec", -- [feature: structures shop] the independent gate's spec-derived tests
 	"./unit/session_lock.spec",
 	"./unit/validation.spec",
+	"./unit/world.spec", -- [2026-08-08] the scene + the game's one SpawnLocation (the place had none)
 }
 table.sort(SPEC_PATHS) -- belt-and-suspenders determinism (concern 10)
 

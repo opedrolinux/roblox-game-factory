@@ -131,16 +131,18 @@
 -- [D1 shim] src/shared maps to ReplicatedStorage.Shared in Roblox — a DIFFERENT Rojo service root
 -- than this ServerScriptService module — so the relative string cannot reach it there; require by
 -- instance. Under Lune (script == nil) the filesystem path resolves.
-local Net, Result, Types
+local Net, Result, Types, Layout
 if script == nil then
 	Net = require("../../../shared/Net")
 	Result = require("../../../shared/Result")
 	Types = require("../../../shared/Types")
+	Layout = require("../../../shared/Layout")
 else
 	local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 	Net = require((Shared :: any).Net)
 	Result = require((Shared :: any).Result)
 	Types = require((Shared :: any).Types)
+	Layout = require((Shared :: any).Layout)
 end
 
 local DepthService = {}
@@ -1090,9 +1092,31 @@ end
 
 local TRENCH_FOLDER_NAME = "DeepReachTrenches"
 local WRECK_NAME = "RichWreck"
--- Wide enough to sit under PlotService's whole dome ring (radius ~183 studs for a 12-dome server plus
--- a 64-stud pad), so every plot on every tier has a floor rather than a void.
-local SHELL_SPAN_STUDS = 640
+-- The floor's span is DERIVED from the dome ring, never typed in.
+--
+-- It used to be `local SHELL_SPAN_STUDS = 640`, with a comment asserting it was "wide enough to sit
+-- under PlotService's whole dome ring (radius ~183 studs for a 12-dome server plus a 64-stud pad),
+-- so every plot on every tier has a floor rather than a void." Both halves of that were wrong the
+-- moment the registry stopped being 12 domes: the count is Players.MaxPlayers, so a 60-seat server
+-- put every dome 597 studs PAST this slab's edge, over open void — the exact condition the comment
+-- claimed to prevent. Nothing caught it because the number lived here and the ring lived there, and
+-- each service's specs asserted only its own constant.
+--
+-- `Layout.floorSpanFor` reads the SAME plot count from the SAME source PlotService sizes its
+-- registry from, so the two can no longer drift. `depth.spec` asserts the floor covers the ring at
+-- every count up to the 200 ceiling — the assertion that never existed.
+local function shellSpanFor(): number
+	local realGame: any = game
+	if realGame ~= nil then
+		local ok, maxPlayers = pcall(function()
+			return realGame:GetService("Players").MaxPlayers
+		end)
+		if ok then
+			return Layout.floorSpanFor(Layout.plotCountFor(maxPlayers))
+		end
+	end
+	return Layout.floorSpanFor(Layout.plotCountFor(nil))
+end
 local SHELL_THICKNESS_STUDS = 4
 -- The shell's TOP surface must meet the bottom of a dome pad parked at the tier's Y. PlotService's
 -- pad is 2 studs thick and pivots at the tier Y, so its underside is `y - 1`.
@@ -1137,6 +1161,7 @@ function DepthService.buildShell(_self: any, folder: any, tier: Tier): any
 	if existing ~= nil then
 		return existing
 	end
+	local span = shellSpanFor()
 
 	local model = instanceGlobal.new("Model")
 	model.Name = name
@@ -1144,7 +1169,7 @@ function DepthService.buildShell(_self: any, folder: any, tier: Tier): any
 	local slab = instanceGlobal.new("Part")
 	slab.Name = "Floor"
 	slab.Anchored = true
-	slab.Size = vector3Global.new(SHELL_SPAN_STUDS, SHELL_THICKNESS_STUDS, SHELL_SPAN_STUDS)
+	slab.Size = vector3Global.new(span, SHELL_THICKNESS_STUDS, span)
 	slab.Position =
 		vector3Global.new(0, tier.y - SHELL_TOP_GAP_STUDS - SHELL_THICKNESS_STUDS / 2, 0)
 	slab.Color = shellColorFor(color3Global, tier.index)
@@ -1159,7 +1184,7 @@ function DepthService.buildShell(_self: any, folder: any, tier: Tier): any
 	rim.CanCollide = false
 	rim.Shape = enumGlobal.PartType.Cylinder
 	-- A cylinder's length runs along X, so it is laid flat by rotating it a quarter turn about Z.
-	rim.Size = vector3Global.new(2, SHELL_SPAN_STUDS * 0.62, SHELL_SPAN_STUDS * 0.62)
+	rim.Size = vector3Global.new(2, span * 0.62, span * 0.62)
 	rim.CFrame = cframeGlobal.new(0, tier.y + 1, 0) * cframeGlobal.Angles(0, 0, math.rad(90))
 	rim.Color = color3Global.fromRGB(64, 226, 255)
 	rim.Material = enumGlobal.Material.Neon

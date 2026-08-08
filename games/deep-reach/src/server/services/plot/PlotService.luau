@@ -87,16 +87,18 @@
 -- [D1 shim] src/shared maps to ReplicatedStorage.Shared in Roblox — a DIFFERENT service root than this
 -- ServerScriptService module — so the relative string cannot reach it there; require by instance.
 -- Under Lune (script == nil) the filesystem path resolves.
-local Net, Result, Types
+local Net, Result, Types, Layout
 if script == nil then
 	Net = require("../../../shared/Net")
 	Result = require("../../../shared/Result")
 	Types = require("../../../shared/Types")
+	Layout = require("../../../shared/Layout")
 else
 	local Shared = game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 	Net = require((Shared :: any).Net)
 	Result = require((Shared :: any).Result)
 	Types = require((Shared :: any).Types)
+	Layout = require((Shared :: any).Layout)
 end
 
 local PlotService = {}
@@ -113,24 +115,25 @@ PlotService.name = "PlotService"
 -- type into it re-creates the exact bug this comment names: the place sells 60 seats, the registry
 -- stands up 50 domes, and joiners 51-60 are refused with a correct-looking Unavailable. The ring
 -- layout scales its radius with n (see positionFor), so a larger registry costs nothing but Parts.
-local DEFAULT_PLOT_COUNT = 12
-local MIN_PLOT_COUNT = 4
-local MAX_PLOT_COUNT = 200
+--
+-- [2026-08-08] The registry size and the RING GEOMETRY now come from `shared/Layout`, and this
+-- service no longer owns either. It owned them alone until DepthService's trench floor — sized from
+-- a private constant of its own, against an assumed 12-dome server — stopped reaching the ring the
+-- moment MaxPlayers exceeded ~21, leaving every dome floating over open void. Two services deriving
+-- one world from two private copies of the geometry is the defect; one shared module is the fix.
+local DEFAULT_PLOT_COUNT = Layout.DEFAULT_PLOT_COUNT
+local MAX_PLOT_COUNT = Layout.MAX_PLOT_COUNT
 
 -- The world Y a dome sits at when the ctx.depth seam is absent (Depth tiers is a later batch) — the
 -- surface tier, matching DepthService's own TIER_1_Y identity default. Not a magic fallback: a fresh
 -- player IS at tier 1, so this is the value the common path produces.
 local DEFAULT_TIER_Y = 0
 
--- Ring layout. Domes are laid out on a circle around the origin so every plot is reachable, none
--- overlaps, and the whole ring descends as one when Depth moves each root's Y.
-local RING_SPACING_STUDS = 96
-local MIN_RING_RADIUS_STUDS = 160
-
 -- Greybox dimensions (art posture: "100% greybox-in-code for v1: domes = Parts + transparency").
-local PAD_SIZE_STUDS = 64
-local PAD_THICKNESS_STUDS = 2
-local DOME_DIAMETER_STUDS = 56
+-- Aliases, not copies — see the note on the registry size above.
+local PAD_SIZE_STUDS = Layout.PAD_SIZE_STUDS
+local PAD_THICKNESS_STUDS = Layout.PAD_THICKNESS_STUDS
+local DOME_DIAMETER_STUDS = Layout.DOME_DIAMETER_STUDS
 
 -- Names other code resolves by. `plotId` IS the dome Model's name, so a client that knows the id can
 -- find the model with one FindFirstChild and needs no second lookup table.
@@ -456,10 +459,7 @@ end
 -- Clamp a MaxPlayers reading into a sane registry size. Separate from `build` so a spec can build a
 -- ONE-dome server and reach the Unavailable path deliberately.
 function PlotService.plotCountFor(_self: any, maxPlayers: any): number
-	if type(maxPlayers) == "number" and maxPlayers == maxPlayers and maxPlayers >= 1 then
-		return math.clamp(math.floor(maxPlayers), MIN_PLOT_COUNT, MAX_PLOT_COUNT)
-	end
-	return DEFAULT_PLOT_COUNT
+	return Layout.plotCountFor(maxPlayers)
 end
 
 function PlotService.desiredPlotCount(self: any): number
@@ -525,17 +525,27 @@ end
 
 -- PURE ring layout: plain numbers, no Vector3/CFrame (both nil under Lune), so a spec asserts the
 -- placement math — and specifically that Y IS THE PERSISTED TIER'S Y — with no engine.
+-- The math itself lives in shared/Layout because DepthService sizes the trench floor from the SAME
+-- numbers; this stays as the service's named entry point so callers and specs are unchanged.
 function PlotService.positionFor(
 	_self: any,
 	index: number,
 	count: number,
 	tierY: number
 ): (number, number, number)
-	local n = math.max(1, math.floor(count))
-	local i = math.clamp(math.floor(index), 1, n)
-	local radius = math.max(MIN_RING_RADIUS_STUDS, (n * RING_SPACING_STUDS) / (2 * math.pi))
-	local angle = ((i - 1) / n) * 2 * math.pi
-	return radius * math.cos(angle), tierY, radius * math.sin(angle)
+	return Layout.positionFor(index, count, tierY)
+end
+
+-- Where a CHARACTER goes to be standing on this dome's pad. Distinct from `positionFor`, which
+-- answers where the dome MODEL is pivoted: pivoting a character to the model's origin drops them
+-- inside the pad, half a stud of solid part below its own top face.
+function PlotService.standPositionFor(
+	_self: any,
+	index: number,
+	count: number,
+	tierY: number
+): (number, number, number)
+	return Layout.standPositionFor(index, count, tierY)
 end
 
 -- Move this player's dome root to its ring slot at `tierY`. Called on EVERY claim — first claim and
@@ -561,6 +571,42 @@ function PlotService.placeFor(self: any, player: any, tierY: number): boolean
 	local x, y, z = self:positionFor(record.index, #plots, tierY)
 	local ok = pcall(function()
 		root:PivotTo(cframeGlobal.new(x, y, z))
+	end)
+	return ok
+end
+
+-- Put this player's CHARACTER on their own dome's pad. Called after a successful claim and on every
+-- respawn thereafter.
+--
+-- WHY THIS EXISTS: the engine spawns everyone at the arrival platform in the ring's centre. Without
+-- this the HUD says "DOME 1 · secured" while the dome is a dot on the horizon and the player has to
+-- cross the whole ring radius on foot to reach it — measured at 917 studs in the T2.7 pass. The
+-- concentric-ring layout cut that radius, but "walk to your own dome" was never the intent at any
+-- distance, and after a DESCENT the dome is at a different Y entirely, where there is no walking to
+-- it at all.
+--
+-- Returns false, never throws, whenever there is nothing to seat (no claim, no character, no
+-- engine) — under Lune every one of those is the normal case.
+function PlotService.seatFor(self: any, player: any, tierY: number): boolean
+	local plotId = PlotSeam:plotIdFor(player)
+	if plotId == nil then
+		return false
+	end
+	local record = plotById[plotId]
+	if record == nil then
+		return false
+	end
+	local character: any = player.Character
+	if character == nil then
+		return false
+	end
+	local cframeGlobal: any = CFrame
+	if cframeGlobal == nil then
+		return false
+	end
+	local x, y, z = self:standPositionFor(record.index, #plots, tierY)
+	local ok = pcall(function()
+		character:PivotTo(cframeGlobal.new(x, y, z))
 	end)
 	return ok
 end
@@ -707,6 +753,11 @@ function PlotService.acquire(self: any, ctx: any, player: any): any
 
 	-- (7) The world is DERIVED from the persisted facts, and only after they are durable.
 	self:placeFor(player, tierY)
+	-- ...and so is where the player is standing. Seating AFTER placeFor is load-bearing: the pad has
+	-- to be at the tier's Y before a character is pivoted onto it, or they are dropped at the old Y
+	-- and fall. A character that does not exist yet (the common join case — the claim resolves before
+	-- CharacterAdded) is handled by the CharacterAdded hook in startRuntime instead.
+	self:seatFor(player, tierY)
 
 	return Result.ok(self:describe(record, nowUnix, tierY))
 end
@@ -993,14 +1044,40 @@ function PlotService.startRuntime(self: any, context: any): ()
 		self:claimOnJoin(context, player)
 	end
 
+	-- Seat a character that appeared AFTER the claim resolved — the join case (the engine spawns the
+	-- character while claimOnJoin is still waiting on loadSession) and every respawn after a death.
+	-- Reads the tier from the PERSISTED blob through the same seam `acquire` uses, so a player who
+	-- dies at Depth 4 respawns at Depth 4 rather than at the surface.
+	local function onCharacter(player: any): ()
+		local got = context.data:get(player)
+		if not got.ok then
+			return -- not loaded yet: the claim path seats them when it resolves
+		end
+		self:seatFor(player, tierYFor(context, got.value))
+	end
+
+	local function watchCharacters(player: any): ()
+		if player.Character ~= nil then
+			onCharacter(player)
+		end
+		table.insert(
+			self._connections,
+			player.CharacterAdded:Connect(function(): ()
+				onCharacter(player)
+			end)
+		)
+	end
+
 	-- Players already present (a Studio Play session installs scripts after the local player joins).
 	-- Spawned: awaitLoaded yields and the bootstrap must not block on it.
 	for _, player in Players:GetPlayers() do
+		watchCharacters(player)
 		task.spawn(onAdded, player)
 	end
 	table.insert(
 		self._connections,
 		Players.PlayerAdded:Connect(function(player: any)
+			watchCharacters(player)
 			task.spawn(onAdded, player)
 		end)
 	)
