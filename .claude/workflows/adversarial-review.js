@@ -101,6 +101,9 @@ let round = 0
 let huntersRun = 0
 let huntersDead = 0
 let abandoned = false
+// Findings a hunter surfaced and NO skeptic ever ruled on. Tracked separately from `confirmed`
+// because they are not refuted — they are unexamined, and the difference is the whole product here.
+const unadjudicated = []
 
 while (round < maxRounds && dryRounds < dryRoundsToStop) {
   round++
@@ -183,12 +186,31 @@ Read the cited code + the surrounding guards (the validate(), the lock-held tran
     )
   )
 
-  const newlyConfirmed = verdicts.filter(Boolean).filter((x) => x.verdict && x.verdict.refuted === false)
+  // A SKEPTIC THAT DIED IS NOT A SKEPTIC THAT REFUTED. The hunter half of this loop learned that
+  // lesson (see the block above); the verify half had not, and it cost a whole round on deep-reach
+  // 2026-08-07: seven verifiers died to a spend limit, `.filter(Boolean)` dropped their findings, and
+  // every one of them was recorded as though a skeptic had looked and found nothing wrong. Worse than
+  // a dropped hunter, because these are findings a hunter ALREADY surfaced — the pipeline had them in
+  // hand and threw them away marked "refuted". `refuted === false` is the only thing that confirms;
+  // everything else must be told apart from a genuine refutation.
+  const adjudicated = verdicts.filter((x) => x && x.verdict && typeof x.verdict.refuted === 'boolean')
+  const unadjudicatedThisRound = fresh.filter((f) => !adjudicated.some((x) => x.finding === f))
+  const newlyConfirmed = adjudicated.filter((x) => x.verdict.refuted === false)
   for (const x of newlyConfirmed) confirmed.push({ ...x.finding, verification: x.verdict.reasoning, severityIfReal: x.verdict.severityIfReal })
-  log(`adversarial-review round ${round}: ${newlyConfirmed.length} CONFIRMED (real) of ${fresh.length} candidate(s); ${fresh.length - newlyConfirmed.length} refuted.`)
+  for (const f of unadjudicatedThisRound) unadjudicated.push({ ...f, round, why: 'the skeptic verifying this finding did not return a verdict (died / errored). It is NEITHER confirmed NOR refuted.' })
+  if (unadjudicatedThisRound.length > 0) {
+    log(`adversarial-review round ${round}: ${unadjudicatedThisRound.length} finding(s) were NEVER ADJUDICATED — their skeptic died. They are not refuted; nobody looked. [${unadjudicatedThisRound.map((f) => f.title.slice(0, 60)).join(' | ')}]`)
+  }
+  log(`adversarial-review round ${round}: ${newlyConfirmed.length} CONFIRMED (real) of ${fresh.length} candidate(s); ${adjudicated.length - newlyConfirmed.length} refuted; ${unadjudicatedThisRound.length} unadjudicated.`)
 
+  // Only a round whose findings were ALL adjudicated may bank a dry round. "No new confirmed exploits"
+  // means nothing when the reason none were confirmed is that the skeptics never ran.
   if (newlyConfirmed.length === 0) {
-    dryRounds++
+    if (unadjudicatedThisRound.length === 0) {
+      dryRounds++
+    } else {
+      log(`adversarial-review round ${round}: nothing newly confirmed, but ${unadjudicatedThisRound.length} finding(s) went unadjudicated — NOT counting this as a dry round.`)
+    }
   } else {
     dryRounds = 0
   }
@@ -198,7 +220,10 @@ const bySeverity = (s) => confirmed.filter((c) => (c.severityIfReal || c.severit
 // CONVERGED means the loop stopped because it genuinely stopped finding things: it banked its dry
 // rounds (or exhausted maxRounds) with every lens alive throughout. Anything else is TRUNCATED, and
 // `clean` is then a statement about what was looked at, not about the game.
-const converged = !abandoned && huntersDead === 0
+// Convergence requires that every lens LOOKED *and* every thing they found was RULED ON. A run with
+// unadjudicated findings has strictly less standing than a clean one: it is holding suspected
+// exploits nobody examined.
+const converged = !abandoned && huntersDead === 0 && unadjudicated.length === 0
 const coverage = {
   converged,
   abandoned,
@@ -208,6 +233,7 @@ const coverage = {
   roundsRun: round,
   dryRoundsBanked: dryRounds,
   dryRoundsRequired: dryRoundsToStop,
+  unadjudicatedCount: unadjudicated.length,
 }
 log(`adversarial-review ${converged ? 'CONVERGED' : 'TRUNCATED'} after ${round} round(s); hunters run ${huntersRun}, died ${huntersDead}. CONFIRMED exploits: ${confirmed.length} (critical:${bySeverity('critical')} high:${bySeverity('high')} medium:${bySeverity('medium')} low:${bySeverity('low')}).${converged ? ' Orchestrator fixes falsify-first.' : ' THIS REVIEW IS INCOMPLETE — re-run the lost rounds before reading `clean` as a pass.'}`)
 
@@ -215,6 +241,10 @@ return {
   gameDir,
   rounds: round,
   confirmed,
+  // Neither confirmed nor refuted: a hunter found these and no skeptic ever ruled. They must be
+  // re-verified before anyone reads this review as a pass, and they must never be silently merged
+  // into `confirmed` (that would launder an unexamined claim into a finding) or dropped.
+  unadjudicated,
   // `clean` now means "converged AND found nothing" — it can no longer be true of a run that was cut
   // short, because a truncated review has no standing to certify anything.
   clean: converged && confirmed.length === 0,
