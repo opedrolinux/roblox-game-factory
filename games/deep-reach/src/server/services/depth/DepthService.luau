@@ -1105,17 +1105,23 @@ local WRECK_NAME = "RichWreck"
 -- `Layout.floorSpanFor` reads the SAME plot count from the SAME source PlotService sizes its
 -- registry from, so the two can no longer drift. `depth.spec` asserts the floor covers the ring at
 -- every count up to the 200 ceiling — the assertion that never existed.
-local function shellSpanFor(): number
+-- The SAME registry size PlotService sizes its dome ring from, read from the SAME source. Everything
+-- geometric in this file derives from this one number.
+local function plotCount(): number
 	local realGame: any = game
 	if realGame ~= nil then
 		local ok, maxPlayers = pcall(function()
 			return realGame:GetService("Players").MaxPlayers
 		end)
 		if ok then
-			return Layout.floorSpanFor(Layout.plotCountFor(maxPlayers))
+			return Layout.plotCountFor(maxPlayers)
 		end
 	end
-	return Layout.floorSpanFor(Layout.plotCountFor(nil))
+	return Layout.plotCountFor(nil)
+end
+
+local function shellSpanFor(): number
+	return Layout.floorSpanFor(plotCount())
 end
 local SHELL_THICKNESS_STUDS = 4
 -- The shell's TOP surface must meet the bottom of a dome pad parked at the tier's Y. PlotService's
@@ -1178,18 +1184,45 @@ function DepthService.buildShell(_self: any, folder: any, tier: Tier): any
 	slab.BottomSurface = enumGlobal.SurfaceType.Smooth
 	slab.Parent = model
 
-	local rim = instanceGlobal.new("Part")
-	rim.Name = "Rim"
-	rim.Anchored = true
-	rim.CanCollide = false
-	rim.Shape = enumGlobal.PartType.Cylinder
-	-- A cylinder's length runs along X, so it is laid flat by rotating it a quarter turn about Z.
-	rim.Size = vector3Global.new(2, span * 0.62, span * 0.62)
-	rim.CFrame = cframeGlobal.new(0, tier.y + 1, 0) * cframeGlobal.Angles(0, 0, math.rad(90))
-	rim.Color = color3Global.fromRGB(64, 226, 255)
-	rim.Material = enumGlobal.Material.Neon
-	rim.Transparency = 0.75
-	rim.Parent = model
+	-- THE TIER BOUNDARY, built as an actual RING.
+	--
+	-- It was one Part with `Shape = Cylinder` — and a Roblox cylinder is a SOLID DISC, not a ring.
+	-- At radius 576, centred on the origin, on all six tiers, that is a translucent fullbright neon
+	-- sheet lying over the ENTIRE trench, and every player stands underneath one. Measured in a live
+	-- Play session on 2026-08-08: hiding those six Parts and re-shooting removed a cyan wash that had
+	-- covered the bottom 40% of the frame. Nothing below T2.7 could see it — no log, no probe, no
+	-- rect measurement — and the arithmetic looks perfectly reasonable in source.
+	--
+	-- It was survivable only by accident before: the old single ring put the domes at radius 917,
+	-- OUTSIDE the old 387-stud disc, so players stood beyond its edge. Bounding the ring moved them
+	-- inside it. A defect that was always there, revealed by making the world smaller.
+	--
+	-- Segments, because Roblox has no annulus primitive and v1 ships no external assets.
+	local rimRadius = Layout.rimDiameterFor(plotCount()) / 2
+	local segments = Layout.RIM_SEGMENTS
+	local rimFolder = instanceGlobal.new("Folder")
+	rimFolder.Name = "Rim"
+	rimFolder.Parent = model
+	for i = 1, segments do
+		local angle = ((i - 1) / segments) * 2 * math.pi
+		local segment = instanceGlobal.new("Part")
+		segment.Name = `RimSegment{i}`
+		segment.Anchored = true
+		segment.CanCollide = false
+		-- Long axis along local Z, so `Angles(0, -angle, 0)` lays it along the tangent. Slightly
+		-- longer than the exact chord so neighbouring segments meet rather than leave 24 gaps.
+		local chord = 2 * rimRadius * math.sin(math.pi / segments) * 1.02
+		segment.Size = vector3Global.new(Layout.RIM_THICKNESS_STUDS, Layout.RIM_HEIGHT_STUDS, chord)
+		segment.CFrame = cframeGlobal.new(
+			rimRadius * math.cos(angle),
+			tier.y + Layout.RIM_HEIGHT_STUDS / 2,
+			rimRadius * math.sin(angle)
+		) * cframeGlobal.Angles(0, -angle, 0)
+		segment.Color = color3Global.fromRGB(64, 226, 255)
+		segment.Material = enumGlobal.Material.Neon
+		segment.Transparency = 0.35
+		segment.Parent = rimFolder
+	end
 
 	model.PrimaryPart = slab
 	model.Parent = folder

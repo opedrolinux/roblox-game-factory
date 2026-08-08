@@ -157,6 +157,28 @@ function Layout.floorSpanFor(count: any): number
 	return math.min(2 * (edge + Layout.FLOOR_MARGIN_STUDS), Layout.MAX_PART_STUDS)
 end
 
+-- The decorative tier rim's DIAMETER. It must ring the trench OUTSIDE the domes and inside the
+-- floor's edge — it is a boundary marker, and a boundary marker that passes through the things it
+-- bounds is just a glowing disc cutting the map in half.
+--
+-- MEASURED 2026-08-08, in a live Play session: the rim was `span * 0.62`, a ratio tuned when the
+-- floor was a fixed 640 studs and the dome ring sat at 917 — far outside it. Deriving the floor from
+-- the ring moved the floor IN and the rim with it, to radius 387, which reaches rings 1, 2 and 3.
+-- The tell was the humanoid reporting `FloorMaterial = Neon` while standing on a Plastic pad: the
+-- rim was intersecting the pad it was drawn over. Anchoring the rim between the outermost pad edge
+-- and the floor's edge makes it correct at every count instead of at one.
+-- The tier rim is built from SEGMENTS, because Roblox's cylinder primitive is a solid disc and a
+-- "rim" drawn as one is a neon sheet over the whole trench (measured live, 2026-08-08 — see
+-- DepthService.buildShell). 24 reads as circular at these radii; more is only cost.
+Layout.RIM_SEGMENTS = 24
+Layout.RIM_THICKNESS_STUDS = 3
+Layout.RIM_HEIGHT_STUDS = 3
+
+function Layout.rimDiameterFor(count: any): number
+	local edge = Layout.outerRadiusFor(count) + Layout.PAD_SIZE_STUDS / 2
+	return math.min(2 * (edge + Layout.FLOOR_MARGIN_STUDS / 2), Layout.MAX_PART_STUDS)
+end
+
 function Layout.floorCoversRing(count: any): boolean
 	local needed = 2 * (Layout.outerRadiusFor(count) + Layout.PAD_SIZE_STUDS / 2)
 	return needed <= Layout.MAX_PART_STUDS

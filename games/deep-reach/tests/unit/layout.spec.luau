@@ -42,6 +42,25 @@ describe("layout: the dome ring is bounded, and the floor always reaches it", fu
 		end
 	end)
 
+	it("the tier rim rings the domes from OUTSIDE, never through them", function()
+		-- Found live, not by reading code: the humanoid reported `FloorMaterial = Neon` while
+		-- standing on a Plastic pad, because the rim — sized `span * 0.62`, a ratio tuned when the
+		-- floor was a fixed 640 and the ring sat far outside it — had moved in to radius 387 and was
+		-- intersecting rings 1, 2 and 3. A boundary marker must not pass through what it bounds.
+		for count = 1, Layout.MAX_PLOT_COUNT do
+			local rim = Layout.rimDiameterFor(count) / 2
+			local outerPadEdge = Layout.outerRadiusFor(count) + Layout.PAD_SIZE_STUDS / 2
+			if rim <= outerPadEdge then
+				error(
+					`count={count}: rim radius {rim} is inside the outermost pad edge {outerPadEdge}`
+				)
+			end
+			-- ...and inside the floor it is drawn on, or it hangs over open water.
+			expect(rim <= Layout.floorSpanFor(count) / 2):toBe(true)
+			expect(Layout.rimDiameterFor(count) <= Layout.MAX_PART_STUDS):toBe(true)
+		end
+	end)
+
 	it("the floor never exceeds Roblox's per-axis Part ceiling", function()
 		-- A slab wider than 2048 studs THROWS at world build, in the engine and nowhere else — so a
 		-- layout that "covers the ring" by asking for an impossible Part is not a fix.
@@ -195,6 +214,32 @@ local function readDepthService(): string
 		`layout.spec: DepthService not found from this cwd: {table.concat(DEPTH_CANDIDATES, ", ")}`
 	)
 end
+
+describe("layout: the tier rim is a RING, not a disc over the whole trench", function()
+	it("its segments close the circle without gaps", function()
+		for _, count in COUNTS do
+			local radius = Layout.rimDiameterFor(count) / 2
+			local chord = 2 * radius * math.sin(math.pi / Layout.RIM_SEGMENTS) * 1.02
+			-- Total segment length must cover the circumference, or the ring is a dotted line.
+			expect(chord * Layout.RIM_SEGMENTS >= 2 * math.pi * radius):toBe(true)
+			-- ...and each segment must be far shorter than the diameter, which is what makes this a
+			-- ring at all: one segment spanning the circle IS the disc, wearing a different name.
+			expect(chord < radius):toBe(true)
+		end
+	end)
+
+	it("DepthService builds the rim from segments and not from a cylinder", function()
+		-- THE DEFECT THIS NAMES: `Shape = PartType.Cylinder` at rim scale is a SOLID DISC covering
+		-- the entire play area — a translucent neon sheet over the whole trench, on every tier. It
+		-- was found by hiding six Parts in a live session and re-shooting, and by nothing else.
+		local source = readDepthService()
+		expect(string.find(source, "Layout.RIM_SEGMENTS", 1, true) ~= nil):toBe(true)
+		expect(string.find(source, "RimSegment", 1, true) ~= nil):toBe(true)
+		-- The rim must not be a cylinder. Anchored to the assignment, not the bare word, so the
+		-- comment explaining the defect does not trip it.
+		expect(string.find(source, "rim.Shape = enumGlobal.PartType.Cylinder", 1, true)):toBe(nil)
+	end)
+end)
 
 describe("layout: DepthService derives its floor, never types one in", function()
 	it("the trench slab is sized from shared/Layout and not from a literal", function()

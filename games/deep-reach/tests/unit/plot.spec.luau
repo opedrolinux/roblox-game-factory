@@ -808,6 +808,28 @@ end)
 
 -- ── 8. AMENDMENT A1 — placement at the PERSISTED tier ───────────────────────────────────────────
 
+describe("plot: a lit pad is an accent, not a floodlight", function()
+	it("the lit pad colour stays under the Neon blowout ceiling", function()
+		-- Found in a screenshot from the player's own eye height, and nowhere else: Neon is
+		-- fullbright, so RGB(64,226,255) across a 64-stud deck turned the pad into a light source
+		-- and filled half the frame with flat cyan. No log, no probe and no rect measurement can
+		-- see that -- but the number behind it is assertable, and this is the assertion.
+		local lit = PlotService.PAD_LIT_RGB
+		local dark = PlotService.PAD_DARK_RGB
+		expect(#lit):toBe(3)
+		for _, channel in lit do
+			expect(channel <= PlotService.PAD_LIT_MAX_CHANNEL):toBe(true)
+		end
+		-- ...and it must still be COLD and BRIGHTER than an unclaimed pad, or "your dome lights up"
+		-- stops being legible at all -- which is the opposite failure and just as bad.
+		expect(lit[3] > lit[1]):toBe(true)
+		expect(lit[2] >= lit[1] and lit[2] <= lit[3]):toBe(true)
+		local litSum = lit[1] + lit[2] + lit[3]
+		local darkSum = dark[1] + dark[2] + dark[3]
+		expect(litSum > darkSum):toBe(true)
+	end)
+end)
+
 describe("plot: AMENDMENT A1 — the dome starts at the persisted tier's Y", function()
 	it("positionFor puts Y exactly at the tier Y and never overlaps two pads", function()
 		for _, tierY in { 0, -450.5, -1200, 88 } do

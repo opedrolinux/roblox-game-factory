@@ -293,6 +293,18 @@ end
 -- Pad lighting — "a free dome plot is claimed for you at Depth 1 and its pad lights up" (core loop,
 -- step 1). Cosmetic only, and pcall-guarded: a presentation failure must never break the occupancy
 -- bookkeeping it is describing.
+--
+-- The lit colour is DARK on purpose, and it is a table rather than a literal inside the pcall so a
+-- spec can assert it. Neon is fullbright: RGB(64,226,255) across a 64-stud deck made the pad a light
+-- source rather than a lit surface, and a screenshot from the player's own eye height was half flat
+-- blown-out cyan — in a game whose whole look is "bioluminescent accents against DARK water". A dark
+-- teal still glows, still reads as claimed from across the map alongside the pad's PointLight, and
+-- leaves the water dark enough for the accents to be accents.
+PlotService.PAD_LIT_RGB = { 18, 70, 92 }
+PlotService.PAD_DARK_RGB = { 38, 44, 52 }
+-- Neon's glow scales with its colour, so the brightest channel is the number that decides whether
+-- this is an accent or a floodlight. `plot.spec` holds it under this ceiling.
+PlotService.PAD_LIT_MAX_CHANNEL = 120
 local function setPadLit(record: PlotRecord, lit: boolean): ()
 	local pad = record.pad
 	if pad == nil then
@@ -305,10 +317,18 @@ local function setPadLit(record: PlotRecord, lit: boolean): ()
 	end
 	pcall(function()
 		if lit then
-			pad.Color = color3Global.fromRGB(64, 226, 255)
+			pad.Color = color3Global.fromRGB(
+				PlotService.PAD_LIT_RGB[1],
+				PlotService.PAD_LIT_RGB[2],
+				PlotService.PAD_LIT_RGB[3]
+			)
 			pad.Material = enumGlobal.Material.Neon
 		else
-			pad.Color = color3Global.fromRGB(48, 56, 64)
+			pad.Color = color3Global.fromRGB(
+				PlotService.PAD_DARK_RGB[1],
+				PlotService.PAD_DARK_RGB[2],
+				PlotService.PAD_DARK_RGB[3]
+			)
 			pad.Material = enumGlobal.Material.Slate
 		end
 		local light = pad:FindFirstChildOfClass("PointLight")
@@ -941,6 +961,20 @@ local function buildDome(folder: any, record: PlotRecord): ()
 		or vector3Global == nil
 		or enumGlobal == nil
 	then
+		return
+	end
+
+	-- IDEMPOTENT BY NAME, the way DepthService.buildShell already was. ADOPT an existing dome rather
+	-- than building a second one on top of it: a place SAVED with a previously-built world — which is
+	-- what Studio holds after any verification pass — otherwise boots into a duplicate set. Measured
+	-- 2026-08-08: 60 plots produced 120 stacked domes, and every one of the duplicates was invisible
+	-- to `record.model`, so nothing on the server could see or free them.
+	local adopted = folder:FindFirstChild(record.id)
+	if adopted ~= nil then
+		record.model = adopted
+		local shell = adopted:FindFirstChild(SHELL_FOLDER_NAME)
+		record.pad = if shell ~= nil then shell:FindFirstChild("Pad") else nil
+		setPadLit(record, record.ownerUserId ~= nil)
 		return
 	end
 
