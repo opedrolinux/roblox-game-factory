@@ -53,6 +53,52 @@ this session's two days. The adversarial review is the single most expensive pha
 third of the total** — and it is the one that got cut off. That is not a coincidence: it is the only
 phase whose agent count is **unbounded by design**.
 
+### 2026-08-07 — the re-run, and the same wall
+
+The owed re-run went the full three rounds. It also hit the monthly limit, in the same phase:
+
+| phase | agents | subagent tokens | wall clock |
+|---|---:|---:|---:|
+| **adversarial review (re-run)** | **32** (7 died) | **5,947,020** | **67m** |
+| smoke-gate (author the T2 in-engine smoke) | 1 | 251,642 | 16m |
+
+**Cumulative ≈ 16.4M subagent tokens, ~142 agents.** The re-run alone cost 1.7× the first attempt and
+**36% of the whole build**. The shape predicted it exactly: round 1 surfaced a lot, so round 1 spawned
+a skeptic per finding; the hunt half was 12 agents and the verify half was 20.
+
+Two things this measurement settles for the discussion below.
+
+**A per-run cap would not have helped, and a per-PHASE budget would have.** The limit was hit at agent
+25 of 32 — inside the verify half of round 3. Nothing was watching the phase's own spend, so the phase
+did not slow down, shed lenses, or stop early; it kept spawning until the account said no. A budget the
+phase could *read* (`budget.remaining()`) could have run rounds 1–2 fully and then declined to open
+round 3 rather than opening it and dying halfway through.
+
+**Dying halfway is worse than not starting.** The 7 deaths were all skeptics, and the review recorded
+`converged: true` anyway — a dead skeptic was indistinguishable from a refutation (fixed in `5fe19c8`;
+see the pattern note in "Fixed already"). An unbudgeted phase does not fail cleanly at the boundary; it
+fails *in the middle of adjudicating*, which is the most expensive place to be interrupted, because
+the finding was already paid for by the hunter.
+
+### What the rest of this game costs, split by whether it needs fan-out
+
+Worth recording because it is the first time the split has been priced, and it is roughly half:
+
+| remaining step | mechanism | subagent tokens |
+|---|---|---:|
+| fix the 4 confirmed exploits | main session | **0** |
+| T2 Play-mode run over the Studio bridge | main session | **0** |
+| T2.7 `/engine-pass` | main session | **0** |
+| handoff + portfolio + docs | main session | **0** |
+| re-adjudicate the 7 dropped findings | resume-from-cache | ~0.7–1.4M |
+| T2.5 `playtest-pass` (author + falsify + run) | 4+ agents, falsify loops the engine lane | ~1.5–3M |
+| `grade.js` | 2 agents | ~0.3–0.5M |
+
+The main-session rungs are not cheap *versions* of the workflow rungs — T2.7 is the highest automatable
+rung there is, and it costs nothing in fan-out because one agent drives Studio directly. When a budget
+runs out, the honest move is not to skip verification; it is to prefer the verification that does not
+fan out.
+
 ## Why this phase is the expensive one
 
 Every other phase has a fixed shape. Fan-out is `features × (1 builder + 4 gate agents)`. The
@@ -128,6 +174,15 @@ while (budget.total && budget.remaining() > 50_000) { ... }
   `converged && confirmed.length === 0` — a truncated review has no standing to certify anything.
 - **`build-features.js` reports `criticsMissing`** for the same reason, from the same root cause
   (depth's bug-hunter died mid-stream and its gate silently rested on 2 of 3 critics).
+- **`adversarial-review.js` can no longer count a dead SKEPTIC as a refutation** (`5fe19c8`,
+  2026-08-07). The fix above hardened the hunt half; the verify half still dropped dead verifiers
+  through `.filter(Boolean)`, so seven findings in the re-run were recorded as though a skeptic had
+  examined them and found nothing wrong. `unadjudicated[]` is now returned separately (never merged
+  into `confirmed`, which would launder an unexamined claim; never dropped), a round holding one
+  cannot bank a dry round, and `converged` requires the count to be zero.
+- **`playtest-pass.js` ran for the first time ever** (`105b4da`, 2026-08-07) — it called `Date.now()`
+  at module scope, which throws in a workflow script, so it had been aborting at load with no phase,
+  no agent and no diagnostic. Free to find, and it had silently blocked the entire T2.5 rung.
 
 ## The standing rule this all points at
 
@@ -135,9 +190,22 @@ while (budget.total && budget.remaining() > 50_000) { ... }
 nothing" and "never looked" are the same JSON unless the script is built to tell them apart — and
 under a spend limit, "never looked" is the *likely* case, not the exotic one.
 
+Three occurrences in, the rule has a sharper form. It is not "check the aggregation expression",
+which is what the first two fixes looked like in isolation. It is: **every stage that can fail needs a
+state distinct from the stage succeeding and finding nothing, and that state has to survive all the
+way into the verdict.** Critics, hunters, skeptics — same defect, three places, because each was
+fixed as an incident instead of as a class.
+
 ## Re-run owed
 
-The Deep Reach adversarial review is **INCOMPLETE**: lenses `time-gate`, `server-authority`,
-`dupe-replay` and `economy-race` each got exactly one round instead of converging. Round 1's single
-confirmed finding is recorded and fixed, but the sweep did not finish. This must be re-run before the
-game is called adversarially clean.
+**Round 1 of the original run** — lenses `time-gate`, `server-authority`, `dupe-replay` and
+`economy-race` each got one round instead of converging. ✅ **Done 2026-08-07**: the re-run went the
+full three rounds, 12 hunters, all alive, and confirmed **four** exploits (1 high, 2 medium, 1 low)
+where the truncated run had found one.
+
+**Still owed: the seven findings whose skeptics died in round 3 of the re-run.** They are neither
+confirmed nor refuted — nobody looked. `resumeFromRunId: 'wf_7d303062-2f6'` replays the 25 agents that
+succeeded from cache and re-runs only those seven, which is why this is the cheapest owed item on the
+board (~0.7–1.4M) rather than another 5.9M sweep. **The game is not adversarially clean until they are
+ruled on**, and `coverage.unadjudicatedCount` now says so in the result rather than leaving it to a
+reader to notice.
