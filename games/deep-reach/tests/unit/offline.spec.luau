@@ -2363,6 +2363,74 @@ describe("offline: the away window ENDS at the session load, not at the first as
 	end)
 end)
 
+-- ── 19c. THE DURABLE WRITE THAT PAYS THE WINDOW MUST ALSO CONSUME IT ────────────────────────────
+-- [REGRESSION — adversarial finding F2.] This service deliberately does not stamp
+-- timestamps.lastSeenUnix itself, and the header states exactly why it is safe not to: "BOTH durable
+-- writers stamp lastSeenUnix = now as part of the same write that persists the granted Credits. So
+-- the grant and the advance of the base are durably atomic, and an ungraceful crash loses both
+-- together rather than paying the window twice."
+--
+-- There was a THIRD durable writer, and it did not stamp: `DataService.save`, whose only caller is
+-- MonetizationService.flush on the REAL-MONEY receipt path. A receipt landing after an offline claim
+-- persisted the granted Credits and left the away window intact in the same record — so the two
+-- halves the header calls atomic came apart, in the direction that pays rather than the direction
+-- that loses. A crash before the next stamping write (there is no BindToClose on an evicted
+-- instance) leaves a durable record holding both the payment and the claim on it.
+--
+-- WHAT THIS CANNOT DRIVE, STATED RATHER THAN IMPLIED: the crash itself. MockStore keeps the key held
+-- once a session is live (deliberately — it mirrors SessionStore), so a second server cannot load the
+-- same record inside a Lune spec. The property asserted here is the one that makes the rejoin safe:
+-- after the receipt-path write, the record no longer describes a window anyone can be paid for. That
+-- is the same falsification-of-premise idiom section 19 uses in the opposite direction.
+
+describe("offline: a durable save consumes the window it just paid for", function()
+	it("HEADLINE: after the receipt-path save, the record owes nothing", function()
+		local away = 600
+		local h = newServer({ seed = seedAway({ { userId = 1, away = away } }) })
+		local player = h:join(1)
+		local expected = math.min(BASE_RATE * away, BASE_CAPACITY)
+
+		local before = h:snap(player)
+		local claimed = h:claim(player)
+		expect(claimed):toBeOk()
+		expectAmount((claimed :: any).value.amount, expected)
+		expectAmount(h:snap(player).credits - before.credits, expected)
+
+		-- NON-VACUITY: before the durable write the record still describes the window — so the
+		-- assertion below distinguishes "the save consumed it" from "it was never there".
+		local owedBefore =
+			OfflineService:computePending(h.startContext, h:blob(player), h.clock:unix())
+		expect(owedBefore):toBeOk()
+		expectAmount((owedBefore :: any).value.amount, expected)
+
+		-- The receipt path's durable write (MonetizationService.flush calls exactly this).
+		expect(h.data:save(player)):toBeOk()
+
+		-- What a fresh server would compute from the persisted record: nothing left to pay.
+		local owedAfter =
+			OfflineService:computePending(h.startContext, h:blob(player), h.clock:unix())
+		expect(owedAfter):toBeOk()
+		expect((owedAfter :: any).value.amount):toBe(0)
+		expect(h:blob(player).timestamps.lastSeenUnix):toBe(h.clock:unix())
+	end)
+
+	it("the grant and the base advance in the SAME durable write, or neither does", function()
+		-- The atomicity the header claims, asserted as a relationship. A save that persisted the
+		-- credits and left the base behind is the split this finding is about; a save that advanced
+		-- the base without the credits would be its mirror image and is equally red here.
+		local away = 600
+		local h = newServer({ seed = seedAway({ { userId = 2, away = away } }) })
+		local player = h:join(2)
+		local baseBefore = h:blob(player).timestamps.lastSeenUnix
+		local creditsBefore = h:blob(player).currencies.Credits
+		expect(h:claim(player)):toBeOk()
+		expect(h.data:save(player)):toBeOk()
+		local after = h:blob(player)
+		expect(after.currencies.Credits > creditsBefore):toBe(true)
+		expect(after.timestamps.lastSeenUnix > baseBefore):toBe(true)
+	end)
+end)
+
 -- ── 20. "nothing to claim" and "already claimed" are DIFFERENT answers ──────────────────────────
 -- [REGRESSION — adversarial finding F3.] The A5 read surface exists so the popup can show the player
 -- what their absence earned. `claimed` is its answer to "was this session's window already paid?" —

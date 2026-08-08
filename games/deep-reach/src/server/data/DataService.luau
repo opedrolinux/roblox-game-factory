@@ -289,11 +289,38 @@ function DataService.save(self: any, player: PlayerLike): Result<any>
 	return saved
 end
 
+-- [offline join-race] EVERY DURABLE WRITE ADVANCES THE OFFLINE BASE. One decision, in the two
+-- funnels every durable write passes through, rather than at each call site.
+--
+-- OfflineService's claim deliberately writes only currencies.Credits + stats.lifetimeCredits, on the
+-- stated grounds that the durable writers stamp lastSeenUnix "as part of the same write that persists
+-- the granted Credits", so "the grant and the advance of the base are durably atomic and an ungraceful
+-- crash loses both together rather than paying the window twice". That was true of finishJoin,
+-- autosaveTick, onPlayerRemoving and Stop — and NOT of `save`, whose only caller is
+-- MonetizationService.flush on the real-money receipt path. A receipt landing after an offline claim
+-- persisted the payment and left the claim on it standing in the same record.
+--
+-- Stamping at the funnel is what keeps the sentence true for the NEXT durable writer too: a call site
+-- added later inherits it instead of having to remember it. The four call-site stamps above are now
+-- redundant; they are left where they are because each one also documents the ordering of its own
+-- path, and a redundant stamp with the same clock reading is a no-op.
+--
+-- Guarded rather than assumed: this is the funnel for every save in the game, and a blob whose
+-- `timestamps` failed to migrate must still be persisted, not lost to an index error in the stamp.
+function DataService.stampLastSeen(self: any, session: any): ()
+	local data = if type(session) == "table" then session.data else nil
+	if type(data) ~= "table" or type(data.timestamps) ~= "table" then
+		return
+	end
+	data.timestamps.lastSeenUnix = self._clock:unix()
+end
+
 -- Internal: save one session with budget-aware retry. Returns the final Result; on exhaustion
 -- the Err surfaces (logged data-loss-risk by the caller), never silently dropped.
 -- [B2 H2/D4] LockStolen is PERMANENT (the new owner is authoritative): retrying it wastes the
 -- budget and starves other flushes during Stop — terminal, the CALLER tears the session down.
 function DataService.saveSession(self: any, session: any): Result<any>
+	self:stampLastSeen(session)
 	local maxRetries = self._config.dataStore.maxRetries
 	local attempt = 0
 	while true do
@@ -335,6 +362,7 @@ end
 -- progress to one transient throttle, and it is the most frequent durable write in a live game.
 -- LockStolen stays terminal (the new owner is authoritative; retrying is pure waste).
 function DataService.releaseSession(self: any, session: any): Result<any>
+	self:stampLastSeen(session) -- see stampLastSeen: every durable write, not just most of them
 	local maxRetries = self._config.dataStore.maxRetries
 	local attempt = 0
 	while true do

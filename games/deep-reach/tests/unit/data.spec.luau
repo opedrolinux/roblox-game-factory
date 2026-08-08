@@ -164,6 +164,33 @@ describe("DataService load/get/update/save/release", function()
 		expect(service:joinAtFor(player)):toBe(2690)
 	end)
 
+	it("save() advances the offline base with the record it persists", function()
+		-- [REGRESSION — adversarial finding F2.] Every OTHER durable writer stamps
+		-- timestamps.lastSeenUnix as part of the same write — finishJoin, autosaveTick,
+		-- onPlayerRemoving, Stop. `save` did not, and `save` is the receipt path
+		-- (MonetizationService.flush is its only caller). OfflineService's claim deliberately does
+		-- not stamp the base itself, on the stated grounds that "BOTH durable writers stamp
+		-- lastSeenUnix = now as part of the same write that persists the granted Credits, so the
+		-- grant and the advance of the base are durably atomic". A third durable writer that
+		-- persisted the grant WITHOUT advancing the base made that sentence false: the away window
+		-- survives in the durable record next to the credits it already paid for.
+		local clock = Mocks.clock(2000)
+		local config = testConfig(3)
+		local store = Mocks.store({ clock = clock, config = config })
+		local service = DataService.new(store, clock, config, Mocks.logWarn)
+		local player = Mocks.player(1)
+		expect(service:loadSession(player)):toBeOk()
+		clock:advance(600)
+		expect(service:update(player, function(d)
+			d.currencies.Credits += 250 -- the offline grant, committed in memory
+			return d
+		end)):toBeOk()
+		expect(service:save(player)):toBeOk()
+		local got = service:get(player)
+		expect((got :: any).value.currencies.Credits):toBe(250)
+		expect((got :: any).value.timestamps.lastSeenUnix):toBe(2600)
+	end)
+
 	it("save() retries per budget and SUCCEEDS once throttling clears", function()
 		local clock = Mocks.clock(1000)
 		local config = testConfig(5) -- generous budget
