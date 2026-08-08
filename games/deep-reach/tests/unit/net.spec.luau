@@ -158,4 +158,43 @@ describe("Net.dispatch", function()
 			registry:register(echoAction())
 		end):toThrow()
 	end)
+
+	-- ── SHUTDOWN QUIESCE ─────────────────────────────────────────────────────────────────────────
+	-- The adversarial review's HIGH finding: on BindToClose, `Bootstrap.stop` tears services down in
+	-- reverse order while the gateway keeps dispatching, because nothing ever unbinds it. Inside that
+	-- window a service has been Stopped — its in-RAM guards cleared — and its action handler is still
+	-- reachable from the wire, holding `self`. For OfflineService that is catastrophic: `_pending` is
+	-- the ONLY one-shot guard the away window has, `Stop` clears it, and `DataService.Stop` runs
+	-- afterwards and persists, so a claim landing in the window re-pays the whole session DURABLY.
+	--
+	-- The fix belongs on the REGISTRY rather than in NetServer, because NetServer is Roblox-only
+	-- wiring no Lune test can construct — and the mock harness deliberately runs the SAME pure
+	-- Net.dispatch, so a gate here is a gate on both runtimes and cannot drift between them.
+	it(
+		"a quiesced registry refuses every action — a stopped service's handler is unreachable",
+		function()
+			local harness = Mocks.net({ clock = Mocks.clock(1000), gate = false })
+			harness.register(echoAction())
+			local player = Mocks.player(1)
+			expect(harness.invoke("test.echo", player, { n = 1 })):toBeOk()
+
+			harness.registry:quiesce()
+
+			-- The action still EXISTS and is still registered. What changed is that the gateway will no
+			-- longer carry a client into it.
+			expect(harness.registry:get("test.echo") ~= nil):toEqual(true)
+			expect(harness.invoke("test.echo", player, { n = 1 })):toBeErr(Result.Codes.Unavailable)
+			-- Refused BEFORE the unknown-action check, so shutdown does not masquerade as a typo.
+			expect(harness.invoke("no.such.action", player, {})):toBeErr(Result.Codes.Unavailable)
+		end
+	)
+
+	it("quiesce is one-way — nothing re-opens the wire mid-teardown", function()
+		local registry = Net.newRegistry()
+		expect(registry:isQuiesced()):toEqual(false)
+		registry:quiesce()
+		expect(registry:isQuiesced()):toEqual(true)
+		registry:quiesce()
+		expect(registry:isQuiesced()):toEqual(true)
+	end)
 end)

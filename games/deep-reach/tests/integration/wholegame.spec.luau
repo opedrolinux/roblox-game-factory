@@ -2111,3 +2111,118 @@ describe(
 		end)
 	end
 )
+
+describe("[integration] the BindToClose window — a stopped service is off the wire", function()
+	-- The adversarial review's HIGH finding, reproduced end to end.
+	--
+	-- Bootstrap.stop tears down in reverse order, so OfflineService.Stop runs while the gateway is
+	-- still dispatching and DataService.Stop (which persists) has not run yet. OfflineService.Stop
+	-- clears `_pending` — the ONLY one-shot guard the away window has — and `ensurePending` then
+	-- recomputes the window from `joinBaseFor`, which DataService pins at load and never advances.
+	-- So a claim arriving inside that window re-pays the whole session, and DataService.Stop makes it
+	-- durable. It also inflates stats.lifetimeCredits, which is the leaderboard's ranking key.
+	it("offline.claim during teardown is refused, and the guard is load-bearing", function()
+		-- OfflineService is a MODULE SINGLETON and this is the only test in the suite that calls its
+		-- Stop, so it is the only one that can leave the module in a torn-down state for whatever runs
+		-- next. Snapshot every field Start/Stop own and put them back, rather than trying to name the
+		-- one that leaks: an earlier attempt restored `_players` alone, left two unrelated offline
+		-- specs failing, and cost a real detour in which the FIX was the prime suspect and was
+		-- innocent. Removing this describe block alone turned the suite green again, which is what
+		-- settled it.
+		local savedPending = OfflineService._pending
+		local savedClaiming = OfflineService._claiming
+		local savedContext = OfflineService._context
+		local savedPlayers = OfflineService._players
+
+		-- ── PART 1: the ORIGINAL defect, with the wire left open. This half must keep failing if the
+		-- fix is ever removed by a different route than deleting the quiesce call — it is what proves
+		-- the guard below is doing real work rather than passing vacuously.
+		local exposed = newGame()
+		local victim = exposed:join(1)
+		exposed:leave(victim)
+		exposed.clock:advance(4 * HOUR_SECONDS)
+		local back = exposed:join(1)
+		local firstClaim = exposed:invoke(Net.Actions.ClaimOffline, back, nil)
+		expect(firstClaim):toBeOk()
+		local paidOnce = exposed:credits(back)
+		expectGreater(paidOnce, 0, "the away window paid nothing, so this test proves nothing")
+
+		-- Teardown reaches OfflineService while the wire is still open (the pre-fix world).
+		-- NOTE: OfflineService is a MODULE SINGLETON, so Stop mutates state every later spec shares.
+		-- Both halves of this test re-Start it before returning; leaving it stopped made two unrelated
+		-- offline specs fail, and the first suspect was the fix rather than the test.
+		OfflineService:Stop(exposed.context)
+		local replay = exposed:invoke(Net.Actions.ClaimOffline, back, nil)
+		expectTrue(
+			replay.ok == true,
+			"EXPECTED THE DEFECT: with the gateway still open, clearing _pending must let the away "
+				.. "window be claimed a SECOND time. If this now refuses, the exploit is being stopped "
+				.. "somewhere else and the assertion below is no longer evidence for the quiesce."
+		)
+		expectGreater(
+			exposed:credits(back),
+			paidOnce,
+			"the replayed claim paid nothing — the double-pay this test guards against cannot be "
+				.. "reproduced, so the guard below is unfalsified"
+		)
+
+		-- ── PART 2: the same teardown, with Bootstrap's quiesce pass in front of it.
+		local guarded = newGame()
+		local player = guarded:join(2)
+		guarded:leave(player)
+		guarded.clock:advance(4 * HOUR_SECONDS)
+		local rejoined = guarded:join(2)
+		expect(guarded:invoke(Net.Actions.ClaimOffline, rejoined, nil)):toBeOk()
+		local settled = guarded:credits(rejoined)
+
+		-- What Bootstrap.stop now does, in its order: quiesce EVERY service first, then Stop.
+		guarded.registry:quiesce()
+		OfflineService:Stop(guarded.context)
+
+		local refused = guarded:invoke(Net.Actions.ClaimOffline, rejoined, nil)
+		expect(refused):toBeErr(Result.Codes.Unavailable)
+		expect(guarded:credits(rejoined)):toBe(settled)
+
+		-- Put the singleton back exactly as it was found (see the snapshot at the top). NOT by calling
+		-- Start again — that re-registers the actions and throws "already registered".
+		OfflineService._pending = savedPending
+		OfflineService._claiming = savedClaiming
+		OfflineService._context = savedContext
+		OfflineService._players = savedPlayers
+		-- And empty the ROSTERS. This is the only test in the file that finishes with players still
+		-- online, and the injected `_players` seams stay bound to this game after it ends — so a later
+		-- spec's tick/prune pass walks a foreign roster that happens to share userId 1.
+		SalvageService._players = nil
+		LeaderboardService._players = nil
+	end)
+
+	it("quiesce closes the WHOLE wire, not just the action that motivated it", function()
+		-- The fix is at the seam precisely so it does not have to be reasoned about per service. Every
+		-- other action a stopped service owns is in the same danger; this pins that they all close.
+		local g = newGame()
+		local player = g:join(3)
+		expect(g:invoke(Net.Actions.FetchSalvage, player, nil)):toBeOk()
+		g.registry:quiesce()
+		for _, action in
+			{
+				Net.Actions.FetchSalvage,
+				Net.Actions.CollectSmelter,
+				Net.Actions.ClaimPlot,
+				Net.Actions.BuyStructure,
+				Net.Actions.ClaimDaily,
+				Net.Actions.Descend,
+			}
+		do
+			expect(g:invoke(action, player, nil)):toBeErr(Result.Codes.Unavailable)
+		end
+
+		-- Same hygiene as the test above, and it is not optional: leaving a player ONLINE in the
+		-- injected rosters is what made two unrelated offline specs fail, because the seams stay bound
+		-- to this game after the test ends and a later spec's tick then walks a foreign roster that
+		-- happens to share a userId. Bisecting the two tests in this block is what found it.
+		g:leave(player)
+		SalvageService._players = nil
+		OfflineService._players = nil
+		LeaderboardService._players = nil
+	end)
+end)

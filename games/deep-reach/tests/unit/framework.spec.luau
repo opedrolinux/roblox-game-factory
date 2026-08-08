@@ -25,6 +25,78 @@ describe("framework/Bootstrap", function()
 		expect(order):toEqual({ "a", "b", "c" })
 	end)
 
+	-- The adversarial review's HIGH finding, at the framework seam. Reverse-order teardown is right,
+	-- but it is not enough on its own: while it runs, the inbound gateway is still dispatching into
+	-- services that have ALREADY been stopped and have already dropped their in-RAM guards. Stopping
+	-- the wire cannot be just another Stop, because reverse order puts the gateway near the END —
+	-- exactly the wrong place. Quiesce is a separate, earlier pass over every service.
+	it("Quiesce runs on EVERY service before ANY Stop runs", function()
+		local log: { string } = {}
+		local function makeService(name: string, quiesces: boolean)
+			local service: any = {
+				name = name,
+				Start = function() end,
+				Stop = function()
+					table.insert(log, "stop:" .. name)
+				end,
+			}
+			if quiesces then
+				service.Quiesce = function()
+					table.insert(log, "quiesce:" .. name)
+				end
+			end
+			return service
+		end
+		-- `gateway` sits FIRST in start order, so reverse-order teardown would stop it LAST — after
+		-- every service whose handlers it is still carrying clients into.
+		local services = {
+			makeService("gateway", true),
+			makeService("offline", false),
+			makeService("data", false),
+		}
+		Bootstrap.stop(Bootstrap.start(services, {}), {})
+
+		local firstStop: number? = nil
+		local quiesced: number? = nil
+		for i, entry in log do
+			if quiesced == nil and entry == "quiesce:gateway" then
+				quiesced = i
+			end
+			if firstStop == nil and string.sub(entry, 1, 5) == "stop:" then
+				firstStop = i
+			end
+		end
+		expect(quiesced ~= nil):toEqual(true)
+		expect(firstStop ~= nil):toEqual(true)
+		expect((quiesced :: number) < (firstStop :: number)):toEqual(true)
+		expect(log):toEqual({ "quiesce:gateway", "stop:data", "stop:offline", "stop:gateway" })
+	end)
+
+	it("a Quiesce that throws does not abort the teardown it precedes", function()
+		local stopped: { string } = {}
+		local bad: any = {
+			name = "bad",
+			Start = function() end,
+			Quiesce = function()
+				error("quiesce blew up")
+			end,
+			Stop = function()
+				table.insert(stopped, "bad")
+			end,
+		}
+		local good: any = {
+			name = "good",
+			Start = function() end,
+			Stop = function()
+				table.insert(stopped, "good")
+			end,
+		}
+		Bootstrap.stop(Bootstrap.start({ bad, good }, {}), {})
+		-- Both still stopped. A shutdown that aborts halfway leaves sessions unpersisted, which is
+		-- worse than the thing Quiesce is defending against.
+		expect(stopped):toEqual({ "good", "bad" })
+	end)
+
 	it("runs Stop in REVERSE order; missing Stop is a no-op", function()
 		local order: { string } = {}
 		local function makeService(name: string, withStop: boolean)

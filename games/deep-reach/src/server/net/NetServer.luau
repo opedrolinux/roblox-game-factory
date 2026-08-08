@@ -118,4 +118,16 @@ function NetServer.Start(self: any, _context: any): ()
 	end
 end
 
+-- Quiesce (BindToClose, called by Bootstrap.stop BEFORE any service Stop). Closes the inbound wire
+-- so no client request reaches a service that is about to lose its in-RAM guards.
+--
+-- It sets the registry flag rather than clearing `OnServerInvoke`, for two reasons. Clearing the
+-- callback makes a client's invoke ERROR instead of returning a typed Result, so the last thing a
+-- player sees on a shutdown is an exception rather than a refusal. And the flag is on the object the
+-- Lune harness also drives, so this path cannot drift from the one the tests cover — NetServer itself
+-- is Roblox-only wiring that no Tier-1 test can construct.
+function NetServer.Quiesce(self: any, _context: any): ()
+	self._registry:quiesce()
+end
+
 return NetServer

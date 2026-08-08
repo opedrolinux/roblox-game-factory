@@ -89,6 +89,9 @@ export type Registry = {
 	register: <TIn, TOut>(self: Registry, action: Action<TIn, TOut>) -> (),
 	get: (self: Registry, name: string) -> Action<any, any>?,
 	names: (self: Registry) -> { string },
+	-- Shutdown. One-way: the wire closes and never re-opens within a server's life.
+	quiesce: (self: Registry) -> (),
+	isQuiesced: (self: Registry) -> boolean,
 }
 
 local Net = {}
@@ -159,6 +162,7 @@ Net.Actions = {
 -- Creates a fresh, empty registry (one per server; tests create throwaway ones).
 function Net.newRegistry(): Registry
 	local actions: { [string]: Action<any, any> } = {}
+	local quiesced = false
 
 	local registry = {}
 
@@ -186,6 +190,31 @@ function Net.newRegistry(): Registry
 		return out
 	end
 
+	-- SHUTDOWN. `quiesce` closes the inbound wire; the registry keeps every action (nothing is
+	-- unregistered), it simply stops carrying clients into them.
+	--
+	-- It exists because teardown has a window nothing else covers. `Bootstrap.stop` runs Stop in
+	-- REVERSE order, which is correct for dependencies, and during it a service that has already
+	-- been stopped is still reachable from the gateway with `self` captured in its handler closure.
+	-- OfflineService is the sharp case: `_pending` is the ONLY one-shot guard its away window has,
+	-- `Stop` clears it, `DataService.Stop` runs afterwards and persists — so a claim arriving inside
+	-- that window re-pays the entire session, durably, and the leaderboard's lifetimeCredits with it.
+	--
+	-- Closing it per-service would mean every service growing its own shutdown flag and every future
+	-- service remembering to. One gate on the path they all share is the same fix EconomyService.earn
+	-- got: enforce at the seam, not at each caller.
+	--
+	-- One-way ON PURPOSE. There is no `resume`. A server that has begun shutting down has already
+	-- told services to drop state; a wire that could re-open would let a client act against half a
+	-- game, which is the exact condition this closes.
+	function registry.quiesce(_self: Registry): ()
+		quiesced = true
+	end
+
+	function registry.isQuiesced(_self: Registry): boolean
+		return quiesced
+	end
+
 	return (registry :: any) :: Registry
 end
 
@@ -200,6 +229,14 @@ function Net.dispatch(
 	actionName: string,
 	rawPayload: any
 ): Result<any>
+	-- 1. SHUTDOWN. Checked FIRST, ahead of even the action lookup: once teardown has begun, no client
+	-- request may reach any handler, and the refusal must say SHUTDOWN rather than let a live action
+	-- come back as UnknownAction (a shutdown that masquerades as a typo sends the next reader hunting
+	-- a registration bug). See `registry.quiesce` for why this lives here and not per-service.
+	if registry:isQuiesced() then
+		return Result.err(Result.Codes.Unavailable, "server is shutting down")
+	end
+
 	-- 2. actionName must be a string and a registered action.
 	if type(actionName) ~= "string" then
 		return Result.err(Result.Codes.UnknownAction, "actionName must be a string")
