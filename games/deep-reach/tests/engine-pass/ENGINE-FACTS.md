@@ -188,3 +188,49 @@ A server script cannot cross the replication boundary, so the client wire and ev
 unverified — that is T2.7's job, and it is still `unrun`. `0 of 14` registered actions declare
 `ownerOf`, so `Net.dispatch`'s ownership step is dead code on the live wire; the phase says so and
 asserts `Gate:assertOwner` directly instead of pretending the wire covered it.
+
+## 2026-08-08 — the `run-in-roblox` lane went DOWN, and it is the OS, not the toolchain
+
+Yesterday's measurement 2 recorded this lane as UP (exit 0, probe lines returned). Today it does not
+bind at all. Nothing in the repo changed; the machine's port reservations did.
+
+```
+thread '<unnamed>' panicked at 'error binding to 127.0.0.1:50312: error creating server listener:
+An attempt was made to access a socket in a way forbidden by its access permissions. (os error 10013)'
+```
+
+| # | measurement | result |
+|---|---|---|
+| 1 | 3 identical invocations | **all three bound-failed on the same port, 50312** — the port is HARDCODED in run-in-roblox 0.3.0, not chosen per run |
+| 2 | a different `--place` and a different `--script` | **still 50312** — it does not derive from the arguments, so there is no argument that avoids it |
+| 3 | `netsh interface ipv4 show excludedportrange protocol=tcp` | reserved ranges include **50305–50404**, which contains 50312 |
+| 4 | `--help` | *"The script will be run at plugin-level security"* — independent confirmation of the capability fact recorded above, from the tool's own documentation |
+
+Windows/WinNAT picks these dynamic ranges at boot, so the lane's availability flips across reboots
+with no visible cause. **Retrying cannot help** (measurements 1+2), and there is no `--port` flag.
+
+**Remediation needs elevation, so it is a HUMAN step, not an agent one:**
+
+```powershell
+net stop winnat      # releases the dynamic reservations
+net start winnat     # they are re-picked, usually elsewhere
+```
+
+(or a reboot). Stopping WinNAT also disrupts Docker/WSL networking while it is down, which is the
+other reason an agent should not do it unasked. Verify with measurement 3 afterwards: 50312 must fall
+in no listed range.
+
+### Why T2.5 is PARKED rather than run in a different lane
+
+The Studio MCP plugin thread also has plugin security and can run in the `Edit` datamodel, so it
+looks like a drop-in substitute for `run-in-roblox`. It is not, and the harness itself is the reason:
+its `lane-limits` phase is **INVERTED** — it goes RED when one of the three edit-mode limits (no
+Player, frozen mono clock, physics not stepping) LIFTS, because a lane that quietly gained a
+capability invites assertions the rung cannot actually keep. Studio's Edit datamodel does not have the
+same three limits as `run-in-roblox`'s, so running T2.5 there risks recording a RED that is a
+statement about the lane and not about the game — and `tier-status` will never relabel a recorded
+engine failure as ready. An honest `blocked-on-human` beats a manufactured red.
+
+`GATE_ENGINE_LANE` is therefore deliberately left UNDECLARED and `tests/tier2/last-playtest.json`
+deliberately absent, so the aggregator reports T2.5 as blocked-on-human from evidence rather than
+from an assertion.
