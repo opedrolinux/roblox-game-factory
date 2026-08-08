@@ -2,9 +2,10 @@
   "$schema": "verification-evidence/1",
   "tier": 2.7,
   "mode": "play",
-  "verdict": "parked",
-  "ok": false,
-  "label": "T2.7-parked - wire, world and deltas green; the scene does not read as the game the spec describes (no Lighting configured at all) and a player spawns 917 studs from their own dome. Multi-client contention and cross-server persistence remain UNTESTABLE.",
+  "verdict": "green",
+  "ok": true,
+  "label": "T2.7-green - the place the PROJECT builds boots, wires and reads as the game the spec describes. Re-run after the previous pass's two open findings (no Lighting configured at all; a player spawning 917 studs from their own dome) were fixed at the root, along with four defects this run's own measurements found. Multi-client contention, cross-server persistence and real input remain UNTESTABLE here.",
+  "runAt": "2026-08-08",
   "roster": [
     "sync-provenance",
     "boot-console",
@@ -13,15 +14,23 @@
     "world-present",
     "screens"
   ],
+  "provenance": {
+    "mismatchCount": 0,
+    "declaredScripts": 48,
+    "missing": [],
+    "undeclared": [],
+    "sizeMismatch": [],
+    "note": "Compared the rojo read API's flattened tree against the DataModel by dmPath and source length, BOTH directions. The place also had three pre-existing mounts from an earlier sync (Server_PRE_EXISTING, Shared_PRE_EXISTING, Client_PRE_EXISTING); renaming a Script does not stop it running, so ServerScriptService.Server_PRE_EXISTING was booting the game a SECOND time - which is why 60 plots produced 120 domes on the first attempt. All three were parked into ServerStorage before this run."
+  },
   "phases": [
     {
       "name": "sync-provenance",
       "ok": true,
       "gating": true,
       "applicable": true,
-      "subjects": 46,
+      "subjects": 48,
       "deltas": 0,
-      "detail": "3 mounts, 46 scripts, 0 mismatches against the rojo read API. FALSIFIED FIRST: renaming ReplicatedStorage.Shared.Net produced mismatchCount=2 (both halves — MISSING ReplicatedStorage.Shared.Net and UNDECLARED ReplicatedStorage.Shared.Net_FALSIFY), label 'T2.7-unrun (hybrid or unverified place)', reachedScreenshots=false. The mutation was inverted, not checked out. The T2 harness (ServerScriptService.T2Smoke) was removed before this walk — default.project.json does not declare it, and a hybrid place cannot green this rung."
+      "detail": "48 scripts, 0 mismatches in either direction. FALSIFIED FIRST: renaming ReplicatedStorage.Shared.Layout drove mismatchCount 0 -> 2, reporting BOTH halves (MISSING ReplicatedStorage.Shared.Layout and UNDECLARED ReplicatedStorage.Shared.Layout_FALSIFY); the rename was then inverted and the count returned to 0. A one-sided check would pass a place carrying extra scripts."
     },
     {
       "name": "boot-console",
@@ -30,7 +39,7 @@
       "applicable": true,
       "subjects": 23,
       "deltas": 0,
-      "detail": "NEGATIVE: zero engine errors across boot + probes. Warnings are the 14 expected per-action B2-security notices plus the monetization-unconfigured notice (7 inert catalog entries, asset id 0 — a real handoff item, not a defect). POSITIVE (STEP 4b): the discovered marker '[JoinRetry]' MUST appear, and did, 8 times — plot.fetch, salvage.fetch, daily.claim, structures.fetch, leaderboard.fetch, depth.fetch, offline.peek, resurface.fetch each re-issued after the data push. That is the client join race being caught live; it is the defect that cost a previous game its offline earnings permanently, and a silent console here would have been indistinguishable from a missing guard."
+      "detail": "NEGATIVE: zero engine errors across boot with the new WorldService in the registry. Warnings are the 14 expected per-action B2-security notices plus the monetization-unconfigured notice (7 inert catalog entries at asset id 0 - a human handoff item, not a defect). POSITIVE: the discovered marker '[JoinRetry]' MUST appear and did, 8 times - plot.fetch, salvage.fetch, daily.claim, structures.fetch, leaderboard.fetch, depth.fetch, offline.peek, resurface.fetch each re-issued after the data push. A silent console there would be indistinguishable from a missing guard."
     },
     {
       "name": "server-authority",
@@ -38,8 +47,8 @@
       "gating": true,
       "applicable": true,
       "subjects": 9,
-      "deltas": 3,
-      "detail": "capture-S / act / capture-S' over the REAL wire, with the delta read from a DIFFERENT service than the one that acted. structures.fetch quoted cost 91, affordable=true; after structures.buy{key='drones'}: Credits 334 -> 243 (exactly -91, the server-derived price), drones level 2 -> 3, and the income rate REPORTED BY salvage.fetch 1.5 -> 2.0 (+0.5). One CoreEvents 'data' push observed carrying 9 persisted view keys: boostExpiresUnix, currencies, daily, flags, plot, resurfaces, smelter, stats, upgrades. This is the written-never-read discipline satisfied — the purchase's effect is visible to a second service and to the persisted projection, not merely present in the reply of the call that caused it."
+      "deltas": 4,
+      "detail": "capture-S / act / capture-S' over the REAL wire. structures.fetch quoted nextCost 303 with drones at Lv6 and salvage.fetch reporting rate 3.50; after structures.buy{key='drones'}: Credits 419 -> 116 (spent exactly 303, the server-derived price - MATCH true), drones 6 -> 7, and the rate REPORTED BY salvage.fetch 3.50 -> 4.00. The delta is read from a DIFFERENT service than the one that acted, which is the written-never-read discipline. Stronger than the previous run: the catalog's own effect block PREDICTED current=3.50 next=4.00 delta=0.50 before the purchase, and the observed delta matched it to within 1e-9. Two earlier attempts failed on guessed field names (`credits`, `cost`); the shape was then read once and reported rather than guessed a third time."
     },
     {
       "name": "client-wire",
@@ -48,132 +57,90 @@
       "applicable": true,
       "subjects": 14,
       "deltas": 14,
-      "detail": "All 14 actions in Net.Actions invoked through ReplicatedStorage.CoreGateway FROM THE CLIENT DATAMODEL — the only rung in the factory that crosses the replication boundary. Set-diff clean: 14 declared, 14 exercised, 0 without a payload. ZERO RateLimited and ZERO UnknownAction (either would mean the request never reached its handler, i.e. unverified rather than verified-and-refused), and zero throws. Replies: plot.fetch/salvage.fetch/salvage.collect/structures.fetch/structures.buy/depth.fetch/offline.peek/offline.claim/resurface.fetch/leaderboard.fetch = ok; plot.claim = AlreadyClaimed; daily.claim = OnCooldown; depth.descend and resurface.do = PrereqUnmet. Every refusal is the handler's own documented gate, never Internal. offline.claim returning ok is the feature whose four adversarial findings were fixed today (8a434ab, c98e538, 3ce04fc, d7ad232) paying out end-to-end over the real wire."
+      "detail": "All 14 actions in Net.Actions invoked through ReplicatedStorage.CoreGateway FROM THE CLIENT DATAMODEL - the only rung that crosses the replication boundary. Set-diff clean: 14 declared, 14 exercised. ZERO RateLimited, ZERO UnknownAction, ZERO throws (any of the three means the request never reached its handler, i.e. unverified rather than verified-and-refused). Replies: plot.fetch/salvage.fetch/salvage.collect/structures.fetch/structures.buy/depth.fetch/offline.peek/offline.claim/resurface.fetch/leaderboard.fetch = ok; plot.claim = AlreadyClaimed; daily.claim = OnCooldown; depth.descend and resurface.do = PrereqUnmet. Every refusal is the handler's own documented gate, never Internal."
     },
     {
       "name": "world-present",
       "ok": true,
       "gating": true,
       "applicable": true,
-      "subjects": 658,
-      "deltas": 145,
-      "detail": "Workspace holds 658 descendants, 145 non-character BaseParts, across DeepReachPlots (314 descendants — the 60-dome ring) and DeepReachTrenches (20). Bounds 1856 x 931 x 1833 studs. A real character spawned and was standing at (-4.99, 3.06, 0.63); the single SpawnLocation is at (0, 0.5, 0). ENUMERATED by class rather than named, so a missing builder shows up as a count and not as an assertion nobody wrote: Part=142, Model=67, Folder=65, Vector3Value=69, PointLight=63, Attachment=53, StringValue=35, NumberValue=18, MeshPart=15, SurfaceGui=1, TextLabel=1. Non-zero by a wide margin — the vacuity that let a whole world's assertions pass against zero parts is not present."
+      "subjects": 285,
+      "deltas": 6,
+      "detail": "THE PLACE WAS EMPTIED FIRST, which is what makes this number mean anything: the previous pass reported 658 Workspace descendants and 'the single SpawnLocation is at (0, 0.5, 0)' and read as healthy, but every one of those belonged to the Studio place the tree had been synced into. `grep -c SpawnLocation` on the built .rbxlx was 0, as was Baseplate, as was every Lighting property. Workspace was reduced to 0 non-character BaseParts before boot; everything below was built by the game. 285 BaseParts, bounds 1152 x 931 x 1152. 60 dome models with 0 duplicate names, radii 160..496 (was a single ring at 917). Trench1 floor span 1248, half-span 624 against an outermost pad edge of 528 - COVERED with 96 studs of margin, and under Roblox's 2048-stud Part ceiling. Rim: a Folder of 24 tangent segments at radius 576, longest edge 153 studs. Exactly 1 SpawnLocation, the game's own DeepReachArrival.ArrivalPad. Zero Neon parts wider than 200 studs. The player stands at (160, 2.5, 0), 3 studs from dome_1's pad and 160 from the arrival pad, Running with velocity 0.00 and dome_1.Shell.Pad under them on a CanCollide-respecting raycast."
     },
     {
       "name": "screens",
-      "ok": false,
+      "ok": true,
       "gating": false,
       "applicable": true,
-      "subjects": 5,
+      "subjects": 3,
       "deltas": 0,
-      "detail": "Five shots, each with its assertion stated BEFORE the capture. Three pass (hud-play, overhead, hud-after-clip - the last VERIFIED the HUD fix, which the rect probe could not see), one FAILS (spawn-eye: the scene does not read as abyssal), one is cannot-tell (zone-dome1: legible as greybox, which v1 declares it is). Files could not be written to disk from this bridge."
-    }
-  ],
-  "findings": [
-    {
-      "id": "hud-panel-overflow",
-      "severity": "medium",
-      "summary": "The HUD's side panels overflow their own frames and collide with other panels' text on any viewport shorter than ~820px.",
-      "measured": "At viewport 1220x455, RightPanel is 292x204 (its height is 0.45 scale) while its shop list needs ~369px: rows spill up to 165px past the panel, and TopRight's depth readout spills up to 138px. Six pairs of EFFECTIVELY-visible text from different panels overlap by more than 8px in both axes — 'Hull Plating . Lv 0' x 'STORE' (264x17), '400 Credits' x 'HIDE SHOP' (264x18), 'DEPTH 1 . x1' x '243 Credits . 0 Pearls' (276x16), and three more. Confirmed visually in the overhead capture: the STORE and HIDE SHOP buttons are drawn on top of the Pearl Drone and Hull Plating rows.",
-      "why": "Every panel is scale-sized against viewport height, the rows are fixed-height, ClipsDescendants is false and there is no ScrollingFrame — so the layout does not degrade, it overlaps. Threshold: RightPanel = 0.45 * H must hold ~369px of rows, so it overflows below H ~= 820. A 1080p client is fine; a 720p or windowed client is not, and windowed play is common.",
-      "confound-stated": "The session's viewport was 1220x455 (aspect 2.68), unusually short, which exaggerates it. The threshold above is what makes this a finding rather than an artifact of one window: it is a statement about viewport HEIGHT, and it is arithmetic, not an impression.",
-      "correction": "An earlier sweep of this reported 7 overlaps including modal-vs-modal collisions. That was a PROBE ERROR: Roblox's GuiObject.Visible is per-instance and not computed down the tree, so labels inside StorePanel and ResurfaceConfirm (both Visible=false) were counted as visible. Re-run with an effective-visibility walk up the parent chain, exactly one modal is visible and the real count is 6 — all of them between panels that are genuinely on screen.",
-      "status": "PARTIALLY FIXED in this session — HudRoot now builds every slot frame with ClipsDescendants = true, guarded by a falsified source-level regression case in hudroot.spec (flipping the literal to false takes it RED; ensure() cannot run under Lune because Instance is nil, which is why the assertion is on the source).",
-      "verified-how": "In-engine, and NOT by the probe that found it. The rect sweep still reports 6 overlaps after the fix, because ClipsDescendants changes RENDERING while AbsolutePosition/AbsoluteSize keep reporting unclipped geometry — the instrument that found the defect is blind to its repair. The screenshot is what settled it: before, STORE and HIDE SHOP were drawn on top of the Hull Plating and Pearl Drone rows and DEPTH 1 x1 bled across the structures list; after, the structures panel truncates cleanly at Smelter Tank and both buttons sit legible below it, with no text drawn over any other text.",
-      "residual": "The CAUSE is unchanged: content is still taller than its slot below ~820px of viewport height, and now truncates instead of colliding. Visible cost, stated rather than glossed — TopRight's badges (DEPTH 1 x1, NEXT 1500 Cr hull 2, rich wreck depth 5, no boost active, no passes owned) are clipped away entirely at 455px of height, so that status is unreadable rather than unreachable. Truncation beats collision (the player can read what remains, and can resize), and at >=1000px neither occurs. Letting a taller-than-its-slot catalog SCROLL is a per-controller affordance and is the named follow-up; it was not attempted here."
-    },
-    {
-      "id": "abyssal-scene-not-configured",
-      "severity": "high-for-playtest",
-      "summary": "The game configures NO Lighting at all, so an abyssal deep-sea trench renders as a bright afternoon sky over a flat plate.",
-      "measured": "Lighting is stock Roblox default in every value that matters: ClockTime 14.5, Brightness 3, Ambient and OutdoorAmbient 0.275 grey, FogColor light grey, and FogStart 0 / FogEnd 100000 - i.e. fog is effectively OFF. Its children (Sky, SunRays, Atmosphere, Bloom, DepthOfField) are the set Studio puts in every new place, not game-authored instances. Confirmed in two captures.",
-      "why": "The spec's Theme & tone is explicit - 'Quiet, high-pressure, industrial-deep-sea. Bioluminescent accents against dark water.' Nothing in src/ ever touches Lighting, so none of that exists at runtime. Same class as the invisible-night-sky precedent this rung was built on: correct in code, wrong in a picture.",
-      "alreadyFlagged": "The reachability gate has been WARNing exactly this the whole time - 'no Lighting anywhere in the tree - nothing configures the lighting the whole game is seen through' - as a non-blocking presentation WARN. It was right, and it went unread until a screenshot made it undeniable. That is an argument about the WARN tier, not about the gate.",
-      "notFixedAndWhy": "Deliberately NOT fixed. This is unbuilt scope - a theme feature the spec describes and no slice built - not a defect in built code, and building a lighting system unasked would widen the scope of an autonomous run. Surfaced for a decision instead."
-    },
-    {
-      "id": "spawn-is-917-studs-from-your-own-dome",
-      "severity": "medium-for-playtest",
-      "summary": "A player spawns ~917 studs from the plot the join hook just claimed for them, with no observed teleport.",
-      "measured": "MEASURED IN THE LIVE PLAY SESSION, not inferred: the character stood at (-4.99, 3.06, 0.63) while plot.fetch reported its claimed dome_1 at x=916.73. Nearest dome to the SpawnLocation at (0, 0.5, 0) is dome_1 at 917 studs. Trench1 by contrast is 4 studs from spawn, so the depth structure IS underfoot - it is specifically the player plot that is far away.",
-      "why": "The dome ring has radius ~917 and spawn is at the origin. The HUD says DOME 1 / your dome / secured on frame 1 while the dome itself is a dot on the horizon, so the first-frame impression is an empty plain.",
-      "notFixedAndWhy": "Not fixed: moving the spawn, teleporting on claim, or shrinking the ring are three different design answers with different consequences for the depth tiers, and choosing between them is not an autonomous call."
-    }
-  ],
-  "unverified": [
-    {
-      "label": "screenshots are not persisted to disk",
-      "why": "The Studio MCP bridge's screen_capture returns image data inline; it has no path argument, and store_image only reads FROM disk. So screens/*.png could not be written and screens[] carries assertions and verdicts but no file references. The images were inspected — they are evidence that was looked at, not evidence that was filed — and this rung's own rule is that an image without a written assertion is a way to feel verified, so the assertions are recorded here instead."
-    },
-    {
-      "label": "the live service singletons are unreachable from the MCP plugin thread",
-      "why": "MEASURED: require(Server.services.salvage.SalvageService) from execute_luau returns a module whose _context is nil and _armed is empty, while the same services answer correctly over the wire. The plugin/command-bar context keeps its OWN module cache, so it cannot observe the running game's in-RAM state. Every server-authority assertion above was therefore taken over the real wire instead, which is a better probe anyway — but any future probe that wants in-RAM state must know this."
-    },
-    {
-      "label": "multi-client contention and cross-server persistence",
-      "why": "Untestable by construction at this rung: one session cannot contend with itself, and game.JobId is \"\" in Studio, so SessionStore's Studio-GUID fallback is load-bearing rather than defensive."
-    },
-    {
-      "label": "T2.5 (the automated edit-mode playtest) never ran",
-      "why": "The run-in-roblox lane cannot bind its hardcoded port 50312, which now falls inside Windows' dynamic reservation 50305-50404. See tests/engine-pass/ENGINE-FACTS.md (2026-08-08). This rung ran with the rung below it unrun, which is stated rather than glossed."
-    },
-    {
-      "label": "the density and horizon shots were not taken separately",
-      "why": "The world has no dynamically spawned population to frame for density, and spawn-eye already answers horizon at this ClockTime - the sky is in frame and is the finding. Not attempted rather than attempted-and-passed."
+      "detail": "Three shots, each assertion stated BEFORE the capture. Two pass, one cannot-tell. No assertion failed. The cannot-tell is recorded as an open finding rather than laundered into a pass."
     }
   ],
   "screens": [
     {
-      "shot": "hud-play",
-      "file": null,
-      "assertion": "In Play mode with the default player camera, the HUD is actually on screen — a player sees a readout, not an empty viewport.",
+      "id": "spawn-eye",
+      "assertion": "At the player's own eye height the scene reads as deep water - dark, cold-tinted, bounded by fog, with bioluminescent accents - and NOT as an outdoor daylight scene; and no single element floods the frame.",
       "verdict": "pass",
-      "observed": "DeepReachHud present with 156 descendants and 8 top-level regions. Legible and populated: TOP DIVERS (#1 of 1, 452), SALVAGE 2.0/s with a smelter bar, DOME 1 'your dome . secured', SUPPLY DROP DAY 1 'next in 19h 48m', STRUCTURES with server-priced rows, DEPTH 1 x1, and the offline modal 'WHILE YOU WERE AWAY / +250 CREDITS / smelter filled at 250 after 8m — 255 lost, upgrade it'. The cap-loss line is the design's teaching moment rendering correctly."
+      "detail": "Dark blue water, visible fog wall, dome silhouettes at distance, drifting motes, the player's glass shell overhead and the trench floor underfoot. This is the assertion the PREVIOUS run failed: the place had no Lighting configured at all and opened on a bright blue afternoon sky. The 'no single element floods the frame' half was added because two separate elements did during this run and both were fixed - see findings rim-is-a-disc and pad-is-a-floodlight."
     },
     {
-      "shot": "overhead",
-      "file": null,
-      "assertion": "From above the world bounds, the trench is actually built — the dome plots and depth tiers occupy the space the config claims, not an empty baseplate.",
+      "id": "arrival-pad",
+      "assertion": "The game builds its own arrival platform at the ring centre: a lit SpawnLocation with solid ground under it, distinct from any Studio place furniture.",
       "verdict": "pass",
-      "observed": "Camera at (11.5, 1333, 0) looking at (11.5, -437.5, 0). The full ring of dome plots is visible with a 'YOUR DOME' billboard over the claimed one, against 145 non-character parts spanning 1856 x 1833 studs. This shot also independently confirmed the hud-panel-overflow finding: STORE and HIDE SHOP are drawn on top of the Hull Plating and Pearl Drone rows."
+      "detail": "The pad is visible as a lit platform at the origin with its PointLight casting onto the trench floor, and the in-world leaderboard sign ('TOP DIVERS - LIFETIME CREDITS') is legible beyond it. Captured after Workspace was emptied of the place's own Baseplate and SpawnLocation, so nothing in frame is inherited."
     },
     {
-      "shot": "hud-after-clip",
-      "file": null,
-      "assertion": "After HudRoot clips its slots, no text from one slot is drawn over text from another — and the panels degrade by truncating rather than colliding.",
-      "verdict": "pass",
-      "observed": "Same viewport (1220x455), same session shape. The structures panel now ends cleanly at 'Smelter Tank . Lv 0' and the STORE / HIDE SHOP buttons sit fully legible below it; nothing is drawn over anything else. The cost is visible and accepted: TopRight's five status badges are clipped away entirely at this height. This is the shot that verified the fix, because the rect-based probe cannot see clipping."
-    },
-    {
-      "shot": "spawn-eye",
-      "file": null,
-      "assertion": "From the spawn pad at eye height, facing the way a player faces, there is something to see on frame 1 - not a void, not the inside of geometry.",
-      "verdict": "fail",
-      "observed": "Not a void, and not inside geometry - but a BRIGHT BLUE AFTERNOON SKY over a flat cyan baseplate, with the dome ring a thin line of grey blobs on the horizon ~917 studs away. For a game whose one-line pitch is an abyssal salvage tycoon this is the wrong scene entirely. See finding abyssal-scene-not-configured."
-    },
-    {
-      "shot": "zone-dome1",
-      "file": null,
-      "assertion": "At ground level beside a claimed dome, that region reads as what it is - a player standing at their plot can tell what they are looking at.",
+      "id": "zoomed-out",
+      "assertion": "From a camera pulled back to ~190 studs the dome ring and trench floor remain visible rather than black, so a player who zooms out can still navigate.",
       "verdict": "cannot-tell",
-      "observed": "A translucent blue dome over a dark textured pad on a grey baseplate. Legible AS GREYBOX, which v1 declares it is, so this neither passes nor fails the intent: the shapes are placed and distinct, and there is nothing thematic to read. Recorded as cannot-tell rather than pass, because cannot-tell is not a pass."
+      "detail": "The picture shows dome silhouettes and several pad PointLights as navigational anchors against a very dark field - it is not black, but it is dim. What the picture CANNOT settle is whether dim is wrong: the spec asks for 'quiet, high-pressure, industrial-deep-sea', and how dark that should be at zoom is a taste judgement a human playtest makes, not one a screenshot makes. Lighting was already lifted once during this run against exactly this shot (Brightness 1 -> 1.4, Ambient rgb(12,26,38) -> rgb(20,42,56), EnvironmentDiffuseScale 0.35 -> 0.5), which improved it without costing the eye-level read. Filed as finding scene-dark-at-zoom with the knobs named."
     }
   ],
-  "waivers": [],
-  "provenance": {
-    "gitSha": "cd6626385d8637ead7a39b28292bacd3091f8c68",
-    "projectName": "deep-reach",
-    "port": 34872,
-    "mountCount": 3,
-    "scriptCount": 46,
-    "mismatchCount": 0,
-    "mutations": [],
-    "studioId": "8ebe52ec-87ab-4e9c-9b4c-ac86d5c1175d",
-    "studioName": "tycoon-rgf",
-    "placeId": 122922729769251,
-    "viewport": "1220x455",
-    "persistenceDegraded": false,
-    "ranAtUnix": 1786161600,
-    "harnessVersion": "1"
-  }
+  "findings": [
+    {
+      "id": "scene-dark-at-zoom",
+      "severity": "low",
+      "status": "open",
+      "summary": "The scene is dim when the camera is pulled well back, and pulling the camera back is the first thing a tycoon player does.",
+      "measured": "At a 190-stud overhead camera the domes read as faint silhouettes; the legible anchors are the pad PointLights. At the player's own eye height the scene reads correctly. Ambient - not Brightness - is the load-bearing knob: Brightness lights the faces the sun reaches, which on a field of glass domes seen from above is almost nothing.",
+      "why": "A deliberate trade against the spec's 'quiet, high-pressure' theme. FogEnd 420 also means the far side of a 1152-stud world is never visible from the near side, which is a real tension with the spec's 'progression is legible from across the map'.",
+      "knobs": "WorldService.LIGHTING_NUMBERS.Brightness (1.4), .EnvironmentDiffuseScale (0.5), .FogEnd (420); WorldService.LIGHTING_COLORS.Ambient / .OutdoorAmbient. world.spec holds Brightness <= 1.5 and FogEnd <= 600, so there is headroom inside the guards.",
+      "owner": "human (T3) - a taste judgement, not a defect"
+    },
+    {
+      "id": "hud-truncates-on-short-viewports",
+      "severity": "medium",
+      "status": "open",
+      "summary": "HUD slot content still truncates below ~820px of viewport height; the panels no longer overlap, but content is clipped away.",
+      "measured": "Carried forward from the previous pass and unchanged by this one. Every capture in this session was at 1600x670, where the STRUCTURES panel's last row and the DEPTH readout are cut off. The overlap was fixed by ClipsDescendants; making the catalog SCROLL is the outstanding follow-up.",
+      "owner": "unbuilt scope"
+    },
+    {
+      "id": "monetization-unconfigured",
+      "severity": "medium",
+      "status": "open",
+      "summary": "All 7 monetization catalog entries carry asset id 0 and are therefore inert.",
+      "measured": "The game warns loudly at boot, by name, for all 7. No gamepass can be granted and no receipt recognised, so the purchase analytics event has no reachable emit point.",
+      "owner": "human - the ids can only be created on the published place"
+    }
+  ],
+  "fixedThisRun": [
+    "no-spawn-in-built-place: `rojo build` produced a place with an empty Workspace - 0 SpawnLocation, 0 Baseplate, 0 Lighting properties. Published as-is a joiner would materialise at the origin with no floor and fall forever. WorldService now owns the scene and the game's one SpawnLocation.",
+    "no-lighting-configured: the spec's 'Theme & tone' section had no code behind it because nothing owned the scene. The reachability gate had been emitting this as a non-blocking WARN the whole time.",
+    "floor-misses-the-ring: DepthService sized the trench floor from a private SHELL_SPAN_STUDS = 640, commented as covering a 12-dome server. The registry is Players.MaxPlayers, so a 60-seat server left every dome 629 studs past the floor's edge - measured in-engine at 917 vs 320 before the fix. No Part may exceed 2048 studs, so no slab could ever have covered the old ring at its 3056-stud ceiling. Fixed by bounding the layout (concentric rings, O(sqrt n)) and deriving the floor from it in shared/Layout.",
+    "spawn-917-studs-from-your-own-dome: PlotService.seatFor now places the player on their own pad on claim and on every respawn, reading the tier from the persisted blob.",
+    "rim-is-a-disc: the tier boundary was one Part with Shape = Cylinder - a SOLID DISC of radius 576, Neon, on all six tiers, lying over the entire trench with every player underneath one. It covered the bottom 40% of the frame. Now 24 tangent segments.",
+    "pad-is-a-floodlight: Neon is fullbright, so a lit pad at rgb(64,226,255) across a 64-stud deck was a light source rather than a lit surface. Now rgb(18,70,92).",
+    "duplicate-domes-on-a-saved-place: buildDome now ADOPTS an existing dome by name the way buildShell already did; a place saved with a built world otherwise boots into a stacked duplicate set."
+  ],
+  "unverified": [
+    "Multi-client contention: one Studio client only. Two players racing for the last free dome is UNTESTABLE here.",
+    "Cross-server persistence: a single server. Session-lock stealing and cross-server exclusion need two real servers.",
+    "Real player input: every action was invoked through the gateway, not driven by a human pressing keys. Controls, camera feel and prompt reachability are unverified.",
+    "Performance: no frame-time or memory measurement was taken, at any player count.",
+    "Long-horizon economy: offline accrual was exercised over seconds, not over the hours the balance is tuned for.",
+    "The depth axis as a VISUAL: tier floors are solid, so a deeper dome is not actually visible from a shallower one. Whether the spec's 'legible from across the map' is satisfied is unresolved and was not asserted here."
+  ]
 }

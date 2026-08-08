@@ -3,9 +3,71 @@
 Measured, never inferred. Every line names the experiment that produced it. **Append; never
 overwrite.** A fact with no experiment beside it does not belong in this file.
 
-> **This file is not evidence of a T2.7 pass.** There is no `last-studio.json` and no `screens/`, so
-> `tier-status.luau` correctly reports **T2.7 = unrun**. What is recorded below is STEP 0 and the
-> STEP 1 server half — the prerequisites — nothing above them.
+> **STATUS 2026-08-08: T2.7 is GREEN.** `last-studio.json` beside this file carries the run;
+> `tier-status.luau` reports `ready: true` — *engine-smoked-T2, ready for human playtest (T3)*.
+> The header below is kept as written: it was true when written, and this file appends.
+
+## 2026-08-08 (later) — the pass that measured the PROJECT instead of the place
+
+The single most important thing this lane learned, and it invalidates part of the run above it:
+
+**A Studio place is not the place your project builds.** The earlier pass reported 658 Workspace
+descendants and *"the single SpawnLocation is at (0, 0.5, 0)"* and read as healthy. Every one of
+those instances belonged to the Studio place the tree had been **synced into**. The measurement that
+settled it took one command:
+
+```sh
+rojo build default.project.json --output /tmp/dr-check.rbxlx
+grep -c "SpawnLocation" /tmp/dr-check.rbxlx   # 0
+grep -c "Baseplate"     /tmp/dr-check.rbxlx   # 0
+# class census: ModuleScript=44 Folder=27 Script=1 LocalScript=1 -- and nothing else.
+```
+
+Published from the built place, a joining player materialises at the origin with **no floor** and
+falls forever, under stock Lighting. `world-present` had been counting the Studio template's
+furniture as the game's world.
+
+**The procedure that fixes it:** empty Workspace of everything the project does not declare *before*
+booting, and report the count. This run reduced Workspace to **0 non-character BaseParts**, then
+measured 285 after boot — a number that now means something. The place's own `Baseplate` and
+`SpawnLocation` were REPARENTED into `ServerStorage.T27_ParkedPlaceFurniture`, never destroyed.
+
+**A renamed Script still runs.** The sync preserves colliding mounts by renaming them
+`<Name>_PRE_EXISTING` rather than destroying them — which is right — but
+`ServerScriptService.Server_PRE_EXISTING` is still a `Script`, and it booted the whole game a second
+time. Symptom: **60 plots produced 120 domes**. Park them out of `ServerScriptService`, do not merely
+rename them.
+
+**Field names must be read, not guessed.** Two server-authority attempts died on invented keys
+(`value.credits`, `entry.cost`); the real shape is `value.currencies.Credits` and `entry.nextCost`.
+One call that dumps the shape costs less than two that guess it.
+
+**Cross-datamodel probes cannot share state.** `execute_luau` runs in one datamodel per call, so a
+capture/act/capture that needs both server and client state must be driven entirely from one side.
+All of this run's server-authority work went through the client gateway for that reason.
+
+### What only a picture could settle
+
+Three defects this run found were invisible to every log, probe and rect measurement:
+
+| defect | how it presented | what actually caused it |
+|---|---|---|
+| a neon sheet over the whole trench | bottom 40% of every frame flat cyan | `Shape = PartType.Cylinder` — **a Roblox cylinder is a solid disc, not a ring**. Size 2 x 1152 x 1152 at the origin, on all six tiers |
+| the pad as a light source | foreground blown out | Neon is **fullbright**; rgb(64,226,255) over a 64-stud deck |
+| black at zoom | domes invisible when the camera pulled back | **Ambient**, not Brightness — a sun overhead lights almost nothing on a field of glass domes seen from above |
+
+**And the method that found them, after two failed inferences.** The humanoid reported
+`FloorMaterial = Neon`; I inferred the rim was under the player (it was not — the *pad* is neon,
+because owning a plot lights it, which is correct behaviour). I then changed the pad and predicted
+the wash would clear; it did not. What settled it in one shot was **hiding one candidate at a time
+and re-shooting**. Two plausible inferences lost to one experiment.
+
+**`tier-status`' T2.7 reader is satisfiable** — an earlier note in the handoff claimed it was not,
+on the grounds that `unverified[]` can never be empty. It never reads `unverified`. It requires:
+`verdict == "green"` with `ok == true`, all six roster phases ok, `provenance.mismatchCount == 0`,
+every screen carrying a non-empty `assertion`, no screen with verdict `fail`, and **at least one**
+`pass`. `cannot-tell` is allowed and is not a pass. The previous run was red because its `screens`
+phase genuinely failed on the scene — exactly as it should have.
 
 ## 2026-08-05 — the MCP bridge answered for the first time
 

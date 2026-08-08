@@ -1,27 +1,78 @@
 # Deep Reach — handoff
 
 **Branch:** `staging/deep-reach`, not pushed. **`git push` is fenced — the human FFs `main` and pushes.**
-**Rewritten 2026-08-08**, after the adversarial fixes, the T2 in-engine smoke and the T2.7 Studio pass.
-The previous version of this file is wrong in almost every line and is superseded wholesale.
+**Updated 2026-08-08 (second pass).** The tier moved from NOT-ready to **ready**, and seven more
+defects were fixed. The sections below the adversarial findings are the earlier record and still hold.
 
-## Honest verification tier
+## Honest verification tier — READY
 
 ```
 lune run .claude/skills/lib/tier-status.luau games/deep-reach
-→ highest=T2 | in-progress (T2.7 red), NOT ready
+→ ready: true | engine-smoked-T2 — ready for human playtest (T3)
 ```
 
 | rung | state | evidence |
 |---|---|---|
-| T0 static · T0.5 require · T1 Lune + reachability | **green** | gauntlet 6/6, **945 / 945** lune, reachability 0 FAIL |
-| **T2 in-engine smoke** | **GREEN** | `tests/tier2/last-smoke.json` — 4/4 phases; `smoke-gate` INGEST returned `T2-green` |
-| T2.5 automated playtest | **parked — environment, not the game** | see *The T2.5 lane* below |
-| **T2.7 live Studio** | **ran, PARKED** | `tests/engine-pass/last-studio.json` — 5 of 6 phases green |
-| T3 human playtest | **the next rung — this is what you are being handed** | — |
+| T0 static · T0.5 require · T1 Lune + reachability | **green** | gauntlet 6/6, **970 / 970** lune |
+| **T2 in-engine smoke** | **GREEN** | `tests/tier2/last-smoke.json` — 4/4 phases |
+| T2.5 automated playtest | **blocked-on-human** | the run-in-roblox lane is down — see *The T2.5 lane* below |
+| **T2.7 live Studio** | **GREEN** | `tests/engine-pass/last-studio.json` — 6/6 phases, provenance 0 mismatches, 14/14 actions on the real client wire |
+| T3 human playtest | **yours** | — |
 
-**This game now boots in Roblox and its core loop runs on the live wire**, which was not true when this
-file was last written. But read the two open findings below before you play: one of them changes what
-you will see on the first frame.
+## What the second pass found, and why none of it was visible before
+
+The first pass verified the game against **the Studio place the tree had been synced into**, not the
+place the project builds. One command settled it:
+
+```sh
+rojo build default.project.json --output /tmp/dr-check.rbxlx
+grep -c SpawnLocation /tmp/dr-check.rbxlx   # 0
+grep -c Baseplate     /tmp/dr-check.rbxlx   # 0
+```
+
+Zero spawn, zero ground, zero configured Lighting. Published as-is, **you spawn at the origin with no
+floor and fall forever.** The 658 Workspace descendants the earlier pass reported as healthy were
+Studio's own template furniture.
+
+| # | what was wrong | how it was found |
+|---|---|---|
+| 1 | **No SpawnLocation and no ground in the built place** | class census of the built `.rbxlx` |
+| 2 | **No Lighting configured at all** — the spec's entire "Theme & tone" had no code behind it | the same census; the reachability gate had been WARNing it all along |
+| 3 | **The trench floor did not reach the dome ring.** A private `SHELL_SPAN_STUDS = 640`, commented as covering a 12-dome server, against a registry sized from `Players.MaxPlayers`. Measured live: 60 domes at radius 917 over a floor of half-span 320 — **every dome 629 studs over open void**. At the 200-plot ceiling the ring was at 3056 studs, and no Roblox Part may exceed 2048 | in-engine measurement, before the fix |
+| 4 | **You spawned 917 studs from your own dome** | the same |
+| 5 | **The tier "rim" was a solid neon disc over the entire trench** — `Shape = PartType.Cylinder`, 2 x 1152 x 1152, on all six tiers, covering the bottom 40% of every frame | a screenshot, then hiding six parts and re-shooting |
+| 6 | **A lit pad was a floodlight** — Neon is fullbright, rgb(64,226,255) over a 64-stud deck | the same screenshot |
+| 7 | **A place saved with a built world booted into 120 domes for 60 plots** | `buildDome` did not adopt by name the way `buildShell` did |
+
+Fixes: `shared/Layout` (the geometry, once — concentric rings, radius O(sqrt n), floor derived from
+the ring), `services/world/WorldService` (the scene and the game's one SpawnLocation), and
+`PlotService.seatFor` (you start on your own pad, and respawn there at whatever depth you died at).
+
+**970/970, gauntlet 6/6. Twelve new gates, each observed RED against the original defect, then
+restored by inverting the edit.**
+
+## Two things I got wrong, since they bear on how much to trust the rest
+
+- The humanoid reported `FloorMaterial = Neon` and I inferred the rim was under the player. It was
+  not — the **pad** is neon, because owning a plot lights it. Correct behaviour.
+- I then changed the pad and predicted the wash would clear. It did not. Hiding one candidate at a
+  time settled it in a single shot. Two plausible inferences lost to one experiment.
+
+I also told you the `tier-status` T2.7 reader could never be satisfied because `unverified[]` can
+never be empty. **That was wrong** — it never reads `unverified`. It wants six green phases, clean
+provenance, and at least one asserted-passing screenshot with none failing. The previous run was red
+because its screens phase genuinely failed on the scene, which is exactly what it is for.
+
+## Open — yours, not mine
+
+| item | why it is yours |
+|---|---|
+| **The 7 monetization asset ids** (all `0`, all inert; the game warns by name at boot) | they can only be created on the published place |
+| **`git push`** — 4 commits on `staging/deep-reach` | fenced |
+| **Is it too dark when you zoom out?** | a taste judgement. Knobs named in `last-studio.json` → finding `scene-dark-at-zoom`; `world.spec` leaves headroom (Brightness ≤ 1.5, FogEnd ≤ 600) |
+| **HUD content truncates below ~820px viewport height** | unbuilt scope — panels no longer overlap, but the catalog needs to SCROLL |
+| **`FogEnd = 420` vs the spec's "legible from across the map"** | a real tension: you cannot see the far side of an 1152-stud world. Deliberate, and your call |
+| **Your place's `Baseplate` and `SpawnLocation`** | parked in `ServerStorage.T27_ParkedPlaceFurniture`, **not deleted**. Drag them back if you want them — but the game builds its own spawn now, so two spawns would be a coin-flip |
 
 ## The four adversarial findings are all fixed (a fifth is below)
 

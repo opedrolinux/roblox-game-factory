@@ -42,20 +42,29 @@ WorldService.name = "WorldService"
 -- straight above, so a midday sun dimmed to 1 reads as "far below the waterline" where a midnight
 -- sun reads as "outdoors at night". Fog does the rest — FogEnd 420 is what makes the trench feel
 -- enclosed and is the single most load-bearing number in this table.
+-- TUNED AGAINST SCREENSHOTS, 2026-08-08, not chosen from theory. The first pass (Brightness 1,
+-- ambient rgb(12,26,38), EnvironmentDiffuseScale 0.35) read beautifully at the player's own eye
+-- height and went almost BLACK the moment the camera pulled back — and pulling the camera back is
+-- the first thing a tycoon player does. These are the midpoint between that and a trial lift, taken
+-- live in a Play session and shot from both distances.
+--
+-- AMBIENT is what was raised, not Brightness alone: Brightness lights the faces the sun reaches,
+-- which on a field of glass domes seen from above is almost nothing. Ambient lights the rest. Fog is
+-- deliberately untouched — fog is what makes it water, and it is the number to leave alone.
 WorldService.LIGHTING_NUMBERS = {
-	Brightness = 1,
+	Brightness = 1.4,
 	ClockTime = 12,
 	GeographicLatitude = 0,
-	ExposureCompensation = 0.25,
-	EnvironmentDiffuseScale = 0.35,
-	EnvironmentSpecularScale = 0.1,
+	ExposureCompensation = 0.3,
+	EnvironmentDiffuseScale = 0.5,
+	EnvironmentSpecularScale = 0.12,
 	FogStart = 48,
 	FogEnd = 420,
 }
 
 WorldService.LIGHTING_COLORS = {
-	Ambient = { 12, 26, 38 },
-	OutdoorAmbient = { 18, 42, 58 },
+	Ambient = { 20, 42, 56 },
+	OutdoorAmbient = { 28, 60, 78 },
 	ColorShift_Top = { 40, 96, 116 },
 	ColorShift_Bottom = { 6, 16, 26 },
 	FogColor = { 6, 20, 30 },
