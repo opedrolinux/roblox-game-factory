@@ -4,7 +4,7 @@
   "mode": "play",
   "verdict": "parked",
   "ok": false,
-  "label": "T2.7-parked — the wire, the world and the deltas are green; the HUD overflows its panels below ~820px of viewport height, and screenshots could not be persisted to disk from this bridge. Multi-client contention and cross-server persistence remain UNTESTABLE.",
+  "label": "T2.7-parked - wire, world and deltas green; the scene does not read as the game the spec describes (no Lighting configured at all) and a player spawns 917 studs from their own dome. Multi-client contention and cross-server persistence remain UNTESTABLE.",
   "roster": [
     "sync-provenance",
     "boot-console",
@@ -64,9 +64,9 @@
       "ok": false,
       "gating": false,
       "applicable": true,
-      "subjects": 3,
+      "subjects": 5,
       "deltas": 0,
-      "detail": "Three shots captured, each with its assertion stated BEFORE the capture; all three assertions passed, and the third is the one that VERIFIED the hud fix (the rect probe that found the defect is blind to clipping). The phase is nonetheless not green: the captures could not be written to disk from this bridge, and four of the six prescribed shots were not taken — both in unverified[]."
+      "detail": "Five shots, each with its assertion stated BEFORE the capture. Three pass (hud-play, overhead, hud-after-clip - the last VERIFIED the HUD fix, which the rect probe could not see), one FAILS (spawn-eye: the scene does not read as abyssal), one is cannot-tell (zone-dome1: legible as greybox, which v1 declares it is). Files could not be written to disk from this bridge."
     }
   ],
   "findings": [
@@ -81,16 +81,29 @@
       "status": "PARTIALLY FIXED in this session — HudRoot now builds every slot frame with ClipsDescendants = true, guarded by a falsified source-level regression case in hudroot.spec (flipping the literal to false takes it RED; ensure() cannot run under Lune because Instance is nil, which is why the assertion is on the source).",
       "verified-how": "In-engine, and NOT by the probe that found it. The rect sweep still reports 6 overlaps after the fix, because ClipsDescendants changes RENDERING while AbsolutePosition/AbsoluteSize keep reporting unclipped geometry — the instrument that found the defect is blind to its repair. The screenshot is what settled it: before, STORE and HIDE SHOP were drawn on top of the Hull Plating and Pearl Drone rows and DEPTH 1 x1 bled across the structures list; after, the structures panel truncates cleanly at Smelter Tank and both buttons sit legible below it, with no text drawn over any other text.",
       "residual": "The CAUSE is unchanged: content is still taller than its slot below ~820px of viewport height, and now truncates instead of colliding. Visible cost, stated rather than glossed — TopRight's badges (DEPTH 1 x1, NEXT 1500 Cr hull 2, rich wreck depth 5, no boost active, no passes owned) are clipped away entirely at 455px of height, so that status is unreadable rather than unreachable. Truncation beats collision (the player can read what remains, and can resize), and at >=1000px neither occurs. Letting a taller-than-its-slot catalog SCROLL is a per-controller affordance and is the named follow-up; it was not attempted here."
+    },
+    {
+      "id": "abyssal-scene-not-configured",
+      "severity": "high-for-playtest",
+      "summary": "The game configures NO Lighting at all, so an abyssal deep-sea trench renders as a bright afternoon sky over a flat plate.",
+      "measured": "Lighting is stock Roblox default in every value that matters: ClockTime 14.5, Brightness 3, Ambient and OutdoorAmbient 0.275 grey, FogColor light grey, and FogStart 0 / FogEnd 100000 - i.e. fog is effectively OFF. Its children (Sky, SunRays, Atmosphere, Bloom, DepthOfField) are the set Studio puts in every new place, not game-authored instances. Confirmed in two captures.",
+      "why": "The spec's Theme & tone is explicit - 'Quiet, high-pressure, industrial-deep-sea. Bioluminescent accents against dark water.' Nothing in src/ ever touches Lighting, so none of that exists at runtime. Same class as the invisible-night-sky precedent this rung was built on: correct in code, wrong in a picture.",
+      "alreadyFlagged": "The reachability gate has been WARNing exactly this the whole time - 'no Lighting anywhere in the tree - nothing configures the lighting the whole game is seen through' - as a non-blocking presentation WARN. It was right, and it went unread until a screenshot made it undeniable. That is an argument about the WARN tier, not about the gate.",
+      "notFixedAndWhy": "Deliberately NOT fixed. This is unbuilt scope - a theme feature the spec describes and no slice built - not a defect in built code, and building a lighting system unasked would widen the scope of an autonomous run. Surfaced for a decision instead."
+    },
+    {
+      "id": "spawn-is-917-studs-from-your-own-dome",
+      "severity": "medium-for-playtest",
+      "summary": "A player spawns ~917 studs from the plot the join hook just claimed for them, with no observed teleport.",
+      "measured": "MEASURED IN THE LIVE PLAY SESSION, not inferred: the character stood at (-4.99, 3.06, 0.63) while plot.fetch reported its claimed dome_1 at x=916.73. Nearest dome to the SpawnLocation at (0, 0.5, 0) is dome_1 at 917 studs. Trench1 by contrast is 4 studs from spawn, so the depth structure IS underfoot - it is specifically the player plot that is far away.",
+      "why": "The dome ring has radius ~917 and spawn is at the origin. The HUD says DOME 1 / your dome / secured on frame 1 while the dome itself is a dot on the horizon, so the first-frame impression is an empty plain.",
+      "notFixedAndWhy": "Not fixed: moving the spawn, teleporting on claim, or shrinking the ring are three different design answers with different consequences for the depth tiers, and choosing between them is not an autonomous call."
     }
   ],
   "unverified": [
     {
       "label": "screenshots are not persisted to disk",
       "why": "The Studio MCP bridge's screen_capture returns image data inline; it has no path argument, and store_image only reads FROM disk. So screens/*.png could not be written and screens[] carries assertions and verdicts but no file references. The images were inspected — they are evidence that was looked at, not evidence that was filed — and this rung's own rule is that an image without a written assertion is a way to feel verified, so the assertions are recorded here instead."
-    },
-    {
-      "label": "spawn-eye, horizon, zone-<n> and density shots not taken",
-      "why": "Four of the six prescribed shots are missing. The HUD is drawn over the whole viewport in Play mode and would obscure each of them, and the Edit-mode world-build path (STEP 7) was not run because the place's own bootstrap already built the world in Play. Not attempted rather than attempted-and-passed."
     },
     {
       "label": "the live service singletons are unreachable from the MCP plugin thread",
@@ -103,6 +116,10 @@
     {
       "label": "T2.5 (the automated edit-mode playtest) never ran",
       "why": "The run-in-roblox lane cannot bind its hardcoded port 50312, which now falls inside Windows' dynamic reservation 50305-50404. See tests/engine-pass/ENGINE-FACTS.md (2026-08-08). This rung ran with the rung below it unrun, which is stated rather than glossed."
+    },
+    {
+      "label": "the density and horizon shots were not taken separately",
+      "why": "The world has no dynamically spawned population to frame for density, and spawn-eye already answers horizon at this ClockTime - the sky is in frame and is the finding. Not attempted rather than attempted-and-passed."
     }
   ],
   "screens": [
@@ -126,11 +143,25 @@
       "assertion": "After HudRoot clips its slots, no text from one slot is drawn over text from another — and the panels degrade by truncating rather than colliding.",
       "verdict": "pass",
       "observed": "Same viewport (1220x455), same session shape. The structures panel now ends cleanly at 'Smelter Tank . Lv 0' and the STORE / HIDE SHOP buttons sit fully legible below it; nothing is drawn over anything else. The cost is visible and accepted: TopRight's five status badges are clipped away entirely at this height. This is the shot that verified the fix, because the rect-based probe cannot see clipping."
+    },
+    {
+      "shot": "spawn-eye",
+      "file": null,
+      "assertion": "From the spawn pad at eye height, facing the way a player faces, there is something to see on frame 1 - not a void, not the inside of geometry.",
+      "verdict": "fail",
+      "observed": "Not a void, and not inside geometry - but a BRIGHT BLUE AFTERNOON SKY over a flat cyan baseplate, with the dome ring a thin line of grey blobs on the horizon ~917 studs away. For a game whose one-line pitch is an abyssal salvage tycoon this is the wrong scene entirely. See finding abyssal-scene-not-configured."
+    },
+    {
+      "shot": "zone-dome1",
+      "file": null,
+      "assertion": "At ground level beside a claimed dome, that region reads as what it is - a player standing at their plot can tell what they are looking at.",
+      "verdict": "cannot-tell",
+      "observed": "A translucent blue dome over a dark textured pad on a grey baseplate. Legible AS GREYBOX, which v1 declares it is, so this neither passes nor fails the intent: the shapes are placed and distinct, and there is nothing thematic to read. Recorded as cannot-tell rather than pass, because cannot-tell is not a pass."
     }
   ],
   "waivers": [],
   "provenance": {
-    "gitSha": "29960a565d1ec4488faac2697d8c4ac994bd921d",
+    "gitSha": "cd6626385d8637ead7a39b28292bacd3091f8c68",
     "projectName": "deep-reach",
     "port": 34872,
     "mountCount": 3,
