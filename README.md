@@ -41,9 +41,18 @@ decides what to ship and what to kill.
 
 ## Status
 
-Bootstrapping. Phase A (structure) and the first half of Phase B are in place: the `core/`
-foundation (B1) and the safety hooks + autonomy fence (B3) are built, tested, and committed. The B4
-build pipeline has started — the `new-game` scaffolder is built and was used to fork the first game,
-**collect-sim** (gauntlet-green). Next: the remaining core modules (B2) and the rest of the pipeline
-(B4: `build-features`, `build-game`), then the first game's features (Phase C). See
-`portfolio/README.md` for live status.
+**The pipeline is built and has run end to end.** Phase A (structure), B1 (`core/`), B2 (real
+session-locked persistence), B3 (the autonomy fence, gate-zero verified) and B4 (`new-game` →
+`build-features` → `build-game`, plus the `decompose` / `contract-pass` / `fanout` /
+`integration-gate` / `adversarial-review` / `grade` workflows) are all committed.
+
+**Two games exist.** `collect-sim` (417/417, first game, T2 green) and `deep-reach` (970/970, second
+game, **built end to end by the supervised `build-game` loop** and the first to reach
+`studio-verified-T2.7` green — `tier-status` reports `ready: true`, waiting only on the human
+playtest).
+
+What is *not* done: the B2 **security suite** (rate limiting, validators, violation tracking) is
+unbuilt and every boot warns about it, so neither game is publish-safe; the top-level **work-queue →
+auto-start** loop of Phase B5 does not exist, so runs are still started by hand. See
+`portfolio/README.md` for live status, and always ask
+`lune run .claude/skills/lib/tier-status.luau <gameDir>` rather than trusting a written stage.
